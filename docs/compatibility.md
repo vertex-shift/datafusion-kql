@@ -1,0 +1,148 @@
+# KQL compatibility contract
+
+This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
+0.1 implements the typed tabular subset below. Keywords, function names, table
+names, and column names are case-sensitive. Unsupported syntax/functions return
+an error; there is no SQL fallback.
+
+## Sources and bindings
+
+| Construct | Supported behavior |
+| --- | --- |
+| Tables | Existing session table providers; one-, two-, and three-component catalog paths |
+| Escaped identifiers | `['column name']`, including literal dots |
+| `let` | Scalar expressions, tabular plans, aliases, nested lexical scopes |
+| Parenthesized queries | Nested pipelines and scoped `let` statements |
+| `print` | One row of scalar expressions |
+| `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan` columns |
+| `range` | Inclusive, lazy native `generate_series`; non-null `long` bounds/step, including descending ranges |
+| `union` | Source form and pipe form |
+
+Tabular bindings are inlined plans, **not materialized results**. Reusing one can
+rescan its inputs. Scalar bindings retain expressions, matching KQL's binding
+rather than assignment model. Use a new pipe to reference a newly extended
+column; assignments in a single `extend` resolve against its input.
+
+## Tabular operators
+
+| Operators | Notes |
+| --- | --- |
+| `where`, `filter` | Native boolean expressions; null predicates drop rows |
+| `project`, `extend` | Named expressions, column selection, `*`; replacement columns move to the end with `extend` |
+| `project-away`, `project-keep` | Column names and `*` patterns; preserve input column order |
+| `project-rename` | `New=Old`; preserve input column order |
+| `summarize` | Named aggregate calls and arbitrary scalar grouping expressions; group-only form |
+| `sort`, `order` | Default **descending/nulls last**; ascending defaults to nulls first; explicit null placement |
+| `top` | Literal nonnegative count, one sort expression; default descending |
+| `take`, `limit` | Literal nonnegative counts; no ordering guarantee without a sort |
+| `distinct` | Scalar expressions or `*` |
+| `count` | One `Count:long` result column, including zero for empty input |
+| `join` | Default `innerunique`; explicit `inner`, `leftouter`, `rightouter`, `fullouter`, left/right semi and anti |
+| `union` | Default outer; inner intersection; align by name and preserve duplicate rows |
+
+Joins accept a table or parenthesized query on the right. Keys can be `on Key`
+or `$left.Key == $right.OtherKey`, with comma/`and` conjunctions. The default
+`innerunique` deduplicates the left by its keys using native `DistinctOn`.
+Selection among duplicate left rows is unspecified. Null join keys do not match.
+Both key columns remain in ordinary join outputs; conflicting right names get
+numeric suffixes. Suffix selection avoids overwriting other output columns.
+
+Union's conflicting-type schema splitting is **not implemented**: the same name
+with different non-string Arrow types errors instead of silently coercing data.
+Use explicit conversions before union. UTF-8 Arrow string representations align
+to `Utf8`. Missing strings become empty strings; other missing values are typed
+nulls.
+
+## Expressions and functions
+
+- Literals: signed 64-bit integers, floating point, booleans, single/double quoted
+  strings, backslash escapes, verbatim `@` strings, typed null constructors,
+  `datetime(...)`, and `timespan(...)`.
+- Timespans: `d`, `h`, `m`, `s`, `ms`, `us`, `ns`, `tick`/`ticks`,
+  `microsecond(s)`, decimal quantities, and `[d.]hh:mm:ss[.fraction]`.
+  Bare numbers inside `timespan(...)` represent days. Conversion uses integer
+  arithmetic, not floating point.
+- Arithmetic `+ - * / %`, comparisons `== != < <= > >=`, `and`, `or`, unary
+  `!`, `not()`, unary signs, and parentheses.
+- Inclusive `between`/`!between`, including a timespan upper offset for datetimes.
+- Scalar-constant-list `in`, `!in`, `in~`, `!in~`. Case-insensitive list membership
+  folds ASCII characters only.
+- `contains`, `startswith`, `endswith` and negations are case-insensitive;
+  `_cs` variants are case-sensitive. Substrings are literal, not SQL LIKE
+  patterns. `has`/`has_cs` use Unicode alphanumeric term boundaries and a
+  constant single alphanumeric right-hand term. Multi-term/punctuated needles
+  are rejected. `matches regex` uses DataFusion's Rust-regex
+  dialect, not every .NET regex construct supported by Kusto.
+- `now([offset])`, `ago(offset)`: one consistent instant per planning call,
+  folded into timestamp literals for predicate pushdown.
+- `bin(value,size)` / two-argument `floor`: numeric, timespan, and timestamp
+  binning; negative numbers round down and nonpositive sizes produce null.
+  Integer binning preserves precision beyond `2^53`; timestamp and timespan bin
+  sizes must be scalar constants.
+- `iff`/`iif`, `case`, `isnull`, `isnotnull`, `isempty`, `isnotempty`, `coalesce`.
+  String coalesce skips empty strings.
+- `tostring`, `tolong`, `toint`, `toreal`/`todouble`, `tobool`, `todatetime`,
+  scalar type constructors; failed conversions use Arrow `TRY_CAST` semantics.
+- `strcat`, `strlen`, `tolower`, `toupper`, `substring` (zero-based),
+  `replace_string`.
+- Other names already registered in the session scalar registry are callable
+  with **their DataFusion-defined semantics**. This is an extension point, not
+  a promise that every SQL function has Kusto semantics. The frontend does not
+  install or overwrite session functions.
+
+## Aggregations
+
+`count`, `countif`, `sum`, `sumif`, `avg`, `avgif`, `min`, `minif`, `max`,
+`maxif`, `dcount`, `dcountif`, `count_distinct`, `stdev`, and `variance` are lowered
+to native aggregates. Registered DataFusion aggregate functions are also
+callable in `summarize`.
+
+Aggregate input overloads follow DataFusion's supported Arrow types. Additional
+Kusto-specific overloads, such as `sum(timespan)`, are not yet implemented.
+
+`count()` counts rows, including rows with nulls; `count(column)` also counts all
+rows. Native filters implement conditional aggregates. Counts are signed
+`long`. Sum, sample variance, and sample standard deviation default to zero for
+empty/all-null inputs. Other numeric aggregates use DataFusion defaults; notably
+empty `avg` is null (some Kusto workloads expose NaN here). Group-less summarize
+returns a row on empty input; grouped summarize returns none.
+
+Standard aggregate names such as `count_`, `sum_Value`, and grouping
+`bin(Timestamp,1h)` -> `Timestamp` are generated. Repeated generated names receive
+numeric suffixes. Use explicit aliases when output names are part of an API.
+Each summarize output currently must be a root aggregate call; use `extend`
+after summarize for aggregate arithmetic.
+
+`dcount` uses DataFusion's approximate-distinct algorithm, **not Kusto's
+accuracy-configurable HLL implementation**. Accuracy arguments are rejected.
+Use `count_distinct` for exact counts. Percentiles and dynamic/list/bag
+aggregations are not yet implemented.
+
+## Type and execution boundaries
+
+- KQL's nullable equality differs from SQL: one-null equality is false,
+  one-null inequality is true, and two nulls produce `bool(null)`. Lowering
+  preserves this in projected expressions, filters, negation, and membership.
+- Strings cannot be null in KQL. Nullable Arrow strings from tables and outer
+  joins are normalized with native `coalesce`, without mutating the underlying
+  provider or changing SQL queries in the same session. This can add work and
+  restrict string-predicate pushdown for nullable source fields. Non-null source
+  schemas avoid that cost. UTF-8, large UTF-8, UTF-8 views, and dictionary-encoded
+  strings are accepted; dictionary strings are decoded with a native cast.
+- `datetime` and `timespan` literals use Arrow signed 64-bit **nanoseconds**.
+  This does not cover Kusto's full year 0001–9999 datetime range or its full
+  timespan range; out-of-range literals error rather than wrap.
+- Numeric overflow, Unicode casing/collation, casts, regex dialect, floating-point
+  NaN/infinity ordering, and approximate aggregation can differ from the Kusto
+  service. No string term index is installed: `has` scans Arrow batches using
+  native regex kernels, rather than promising Kusto's indexed search complexity.
+- Only one final tabular result is supported. Management commands, dynamic JSON,
+  parameter declarations, user-defined KQL functions, `materialize`, `render`,
+  hints, `make-series`, window/serialization operators, and `mv-*` are future
+  work. See [the delivery plan](architecture.md).
+- Default parsing limits: 1 MiB of query text, nesting/expression depth 64,
+  and 128 operators per pipeline. `parse_with_options` permits changing these
+  within the parser's supported nesting bounds. Expanded expression and plan
+  budgets also reject pathological `let` expansion. Input datasets are not
+  capped by these frontend limits; configure DataFusion runtime memory/spilling
+  and application-level query timeouts separately.
