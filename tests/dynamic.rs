@@ -290,3 +290,11 @@ async fn mv_expand_can_add_named_expressions() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn dynamic_membership_flattens_arrays_and_coalesce_preserves_types() {
+    check(
+        "print a=1 in (dynamic([1,2])),b='ABC' in~ (dynamic(['abc'])),c=dynamic(null) in (dynamic([null])),d=dynamic(3) !in (dynamic([1,2])),e=gettype(coalesce(dynamic(null),dynamic(42))),f=tostring(coalesce(dynamic(null),dynamic({'a':1})))",
+        &[&["true","true","<null>","true","long","{\"a\":1}"]],
+    ).await;
+}

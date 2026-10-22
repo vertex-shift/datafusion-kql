@@ -77,6 +77,12 @@ pub(crate) fn is_dynamic(ty: &DataType) -> bool {
     ty == &data_type()
 }
 
+pub(crate) fn from_json(value: &Json) -> Result<ScalarValue> {
+    let mut builder = Builder::new(1);
+    builder.append_json(value)?;
+    ScalarValue::try_from_array(&builder.finish()?, 0)
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Value<'a> {
     Null,
@@ -350,6 +356,11 @@ fn failure(message: impl Into<String>) -> DataFusionError {
 pub(crate) enum Kernel {
     IntoDynamic,
     ParseJson,
+    EncodeJson,
+    Coalesce,
+    DecodeList {
+        limit: usize,
+    },
     Get,
     GetType,
     Convert(DataType),
@@ -360,6 +371,10 @@ pub(crate) enum Kernel {
         columns: usize,
     },
     Equal(bool),
+    Membership {
+        negated: bool,
+        insensitive: bool,
+    },
     ArrayLength,
     PackArray,
     BagPack,
@@ -387,9 +402,11 @@ pub(crate) enum Kernel {
 impl Kernel {
     fn output_type(&self) -> DataType {
         match self {
-            Self::GetType | Self::StrcatArray => DataType::Utf8,
+            Self::GetType | Self::StrcatArray | Self::EncodeJson => DataType::Utf8,
             Self::ArrayLength | Self::ArrayIndexOf => DataType::Int64,
-            Self::Equal(_) | Self::BagHasKey | Self::ArrayHas => DataType::Boolean,
+            Self::Equal(_) | Self::BagHasKey | Self::ArrayHas | Self::Membership { .. } => {
+                DataType::Boolean
+            }
             Self::ArraySum => DataType::Float64,
             Self::Convert(ty) | Self::TypeOnly(ty) => ty.clone(),
             Self::Expand { columns, .. } => DataType::List(Arc::new(Field::new(
@@ -407,6 +424,9 @@ impl Kernel {
             match self {
                 Self::IntoDynamic => "dynamic",
                 Self::ParseJson => "parse_json",
+                Self::EncodeJson => "to_json",
+                Self::Coalesce => "dynamic_coalesce",
+                Self::DecodeList { .. } => "decode_ordered_list",
                 Self::Get => "dynamic_get",
                 Self::GetType => "gettype",
                 Self::Convert(DataType::Utf8) => "dynamic_tostring",
@@ -421,6 +441,7 @@ impl Kernel {
                 Self::Expand { .. } => "mv_expand_values",
                 Self::Equal(false) => "dynamic_eq",
                 Self::Equal(true) => "dynamic_ne",
+                Self::Membership { .. } => "dynamic_membership",
                 Self::ArrayLength => "array_length",
                 Self::PackArray => "pack_array",
                 Self::BagPack => "bag_pack",
@@ -451,6 +472,8 @@ impl Kernel {
         let valid = match self {
             Self::IntoDynamic
             | Self::ParseJson
+            | Self::EncodeJson
+            | Self::DecodeList { .. }
             | Self::GetType
             | Self::Convert(_)
             | Self::TypeOnly(_)
@@ -477,6 +500,7 @@ impl Kernel {
             | Self::SetUnion
             | Self::SetIntersect => len >= 2,
             Self::Expand { columns, .. } => len >= 1 && len == *columns,
+            Self::Coalesce | Self::Membership { .. } => len >= 1,
         };
         if valid {
             Ok(())
@@ -544,6 +568,31 @@ impl ScalarUDFImpl for Function {
             .iter()
             .all(|v| matches!(v, ColumnarValue::Scalar(_)));
         let count = if scalar { 1 } else { args.number_rows };
+        if let Kernel::DecodeList { limit } = self.kernel {
+            let array = args.args[0].to_array(1)?;
+            let lists = downcast::<ListArray>(&array)?;
+            let mut builder = Builder::new(count);
+            for row in 0..count {
+                let mut items = Vec::new();
+                if !lists.is_null(row) {
+                    let values = lists.value(row);
+                    let values = downcast::<StringArray>(&values)?;
+                    for value in values.iter().flatten().take(limit) {
+                        items
+                            .push(serde_json::from_str(value).map_err(|e| failure(e.to_string()))?);
+                    }
+                }
+                builder.append_json(&Json::Array(items))?;
+            }
+            let output = builder.finish()?;
+            return if scalar {
+                Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(
+                    &output, 0,
+                )?))
+            } else {
+                Ok(ColumnarValue::Array(output))
+            };
+        }
         let inputs = args
             .args
             .iter()
@@ -553,10 +602,17 @@ impl ScalarUDFImpl for Function {
             convert(&inputs[0], ty, matches!(self.kernel, Kernel::TypeOnly(_)))?
         } else if matches!(self.kernel, Kernel::Expand { .. }) {
             expand(&self.kernel, &inputs, count)?
-        } else if self.kernel == Kernel::IntoDynamic {
+        } else if matches!(self.kernel, Kernel::IntoDynamic | Kernel::Coalesce) {
             let mut builder = Builder::new(count);
             for row in 0..count {
-                builder.append(inputs[0].value(row)?)?;
+                let mut selected = Value::Null;
+                for input in &inputs {
+                    selected = input.value(row)?;
+                    if !matches!(selected, Value::Null) {
+                        break;
+                    }
+                }
+                builder.append(selected)?;
             }
             builder.finish()?
         } else {
@@ -766,6 +822,7 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
             Value::String(text) => serde_json::from_str(text).unwrap_or_else(|_| text.into()),
             value => value.json()?,
         },
+        K::EncodeJson => values[0].json()?.to_string().into(),
         K::Get => {
             let value = values[0].json()?;
             match (value, values[1]) {
@@ -798,6 +855,43 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
             } else {
                 let equal = values[0].json()? == values[1].json()?;
                 Json::Bool(if *negated { !equal } else { equal })
+            }
+        }
+        K::Membership {
+            negated,
+            insensitive,
+        } => {
+            let mut needle = values[0].json()?;
+            let mut list = Vec::new();
+            fn flatten(value: Json, list: &mut Vec<Json>) -> Result<()> {
+                if let Json::Array(items) = value {
+                    for item in items {
+                        flatten(item, list)?;
+                    }
+                } else {
+                    size(list.len() + 1)?;
+                    list.push(value);
+                }
+                Ok(())
+            }
+            for value in &values[1..] {
+                flatten(value.json()?, &mut list)?;
+            }
+            if *insensitive {
+                if let Json::String(text) = &mut needle {
+                    text.make_ascii_lowercase();
+                }
+                for value in &mut list {
+                    if let Json::String(text) = value {
+                        text.make_ascii_lowercase();
+                    }
+                }
+            }
+            if needle.is_null() && list.iter().any(Json::is_null) {
+                Json::Null
+            } else {
+                let found = !needle.is_null() && list.contains(&needle);
+                (if *negated { !found } else { found }).into()
             }
         }
         K::ArrayLength => json_array(values[0])?.map_or(Json::Null, |a| a.len().into()),
@@ -1095,7 +1189,12 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
             };
             Json::Array(result)
         }
-        K::IntoDynamic | K::Convert(_) | K::TypeOnly(_) | K::Expand { .. } => {
+        K::IntoDynamic
+        | K::Coalesce
+        | K::Convert(_)
+        | K::TypeOnly(_)
+        | K::Expand { .. }
+        | K::DecodeList { .. } => {
             return Err(failure("invalid dynamic kernel dispatch"));
         }
     })

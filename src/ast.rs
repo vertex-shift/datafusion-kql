@@ -283,3 +283,68 @@ pub enum BinaryOp {
     NotEndsWithCs,
     MatchesRegex,
 }
+
+impl Expr {
+    pub(crate) fn map_children(
+        &self,
+        mut map: impl FnMut(&Self) -> crate::Result<Self>,
+    ) -> crate::Result<Self> {
+        let kind = match &self.kind {
+            ExprKind::Call { name, args } => ExprKind::Call {
+                name: name.clone(),
+                args: args.iter().map(&mut map).collect::<crate::Result<_>>()?,
+            },
+            ExprKind::Dynamic(expr) => ExprKind::Dynamic(Box::new(map(expr)?)),
+            ExprKind::Array(items) => {
+                ExprKind::Array(items.iter().map(&mut map).collect::<crate::Result<_>>()?)
+            }
+            ExprKind::Object(items) => ExprKind::Object(
+                items
+                    .iter()
+                    .map(|(name, value)| Ok((name.clone(), map(value)?)))
+                    .collect::<crate::Result<_>>()?,
+            ),
+            ExprKind::Access { expr, index } => ExprKind::Access {
+                expr: Box::new(map(expr)?),
+                index: Box::new(map(index)?),
+            },
+            ExprKind::Unary { op, expr } => ExprKind::Unary {
+                op: *op,
+                expr: Box::new(map(expr)?),
+            },
+            ExprKind::Binary { left, op, right } => ExprKind::Binary {
+                left: Box::new(map(left)?),
+                op: *op,
+                right: Box::new(map(right)?),
+            },
+            ExprKind::InList {
+                expr,
+                values,
+                negated,
+                case_insensitive,
+            } => ExprKind::InList {
+                expr: Box::new(map(expr)?),
+                values: values.iter().map(&mut map).collect::<crate::Result<_>>()?,
+                negated: *negated,
+                case_insensitive: *case_insensitive,
+            },
+            ExprKind::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => ExprKind::Between {
+                expr: Box::new(map(expr)?),
+                low: Box::new(map(low)?),
+                high: Box::new(map(high)?),
+                negated: *negated,
+            },
+            _ => self.kind.clone(),
+        };
+        Ok(Self {
+            kind,
+            span: self.span,
+            depth: self.depth,
+        })
+    }
+}

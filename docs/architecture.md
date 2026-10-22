@@ -77,8 +77,9 @@ errors rather than silently execute with different semantics.
 ## Later compatibility milestones
 
 - Dynamic JSON values, property access, bag/array/set functions, and `mv-expand`
-  are implemented. Continue with `mv-apply`, `parse`, `extract`, and collection
-  aggregations.
+  are implemented, together with bounded collection aggregation, nearest-rank
+  percentiles, correlated row-selection aggregates, and aggregate arithmetic.
+  Continue with `mv-apply`, `parse`, and `extract`.
 - Time-series operators (`make-series`, series functions), window/serialization
   semantics, `scan`, and `partition`.
 - Broader aggregate coverage, Kusto-specific approximate algorithms, schema

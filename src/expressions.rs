@@ -141,11 +141,37 @@ impl Expressions<'_> {
                 case_insensitive,
             } => {
                 let value = self.lower(expr, schema, false)?;
+                let lowered = values
+                    .iter()
+                    .map(|item| {
+                        let value = self.lower(item, &DFSchema::empty(), false)?;
+                        Ok(lit(self.constant(value, item.span)?))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                if dynamic::is_dynamic(&value.get_type(schema)?)
+                    || lowered
+                        .iter()
+                        .map(|v| v.get_type(&DFSchema::empty()))
+                        .collect::<datafusion::error::Result<Vec<_>>>()?
+                        .iter()
+                        .any(dynamic::is_dynamic)
+                {
+                    let mut args = vec![value];
+                    args.extend(lowered);
+                    return Ok(dynamic::call(
+                        Kernel::Membership {
+                            negated: *negated,
+                            insensitive: *case_insensitive,
+                        },
+                        args,
+                    ));
+                }
                 let mut contains_null = false;
                 let mut list = Vec::with_capacity(values.len());
-                for item in values {
-                    let item_expr = self.lower(item, &DFSchema::empty(), false)?;
-                    let scalar = self.constant(item_expr, item.span)?;
+                for item in lowered {
+                    let Expr::Literal(scalar, _) = item else {
+                        unreachable!("list values are literal");
+                    };
                     if scalar.is_null() {
                         contains_null = true;
                     } else {
@@ -438,7 +464,10 @@ impl Expressions<'_> {
         {
             return self.arithmetic(right, op, left, schema, span);
         }
-        if right_type.is_integer() && matches!(op, BinaryOp::Divide | BinaryOp::Modulo) {
+        if left_type.is_integer()
+            && right_type.is_integer()
+            && matches!(op, BinaryOp::Divide | BinaryOp::Modulo)
+        {
             right = self.function("nullif", vec![right, cast(lit(0_i64), right_type)])?;
         }
         Ok(match op {
@@ -639,6 +668,15 @@ impl Expressions<'_> {
                         span,
                     ));
                 }
+                if values
+                    .iter()
+                    .map(|v| v.get_type(schema))
+                    .collect::<datafusion::error::Result<Vec<_>>>()?
+                    .iter()
+                    .any(dynamic::is_dynamic)
+                {
+                    return Ok(dynamic::call(Kernel::Coalesce, values));
+                }
                 let strings = values
                     .iter()
                     .map(|v| v.get_type(schema))
@@ -689,21 +727,7 @@ impl Expressions<'_> {
                 self.function("replace", values)?
             }
             _ => {
-                if matches!(
-                    name,
-                    "count"
-                        | "countif"
-                        | "dcount"
-                        | "dcountif"
-                        | "count_distinct"
-                        | "sumif"
-                        | "avgif"
-                        | "minif"
-                        | "maxif"
-                        | "stdev"
-                        | "variance"
-                ) || self.state.aggregate_functions().contains_key(name)
-                {
+                if crate::aggregation::is_aggregate(self.state, name) {
                     return Err(Error::unsupported(
                         "aggregation functions must appear in summarize",
                         span,

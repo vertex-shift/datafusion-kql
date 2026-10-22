@@ -14,6 +14,8 @@
 //! # }
 //! ```
 
+mod aggregate_functions;
+mod aggregation;
 pub mod ast;
 mod dynamic;
 mod error;

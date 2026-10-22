@@ -11,7 +11,7 @@ use datafusion::common::{Column, DFSchema, ScalarValue, TableReference};
 use datafusion::dataframe::DataFrame;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::session_state::SessionState;
-use datafusion::logical_expr::expr_fn::{ExprFunctionExt, cast};
+use datafusion::logical_expr::expr_fn::cast;
 use datafusion::logical_expr::registry::FunctionRegistry;
 use datafusion::logical_expr::{Expr, ExprSchemable, JoinType, LogicalPlan, LogicalPlanBuilder};
 use datafusion::prelude::{SessionContext, lit};
@@ -575,169 +575,14 @@ impl<'s> Planner<'s> {
         aggregates: &[NamedExpr],
         by: &[NamedExpr],
     ) -> Result<LogicalPlan> {
-        let mut used = HashSet::new();
-        let expressions = self.expressions();
-        let mut groups = Vec::with_capacity(by.len());
-        for (i, item) in by.iter().enumerate() {
-            groups.push(
-                expressions
-                    .scalar(&item.expr, plan.schema())?
-                    .alias(output_name(item, i, &mut used)?),
-            );
-        }
-        let mut roots = Vec::with_capacity(aggregates.len());
-        let mut root_indices = HashMap::new();
-        let mut internal_names = used.clone();
-        let mut outputs = Vec::with_capacity(aggregates.len());
-        for (index, item) in aggregates.iter().enumerate() {
-            let ExprKind::Call { name, args } = &item.expr.kind else {
-                return Err(Error::unsupported(
-                    "summarize currently requires an aggregate call per output expression",
-                    item.expr.span,
-                ));
-            };
-            let (native, filtered, distinct, zero, signed) = match name.as_str() {
-                "count" => ("count", false, false, false, false),
-                "countif" => ("count", true, false, false, false),
-                "dcount" => ("approx_distinct", false, false, false, true),
-                "dcountif" => ("approx_distinct", true, false, false, true),
-                "count_distinct" => ("count", false, true, false, false),
-                "sum" | "sumif" => ("sum", name == "sumif", false, true, false),
-                "avg" | "avgif" => ("avg", name == "avgif", false, false, false),
-                "min" | "minif" => ("min", name == "minif", false, false, false),
-                "max" | "maxif" => ("max", name == "maxif", false, false, false),
-                "stdev" => ("stddev_samp", false, false, true, false),
-                "variance" => ("var_samp", false, false, true, false),
-                custom if self.state.aggregate_functions().contains_key(custom) => {
-                    (custom, false, false, false, false)
-                }
-                _ => {
-                    return Err(Error::unsupported(
-                        format!("aggregate '{name}'"),
-                        item.expr.span,
-                    ));
-                }
-            };
-            let (values, filter) = if name == "count" {
-                if args.len() > 1 {
-                    return Err(Error::syntax(
-                        "count expects zero or one argument",
-                        item.expr.span,
-                    ));
-                }
-                if let Some(arg) = args.first()
-                    && !matches!(arg.kind, ExprKind::Wildcard)
-                {
-                    expressions.scalar(arg, plan.schema())?;
-                }
-                (vec![lit(1_i64)], None)
-            } else if name == "countif" {
-                if args.len() != 1 {
-                    return Err(Error::syntax(
-                        "countif expects one predicate",
-                        item.expr.span,
-                    ));
-                }
-                (
-                    vec![lit(1_i64)],
-                    Some(expressions.predicate(&args[0], plan.schema())?),
-                )
-            } else {
-                let standard = matches!(
-                    name.as_str(),
-                    "dcount"
-                        | "dcountif"
-                        | "count_distinct"
-                        | "sum"
-                        | "sumif"
-                        | "avg"
-                        | "avgif"
-                        | "min"
-                        | "minif"
-                        | "max"
-                        | "maxif"
-                        | "stdev"
-                        | "variance"
-                );
-                let expected = if filtered { 2 } else { 1 };
-                if standard && args.len() != expected {
-                    return Err(Error::unsupported(
-                        format!(
-                            "{name} currently requires {expected} argument(s); accuracy parameters are not implemented"
-                        ),
-                        item.expr.span,
-                    ));
-                }
-                let value_args = if filtered {
-                    &args[..args.len() - 1]
-                } else {
-                    args.as_slice()
-                };
-                let values = value_args
-                    .iter()
-                    .map(|arg| expressions.scalar(arg, plan.schema()))
-                    .collect::<Result<Vec<_>>>()?;
-                let filter = if filtered {
-                    Some(expressions.predicate(&args[args.len() - 1], plan.schema())?)
-                } else {
-                    None
-                };
-                (values, filter)
-            };
-            let mut aggregate = self.state.udaf(native)?.call(values);
-            if distinct {
-                aggregate = aggregate.distinct().build()?;
-            }
-            if let Some(filter) = filter {
-                aggregate = aggregate.filter(filter).build()?;
-            }
-            let root = if let Some(root) = root_indices.get(&aggregate) {
-                *root
-            } else {
-                let root = roots.len();
-                root_indices.insert(aggregate.clone(), root);
-                let native_name = aggregate.name_for_alias()?;
-                if !internal_names.insert(native_name) {
-                    let mut suffix = root;
-                    let mut internal = format!("__kql_aggregate_{suffix}");
-                    while !internal_names.insert(internal.clone()) {
-                        suffix += 1;
-                        internal = format!("__kql_aggregate_{suffix}");
-                    }
-                    aggregate = aggregate.alias(internal);
-                }
-                roots.push(aggregate);
-                root
-            };
-            outputs.push((root, output_name(item, index, &mut used)?, zero, signed));
-        }
-        let result = LogicalPlanBuilder::from(plan)
-            .aggregate(groups, roots)?
-            .build()?;
-        let mut projected = (0..by.len())
-            .map(|index| field_expr(&result, index))
-            .collect::<Vec<_>>();
-        for (root, name, zero, signed) in outputs {
-            let index = by.len() + root;
-            let mut expression = field_expr(&result, index);
-            if zero {
-                expression = expressions.function(
-                    "coalesce",
-                    vec![
-                        expression,
-                        cast(lit(0_i64), result.schema().field(index).data_type().clone()),
-                    ],
-                )?;
-            } else if signed {
-                expression = cast(expression, DataType::Int64);
-            }
-            projected.push(expression.alias(name));
-        }
-        self.normalize_strings(
-            LogicalPlanBuilder::from(result)
-                .project(projected)?
-                .build()?,
-        )
+        self.normalize_strings(crate::aggregation::plan(
+            self.state,
+            &self.scalars,
+            self.now,
+            plan,
+            aggregates,
+            by,
+        )?)
     }
 
     fn normalize_strings(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
@@ -941,7 +786,11 @@ fn field_expr(plan: &LogicalPlan, index: usize) -> Expr {
     Expr::Column(Column::from(plan.schema().qualified_field(index)))
 }
 
-fn output_name(item: &NamedExpr, index: usize, used: &mut HashSet<String>) -> Result<String> {
+pub(crate) fn output_name(
+    item: &NamedExpr,
+    index: usize,
+    used: &mut HashSet<String>,
+) -> Result<String> {
     if let Some(name) = &item.name {
         if !used.insert(name.clone()) {
             return Err(Error::syntax(
@@ -976,6 +825,27 @@ fn default_name(expr: &ast::Expr, index: usize) -> String {
                 && let Some(column) = column
             {
                 return column.clone();
+            }
+            let name = match name.as_str() {
+                "make_list" | "make_list_if" | "make_list_with_nulls" | "makelist" => "list",
+                "make_set" | "make_set_if" | "makeset" => "set",
+                "make_bag" | "make_bag_if" | "make_dictionary" => "bag",
+                "take_any" | "any" | "take_anyif" => "any",
+                "percentiles_array" | "percentilesw_array" => "percentiles",
+                name => name,
+            };
+            if matches!(name, "percentile" | "percentilew") && args.len() >= 2 {
+                let rank = match &args[args.len() - 1].kind {
+                    ExprKind::Literal(ast::Literal::Integer(value)) => value.to_string(),
+                    ExprKind::Literal(ast::Literal::Real(value)) => {
+                        value.to_string().replace('.', "_")
+                    }
+                    _ => format!("{}", index + 1),
+                };
+                return format!(
+                    "percentile_{}_{rank}",
+                    column.map(String::as_str).unwrap_or("")
+                );
             }
             format!("{name}_{}", column.map(String::as_str).unwrap_or(""))
         }

@@ -131,12 +131,13 @@ after an untyped expansion to request conversion.
 ## Aggregations
 
 `count`, `countif`, `sum`, `sumif`, `avg`, `avgif`, `min`, `minif`, `max`,
-`maxif`, `dcount`, `dcountif`, `count_distinct`, `stdev`, and `variance` are lowered
+`maxif`, `dcount`, `dcountif`, `count_distinct`/`count_distinctif`, sample/population
+standard deviation and variance (including conditional variants) are lowered
 to native aggregates. Registered DataFusion aggregate functions are also
 callable in `summarize`.
 
-Aggregate input overloads follow DataFusion's supported Arrow types. Additional
-Kusto-specific overloads, such as `sum(timespan)`, are not yet implemented.
+Timespan `sum`, `sumif`, `avg`, and `avgif` preserve duration output types.
+Other input overloads follow DataFusion's supported Arrow types.
 
 `count()` counts rows, including rows with nulls; `count(column)` also counts all
 rows. Native filters implement conditional aggregates. Counts are signed
@@ -148,13 +149,39 @@ returns a row on empty input; grouped summarize returns none.
 Standard aggregate names such as `count_`, `sum_Value`, and grouping
 `bin(Timestamp,1h)` -> `Timestamp` are generated. Repeated generated names receive
 numeric suffixes. Use explicit aliases when output names are part of an API.
-Each summarize output currently must be a root aggregate call; use `extend`
-after summarize for aggregate arithmetic.
+Scalar expressions over aggregate calls are supported directly, including
+arithmetic, conditionals, casts, and grouping keys. Equivalent aggregate calls
+share native accumulator state.
+
+`make_list`, `make_list_if`, `make_list_with_nulls`, `make_set`, `make_set_if`,
+`make_bag`, and `make_bag_if` return dynamic collections. Unordered collection
+accumulators enforce `maxSize` while accumulating/merging, report memory usage to
+DataFusion, and support partial/final aggregation. Ordered lists use native
+order-sensitive `array_agg`, preserving ordering across partitions before
+applying the output limit. That ordered path can buffer more than `maxSize`;
+configure the host's memory budget. Keep sort keys available until summarize.
+Empty inputs return `[]` or `{}`. Null list/set inputs are ignored unless
+`make_list_with_nulls` is used. Legacy `makelist`/`makeset` default to 128 items;
+modern functions default to, and are capped at, 1,048,576 items.
+
+`take_any`, `take_anyif`, `arg_max`, and `arg_min` support row selection.
+Multi-column and wildcard selections use one native struct-valued aggregate,
+so returned columns come from the same row. Ties are unspecified.
+
+`percentile`, `percentiles`, `percentiles_array` and weighted variants
+`percentilew`, `percentilesw`, `percentilesw_array` implement nearest-rank
+selection, not linear interpolation. Multiple requested percentiles share one
+state. Integer samples preserve precision beyond `2^53`; zero weights are
+ignored and negative weights fail conversion. The implementation currently
+stores samples with memory accounting and performs exact rank selection rather
+than using Kusto's approximate t-digest. It therefore uses more memory for large
+groups. Ranks must be constant and within 0-100; at most 1024 ranks are allowed.
+Multi-column percentiles use generated output names; rename them afterward.
 
 `dcount` uses DataFusion's approximate-distinct algorithm, **not Kusto's
 accuracy-configurable HLL implementation**. Accuracy arguments are rejected.
-Use `count_distinct` for exact counts. Percentiles and dynamic/list/bag
-aggregations are not yet implemented.
+Use `count_distinct` for exact counts. Dynamic distinct counts use canonical JSON
+representations and continue to ignore nulls.
 
 ## Type and execution boundaries
 
