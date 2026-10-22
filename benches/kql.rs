@@ -19,6 +19,11 @@ const ROWS: usize = 1_000_000;
 const JSON_ROWS: usize = 100_000;
 const JSON_QUERY: &str = "JsonEvents | extend Payload=parse_json(Raw) | project Service=tostring(Payload.service), Latency=Payload.latencies | mv-expand Latency to typeof(long) | summarize Total=sum(Latency) by Service";
 const SERIES_QUERY: &str = "Events | make-series Total=sum(Value) default=0 on Value from 0 to 100 step 1 by Category | project Category, Smoothed=series_fir(Total, dynamic([1,2,1]))";
+const PARTITION_QUERY: &str =
+    "Events | partition hint.strategy=native by Category (top 3 by Value) | summarize N=count()";
+const SCAN_QUERY: &str = "Events | scan declare(Total:long=0) with(step s:true=>Total=s.Total+Value;) | summarize Peak=max(Total)";
+const STATE_SCAN_QUERY: &str = "Events | take 10000 | scan declare(Total:long=0) with(step s:true=>Total=iff(s.Total>10000,Value,s.Total+Value);) | summarize Peak=max(Total)";
+const APPLY_QUERY: &str = "JsonEvents | take 1000 | extend P=parse_json(Raw) | mv-apply v=P.latencies to typeof(long) on (top 2 by v | summarize Total=sum(v)) | summarize Total=sum(Total)";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -141,6 +146,10 @@ fn benchmarks(c: &mut Criterion) {
     for (name, query, context, rows, expected_rows) in [
         ("json_expand", JSON_QUERY, &json, JSON_ROWS, 2),
         ("make_series_fir", SERIES_QUERY, &ctx, ROWS, 4),
+        ("partition_top", PARTITION_QUERY, &ctx, ROWS, 1),
+        ("scan_cumulative", SCAN_QUERY, &ctx, ROWS, 1),
+        ("scan_stateful", STATE_SCAN_QUERY, &ctx, 10_000, 1),
+        ("mv_apply_top", APPLY_QUERY, &json, 1_000, 1),
     ] {
         let plan = runtime.block_on(async {
             context
@@ -151,6 +160,19 @@ fn benchmarks(c: &mut Criterion) {
                 .await
                 .unwrap()
         });
+        let native = displayable(plan.as_ref()).indent(false).to_string();
+        if name == "partition_top" {
+            assert!(
+                !native.contains("KqlApplyExec"),
+                "partition benchmark must use the vectorized fast path"
+            );
+        }
+        if name == "scan_cumulative" {
+            assert!(
+                native.contains("WindowAggExec") && !native.contains("KqlScanExec"),
+                "cumulative benchmark must use native windows"
+            );
+        }
         let result = runtime.block_on(async {
             collect(
                 reset_plan_states(Arc::clone(&plan)).unwrap(),

@@ -36,6 +36,10 @@ capacity estimates.
 | `execution/sql` | Execute the equivalent SQL physical plan over the same data |
 | `workloads/json_expand` | Parse 100,000 JSON payloads, extract fields, expand three latencies per payload, and aggregate by service |
 | `workloads/make_series_fir` | Aggregate 1,000,000 rows into four 100-point series and apply a normalized three-tap FIR filter |
+| `workloads/partition_top` | Native per-category top-three windows over 1,000,000 rows, followed by a count |
+| `workloads/scan_cumulative` | Native cumulative-window scan over 1,000,000 nonnullable longs, followed by a maximum |
+| `workloads/scan_stateful` | Conditional state-machine scan over 10,000 rows, followed by a maximum |
+| `workloads/mv_apply_top` | Parse 1,000 payloads and run native per-row top-two/aggregation subqueries |
 
 The fixture uses two non-null columns, four in-memory partitions, a filter,
 grouped sum, and top-k. Source data and physical planning are outside the

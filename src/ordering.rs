@@ -181,6 +181,8 @@ fn any_expression(expression: &ast::Expr, predicate: fn(&str) -> bool) -> bool {
         ExprKind::InList { expr, values, .. } => {
             any_expression(expr, predicate) || values.iter().any(|e| any_expression(e, predicate))
         }
+        ExprKind::InTabular { expr, query, .. } => any_expression(expr, predicate) || needed(query),
+        ExprKind::InPrepared { expr, .. } => any_expression(expr, predicate),
         ExprKind::Between {
             expr, low, high, ..
         } => [expr, low, high]

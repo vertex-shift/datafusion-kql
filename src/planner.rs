@@ -28,6 +28,8 @@ use crate::ordering;
 
 type PlanFuture<'a> = Pin<Box<dyn Future<Output = Result<LogicalPlan>> + Send + 'a>>;
 type ExpressionFuture<'a> = Pin<Box<dyn Future<Output = Result<ast::Expr>> + Send + 'a>>;
+type MembershipFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(LogicalPlan, ast::Expr)>> + Send + 'a>>;
 type LegsFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<(String, LogicalPlan)>>> + Send + 'a>>;
 
 /// Plan a previously parsed query against this session's current catalog.
@@ -69,6 +71,7 @@ struct Planner<'a> {
     scalars: HashMap<String, Expr>,
     tables: HashMap<String, LogicalPlan>,
     functions: Functions,
+    deferred: Functions,
     parameters: QueryParameters,
     now: i64,
     next_alias: usize,
@@ -92,6 +95,7 @@ impl<'s> Planner<'s> {
             scalars: HashMap::new(),
             tables: HashMap::new(),
             functions: HashMap::new(),
+            deferred: HashMap::new(),
             parameters: parameters.clone(),
             now,
             next_alias: 0,
@@ -114,6 +118,7 @@ impl<'s> Planner<'s> {
             &self.parameters,
             &mut self.next_alias,
             schema,
+            &mut self.deferred,
         )
     }
 
@@ -243,7 +248,22 @@ impl<'s> Planner<'s> {
                     BindingValue::Scalar(expr) => {
                         let expr = self.expand_expression(expr, &DFSchema::empty())?;
                         let expr = self.resolve_expression(&expr).await?;
-                        let value = self.expressions().scalar(&expr, &DFSchema::empty())?;
+                        let empty = LogicalPlanBuilder::empty(true).build()?;
+                        let (prepared, expr) = self.membership(empty, &expr).await?;
+                        let value = self.expressions().scalar(&expr, prepared.schema())?;
+                        let value = if prepared.inputs().is_empty() {
+                            value
+                        } else {
+                            Expr::ScalarSubquery(datafusion::logical_expr::Subquery {
+                                subquery: Arc::new(
+                                    LogicalPlanBuilder::from(prepared)
+                                        .project(vec![value.alias("value")])?
+                                        .build()?,
+                                ),
+                                outer_ref_columns: Vec::new(),
+                                spans: datafusion::common::Spans::new(),
+                            })
+                        };
                         self.tables.remove(&binding.name);
                         self.functions.remove(&binding.name);
                         self.scalars.insert(binding.name.clone(), value);
@@ -372,13 +392,18 @@ impl<'s> Planner<'s> {
                 }
                 Source::Subquery(query) => self.query(query).await,
                 Source::Print(items) => {
-                    let plan = LogicalPlanBuilder::empty(true).build()?;
+                    let mut plan = LogicalPlanBuilder::empty(true).build()?;
                     let items = if self.functions.is_empty() {
                         items.clone()
                     } else {
                         self.expander(plan.schema()).named(items)?
                     };
-                    let items = self.resolve_named(&items).await?;
+                    let mut items = self.resolve_named(&items).await?;
+                    for item in &mut items {
+                        let (input, expr) = self.membership(plan, &item.expr).await?;
+                        plan = input;
+                        item.expr = expr;
+                    }
                     let expressions = self.named_expressions(&items, plan.schema())?;
                     Ok(LogicalPlanBuilder::from(plan)
                         .project(expressions)?
@@ -424,6 +449,202 @@ impl<'s> Planner<'s> {
 
     fn resolve_expression<'a>(&'a mut self, expr: &'a ast::Expr) -> ExpressionFuture<'a> {
         Box::pin(async move {
+            if !expr.any(|kind| {
+                matches!(
+                    kind,
+                    ExprKind::ToScalar(_)
+                        | ExprKind::DeferredCall { .. }
+                        | ExprKind::InTabular { .. }
+                        | ExprKind::InList { .. }
+                )
+            }) {
+                return Ok(expr.clone());
+            }
+            let membership = match &expr.kind {
+                ExprKind::InTabular {
+                    expr,
+                    query,
+                    negated,
+                    case_insensitive,
+                } => Some((
+                    expr.as_ref().clone(),
+                    query.as_ref().clone(),
+                    *negated,
+                    *case_insensitive,
+                )),
+                ExprKind::InList {
+                    expr,
+                    values,
+                    negated,
+                    case_insensitive,
+                } if values.len() == 1 => {
+                    let source = match &values[0].kind {
+                        ExprKind::Identifier(name) if !self.scalars.contains_key(&name[0]) => {
+                            let reference = table_reference(name, values[0].span)?;
+                            let exists = self.tables.contains_key(&name[0])
+                                || self.functions.get(&name[0]).is_some_and(|f| f.tabular())
+                                || self
+                                    .state
+                                    .schema_for_ref(reference.clone())?
+                                    .table_exist(reference.table());
+                            exists.then(|| Source::Table {
+                                name: name.clone(),
+                                span: values[0].span,
+                            })
+                        }
+                        ExprKind::Call { name, args }
+                            if self.functions.get(name).is_some_and(|f| f.tabular()) =>
+                        {
+                            Some(Source::Call {
+                                name: name.clone(),
+                                args: scalar_arguments(args),
+                                span: values[0].span,
+                            })
+                        }
+                        _ => None,
+                    };
+                    source.map(|source| {
+                        (
+                            expr.as_ref().clone(),
+                            ast::Query {
+                                bindings: Vec::new(),
+                                pipeline: ast::Pipeline {
+                                    source,
+                                    operators: Vec::new(),
+                                },
+                            },
+                            *negated,
+                            *case_insensitive,
+                        )
+                    })
+                }
+                _ => None,
+            };
+            if let Some((value, query, negated, case_insensitive)) = membership {
+                let value = self.resolve_expression(&value).await?;
+                let input = ordering::visible(self.query(&query).await?)?;
+                if input.schema().fields().is_empty() {
+                    return Err(Error::syntax(
+                        "tabular membership requires a result column",
+                        expr.span,
+                    ));
+                }
+                let column = field_expr(&input, 0);
+                let column = if case_insensitive {
+                    self.expressions().ascii_lower(column)?
+                } else {
+                    column
+                };
+                let input = LogicalPlanBuilder::from(input)
+                    .project(vec![column.alias("value")])?
+                    .build()?;
+                let name = format!("__kql_membership_query_{}", self.next_alias);
+                self.next_alias += 1;
+                self.scalars.insert(
+                    name.clone(),
+                    Expr::ScalarSubquery(datafusion::logical_expr::Subquery {
+                        subquery: Arc::new(input),
+                        outer_ref_columns: Vec::new(),
+                        spans: datafusion::common::Spans::new(),
+                    }),
+                );
+                return Ok(ast::Expr {
+                    kind: ExprKind::InPrepared {
+                        expr: Box::new(value),
+                        binding: name,
+                        negated,
+                        case_insensitive,
+                    },
+                    span: expr.span,
+                    depth: expr.depth,
+                });
+            }
+            if let ExprKind::DeferredCall { name, args } = &expr.kind {
+                let function = self.deferred.get(name).cloned().ok_or_else(|| {
+                    Error::syntax("scalar function closure is no longer in scope", expr.span)
+                })?;
+                let mut prepared = Vec::new();
+                for arg in args {
+                    prepared.push(self.resolve_expression(arg).await?);
+                }
+                let names = prepared
+                    .iter()
+                    .map(|arg| match &arg.kind {
+                        ExprKind::NamedArgument { name, .. } => Some(name.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let slots = crate::functions::arguments(
+                    &function.definition.parameters,
+                    &names,
+                    expr.span,
+                )?;
+                let mut child = Self::new(self.state, self.track_order, &self.parameters)?;
+                child.now = self.now;
+                child.scalars = function.scalars.clone();
+                child.tables = function.tables.clone();
+                child.functions = function.functions.clone();
+                for (parameter, slot) in function.definition.parameters.iter().zip(slots) {
+                    let ast::ParameterType::Scalar(ty) = parameter.ty else {
+                        return Err(Error::syntax(
+                            "a scalar closure requires scalar arguments",
+                            expr.span,
+                        ));
+                    };
+                    let value = if let Some(index) = slot {
+                        let argument = match &prepared[index].kind {
+                            ExprKind::NamedArgument { value, .. } => value.as_ref(),
+                            _ => &prepared[index],
+                        };
+                        self.expressions().scalar(argument, &DFSchema::empty())?
+                    } else {
+                        child.expressions().scalar(
+                            parameter.default.as_ref().ok_or_else(|| {
+                                Error::syntax("missing function argument", expr.span)
+                            })?,
+                            &DFSchema::empty(),
+                        )?
+                    };
+                    let value = crate::expressions::parameter_cast(
+                        value,
+                        ty,
+                        &DFSchema::empty(),
+                        expr.span,
+                    )?;
+                    child.tables.remove(&parameter.name);
+                    child.functions.remove(&parameter.name);
+                    child.scalars.insert(parameter.name.clone(), value);
+                }
+                let ast::FunctionBody::Scalar(value) = &function.definition.body else {
+                    return Err(Error::syntax("expected a scalar function body", expr.span));
+                };
+                let query = ast::Query {
+                    bindings: function.definition.bindings.clone(),
+                    pipeline: ast::Pipeline {
+                        source: Source::Print(vec![NamedExpr {
+                            name: Some("value".into()),
+                            expr: value.clone(),
+                        }]),
+                        operators: Vec::new(),
+                    },
+                };
+                let input = child.query(&query).await?;
+                let name = self.temporary_name(&input);
+                let input = crate::materialize::plan(input, name)?;
+                let value = Expr::ScalarSubquery(datafusion::logical_expr::Subquery {
+                    subquery: Arc::new(input),
+                    outer_ref_columns: Vec::new(),
+                    spans: datafusion::common::Spans::new(),
+                });
+                let name = format!("__kql_scalar_function_{}", self.next_alias);
+                self.next_alias += 1;
+                self.scalars.insert(name.clone(), value);
+                return Ok(ast::Expr {
+                    kind: ExprKind::BindingReference(name),
+                    span: expr.span,
+                    depth: 1,
+                });
+            }
             if let ExprKind::ToScalar(argument) = &expr.kind {
                 let input = match argument.as_ref() {
                     ast::ArgumentValue::Tabular(query) => self.query(query).await?,
@@ -521,6 +742,158 @@ impl<'s> Planner<'s> {
         })
     }
 
+    fn membership<'a>(
+        &'a mut self,
+        mut plan: LogicalPlan,
+        expr: &'a ast::Expr,
+    ) -> MembershipFuture<'a> {
+        Box::pin(async move {
+            if !expr.any(|kind| matches!(kind, ExprKind::InPrepared { .. })) {
+                return Ok((plan, expr.clone()));
+            }
+            let mut children = Vec::new();
+            expr.map_children(|child| {
+                children.push(child.clone());
+                Ok(child.clone())
+            })?;
+            let mut prepared = Vec::new();
+            for child in &children {
+                let (input, value) = self.membership(plan, child).await?;
+                plan = input;
+                prepared.push(value);
+            }
+            let mut prepared = prepared.into_iter();
+            let expr = expr.map_children(|_| {
+                Ok(prepared
+                    .next()
+                    .expect("one membership expression per child"))
+            })?;
+            let ExprKind::InPrepared {
+                expr: value,
+                binding,
+                negated,
+                case_insensitive,
+            } = &expr.kind
+            else {
+                return Ok((plan, expr));
+            };
+            let Some(Expr::ScalarSubquery(subquery)) = self.scalars.get(binding) else {
+                return Err(Error::Plan(
+                    "tabular membership query is no longer in scope".into(),
+                ));
+            };
+            let mut right = subquery.subquery.as_ref().clone();
+            let value = self.expressions().scalar(value, plan.schema())?;
+            if dynamic::is_dynamic(&value.get_type(plan.schema())?)
+                || dynamic::is_dynamic(right.schema().field(0).data_type())
+            {
+                return Err(Error::unsupported(
+                    "cast dynamic tabular membership operands to scalar types",
+                    expr.span,
+                ));
+            }
+            let value = if *case_insensitive {
+                self.expressions().ascii_lower(value)?
+            } else {
+                value
+            };
+            let nullable = value.nullable(plan.schema())?;
+            let has_rows = if nullable {
+                let name = self.temporary_name(&right);
+                right = crate::materialize::plan(right, name)?;
+                let limited = LogicalPlanBuilder::from(right.clone())
+                    .limit(0, Some(1))?
+                    .build()?;
+                let count = self
+                    .state
+                    .udaf("count")?
+                    .call(vec![lit(1_i64)])
+                    .alias("count");
+                let count = LogicalPlanBuilder::from(limited)
+                    .aggregate(Vec::<Expr>::new(), vec![count])?
+                    .build()?;
+                Some(
+                    Expr::ScalarSubquery(datafusion::logical_expr::Subquery {
+                        subquery: Arc::new(count),
+                        outer_ref_columns: Vec::new(),
+                        spans: datafusion::common::Spans::new(),
+                    })
+                    .gt(lit(0_i64)),
+                )
+            } else {
+                None
+            };
+            let alias = self.temporary_name(&right);
+            let right = LogicalPlanBuilder::from(right).alias(alias)?.build()?;
+            let key = field_expr(&right, 0);
+            let joined = LogicalPlanBuilder::from(plan)
+                .join_on(right, JoinType::LeftMark, vec![value.clone().eq(key)])?
+                .build()?;
+            let mark = field_expr(&joined, joined.schema().fields().len() - 1);
+            let result = if let Some(has_rows) = has_rows {
+                datafusion::logical_expr::expr_fn::when(
+                    value.is_null().and(has_rows),
+                    lit(ScalarValue::Boolean(None)),
+                )
+                .otherwise(mark)?
+            } else {
+                mark
+            };
+            let result = if *negated { !result } else { result };
+            let name = self.temporary_name(&joined);
+            let mut projection = (0..joined.schema().fields().len() - 1)
+                .map(|i| field_expr(&joined, i))
+                .collect::<Vec<_>>();
+            projection.push(ordering::helper(result, name.clone(), false));
+            plan = LogicalPlanBuilder::from(joined)
+                .project(projection)?
+                .build()?;
+            let binding = format!("{name}_binding");
+            self.scalars
+                .insert(binding.clone(), Expr::Column(Column::from_name(name)));
+            Ok((
+                plan,
+                ast::Expr {
+                    kind: ExprKind::BindingReference(binding),
+                    span: expr.span,
+                    depth: 1,
+                },
+            ))
+        })
+    }
+
+    async fn membership_operator(
+        &mut self,
+        mut plan: LogicalPlan,
+        operator: &Operator,
+    ) -> Result<(LogicalPlan, Operator)> {
+        if !operator
+            .expression_refs()
+            .iter()
+            .any(|expr| expr.any(|kind| matches!(kind, ExprKind::InPrepared { .. })))
+        {
+            return Ok((plan, operator.clone()));
+        }
+        let mut values = Vec::new();
+        operator.map_expressions(|value| {
+            values.push(value.clone());
+            Ok(value.clone())
+        })?;
+        let mut prepared = Vec::new();
+        for value in &values {
+            let (input, value) = self.membership(plan, value).await?;
+            plan = input;
+            prepared.push(value);
+        }
+        let mut prepared = prepared.into_iter();
+        let operator = operator.map_expressions(|_| {
+            Ok(prepared
+                .next()
+                .expect("one membership expression per operator expression"))
+        })?;
+        Ok((plan, operator))
+    }
+
     async fn resolve_named(&mut self, items: &[NamedExpr]) -> Result<Vec<NamedExpr>> {
         let mut result = Vec::new();
         for item in items {
@@ -533,6 +906,19 @@ impl<'s> Planner<'s> {
     }
 
     async fn resolve_operator(&mut self, operator: &Operator) -> Result<Operator> {
+        if !operator.expression_refs().iter().any(|expr| {
+            expr.any(|kind| {
+                matches!(
+                    kind,
+                    ExprKind::ToScalar(_)
+                        | ExprKind::DeferredCall { .. }
+                        | ExprKind::InTabular { .. }
+                        | ExprKind::InList { .. }
+                )
+            })
+        }) {
+            return Ok(operator.clone());
+        }
         let mut values = Vec::new();
         operator.map_expressions(|expr| {
             values.push(expr.clone());
@@ -771,6 +1157,13 @@ impl<'s> Planner<'s> {
                 span: original.span,
             };
             let original = &prepared;
+            let (input, kind) = self.membership_operator(plan, &original.kind).await?;
+            plan = input;
+            let membership_prepared = ast::SpannedOperator {
+                kind,
+                span: original.span,
+            };
+            let original = &membership_prepared;
             if matches!(original.kind, Operator::Serialize(_))
                 && ordering::ordinal(plan.schema()).is_none()
             {

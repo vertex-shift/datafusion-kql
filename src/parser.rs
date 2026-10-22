@@ -1386,6 +1386,21 @@ impl<'a> Parser<'a, '_> {
                 if keyword == Some("in") {
                     let case_insensitive = self.eat(Kind::Tilde);
                     self.expect(Kind::LParen)?;
+                    if self.looks_tabular() {
+                        let query = self.query()?;
+                        self.expect(Kind::RParen)?;
+                        left = self.node(
+                            ExprKind::InTabular {
+                                expr: Box::new(left),
+                                query: Box::new(query),
+                                negated,
+                                case_insensitive,
+                            },
+                            Span::new(start, self.tokens[self.pos - 1].span.end),
+                            depth + 1,
+                        )?;
+                        continue;
+                    }
                     let mut values = Vec::new();
                     if !self.at(&Kind::RParen) {
                         loop {

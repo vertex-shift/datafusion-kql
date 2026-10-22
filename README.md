@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.2 typed-tabular, dynamic/JSON, window and time-series
+**Status:** version 0.3 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -18,6 +18,7 @@ cargo run --example quickstart
 cargo run --example telemetry_json
 cargo run --example time_series
 cargo run --example functions
+cargo run --example grouped_scan
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -140,6 +141,9 @@ tabular schemas, and `invoke`. Functions expand into ordinary native
 expressions/plans, without installing anything in the session registry.
 Parameterless `view` functions participate in wildcard discovery, and lazy
 `toscalar` supports staged scalar calculations from tabular subqueries.
+Row-independent scalar functions can contain tabular local bindings and scalar
+subqueries. Runtime scalar values can drive lazy native table ranges, and
+`in`/`!in` support tabular queries with KQL-specific null semantics.
 
 `materialize(...)` and `as hint.materialized=true` create lazy shared Arrow
 snapshots for repeated subqueries. Input partitions execute in parallel once,

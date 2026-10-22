@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.2 implements the typed tabular and dynamic subset below. Keywords, function
+0.3 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -57,9 +57,12 @@ most 128 parameters; scalar expansion has depth/node budgets.
 in wildcard source/union discovery, shadow providers with the same name, and
 retain lexical captures. Ordinary functions do not participate in wildcards.
 
-Scalar functions containing tabular local statements or scalar subqueries and
-Kusto's static opaque-schema restrictions for `(*)` parameters remain
-compatibility work.
+Scalar functions containing tabular local statements and scalar subqueries are
+planned in their captured lexical scope. Their arguments must be row-independent;
+passing a caller column into such a function fails rather than turning the
+subquery into a per-row scan. Nested helper functions and default/named arguments
+retain those rules. Kusto's static opaque-schema restrictions for `(*)`
+parameters remain compatibility work.
 
 ## Scalar subqueries
 
@@ -72,9 +75,22 @@ are supported. Caller-row correlation is rejected, rather than being evaluated
 once per row with different semantics.
 
 Table-valued function calls and bare table bindings can be used as arguments.
-Scalar subqueries cannot yet supply arguments that require frontend constant
-evaluation, such as tabular range bounds, collection limits, or format patterns.
-Scalar functions containing their own `toscalar` remain a future extension.
+Scalar subqueries can supply tabular range bounds/steps. The range evaluates its
+scalar arguments at execution time, then streams the ordinary native
+`generate_series` provider; planning remains lazy, even for very large ranges
+followed by `take`. Null/zero/invalid runtime arguments fail explicitly.
+Other frontend-constant arguments, such as collection limits and format
+patterns, still require values that can be folded without executing a subquery.
+
+`in`, `!in`, `in~`, and `!in~` accept a tabular query, named table, or tabular
+function and compare against its first column. Native mark joins implement
+membership without row-by-row table scans. Null nonmatches are false for
+nonnull left values, while a null left value remains null for a nonempty set
+and false for an empty set; negation preserves those distinctions. Nullable
+left inputs share a memory-accounted RHS snapshot for the existence/emptiness
+checks. Case-insensitive variants fold ASCII only. Dynamic operands must first
+be cast to scalar values; nested dynamic flattening for tabular membership is
+not implemented.
 
 ## Tabular operators
 
@@ -165,7 +181,7 @@ spill. Unbounded input plans are rejected.
 - Arithmetic `+ - * / %`, comparisons `== != < <= > >=`, `and`, `or`, unary
   `!`, `not()`, unary signs, and parentheses.
 - Inclusive `between`/`!between`, including a timespan upper offset for datetimes.
-- Scalar-constant-list `in`, `!in`, `in~`, `!in~`. Case-insensitive list membership
+- Scalar-constant-list and tabular-query `in`, `!in`, `in~`, `!in~`. Case-insensitive list membership
   folds ASCII characters only.
 - `contains`, `startswith`, `endswith` and negations are case-insensitive;
   `_cs` variants are case-sensitive. Substrings are literal, not SQL LIKE
@@ -482,8 +498,8 @@ representations and continue to ignore nulls.
   service. No string term index is installed: `has` scans Arrow batches using
   native regex kernels, rather than promising Kusto's indexed search complexity.
 - Only one final tabular result is supported. Management commands,
-  scalar-subquery functions, `render`,
-  hints, additional window/scan operators, and `mv-apply` are future
+  `render`, additional hints, legacy explicit-source partition syntax, and
+  advanced signal-processing operators are future
   work. See [the delivery plan](architecture.md).
 - Default parsing limits: 1 MiB of query text, nesting/expression depth 64,
   and 128 operators per pipeline. `parse_with_options` permits changing these

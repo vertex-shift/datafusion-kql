@@ -97,8 +97,9 @@ errors rather than silently execute with different semantics.
   implemented. Continue with Kusto-specific approximate algorithms and hints.
 - Typed request parameters and lexically captured scalar/tabular functions with
   `invoke` are implemented through native expression/plan expansion. Continue
-  with scalar-subquery functions. Lazy scalar subqueries and wildcard-discovered
-  lexical views are implemented.
+  with wider constant-argument contexts. Lazy scalar subqueries, lexical
+  scalar-query functions, runtime native range bounds, tabular membership,
+  and wildcard-discovered lexical views are implemented.
 - Explicit materialization uses a lazy native table source and a shared Arrow
   cache boundary. It preserves parallel input execution, reports retained
   memory to the host pool, and does not change the host's planner or registry.

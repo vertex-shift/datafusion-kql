@@ -33,6 +33,7 @@ mod ordering;
 mod parser;
 mod parsing;
 mod planner;
+mod range_source;
 mod ranges;
 mod regex_extract;
 mod scan;

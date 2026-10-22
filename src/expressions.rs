@@ -127,7 +127,7 @@ impl Expressions<'_> {
     fn lower(&self, expr: &ast::Expr, schema: &DFSchema, filter: bool) -> Result<Expr> {
         Ok(match &expr.kind {
             ExprKind::Literal(value) => lit(literal_value(value, expr.span)?),
-            ExprKind::ToScalar(_) => {
+            ExprKind::ToScalar(_) | ExprKind::DeferredCall { .. } | ExprKind::InTabular { .. } => {
                 return Err(Error::Plan(
                     "scalar subquery was not prepared by the planner".into(),
                 ));
@@ -291,6 +291,40 @@ impl Expressions<'_> {
                         self.function("coalesce", vec![result, lit(false)])?
                     }
                 };
+                if *negated { result.not() } else { result }
+            }
+            ExprKind::InPrepared {
+                expr,
+                binding,
+                negated,
+                case_insensitive,
+            } => {
+                let Some(Expr::ScalarSubquery(subquery)) = self.scalars.get(binding) else {
+                    return Err(Error::Plan(
+                        "tabular membership query is no longer in scope".into(),
+                    ));
+                };
+                let value = self.lower(expr, schema, false)?;
+                if dynamic::is_dynamic(&value.get_type(schema)?)
+                    || dynamic::is_dynamic(subquery.subquery.schema().field(0).data_type())
+                {
+                    return Err(Error::unsupported(
+                        "cast dynamic tabular membership operands to a scalar type",
+                        expr.span,
+                    ));
+                }
+                let value = if *case_insensitive {
+                    self.ascii_lower(value)?
+                } else {
+                    value
+                };
+                let raw = datafusion::logical_expr::expr_fn::in_subquery(
+                    value.clone(),
+                    Arc::clone(&subquery.subquery),
+                );
+                let fallback =
+                    when(value.is_null(), lit(ScalarValue::Boolean(None))).otherwise(lit(false))?;
+                let result = self.function("coalesce", vec![raw, fallback])?;
                 if *negated { result.not() } else { result }
             }
             ExprKind::Between {
@@ -568,7 +602,7 @@ impl Expressions<'_> {
         })
     }
 
-    fn ascii_lower(&self, expr: Expr) -> Result<Expr> {
+    pub(crate) fn ascii_lower(&self, expr: Expr) -> Result<Expr> {
         self.function(
             "translate",
             vec![

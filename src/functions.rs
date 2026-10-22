@@ -19,6 +19,7 @@ pub(crate) struct BoundFunction {
     pub functions: Functions,
     pub values: HashMap<String, ast::Expr>,
     tabular: bool,
+    deferred: bool,
 }
 
 impl BoundFunction {
@@ -43,6 +44,7 @@ impl BoundFunction {
                 .map(|(name, function)| (name.clone(), function.tabular)),
         );
         let tabular = infer_tabular(&definition, &symbols);
+        let deferred = query_planning(&definition, &functions, &symbols);
         Self {
             definition,
             scalars,
@@ -50,6 +52,7 @@ impl BoundFunction {
             functions,
             values,
             tabular,
+            deferred,
         }
     }
 
@@ -111,6 +114,7 @@ pub(crate) struct Expander<'a> {
     pub parameters: &'a QueryParameters,
     pub next: &'a mut usize,
     pub schema: &'a DFSchema,
+    deferred: &'a mut Functions,
     nodes: usize,
 }
 
@@ -121,6 +125,7 @@ impl<'a> Expander<'a> {
         parameters: &'a QueryParameters,
         next: &'a mut usize,
         schema: &'a DFSchema,
+        deferred: &'a mut Functions,
     ) -> Self {
         Self {
             functions,
@@ -128,6 +133,7 @@ impl<'a> Expander<'a> {
             parameters,
             next,
             schema,
+            deferred,
             nodes: 0,
         }
     }
@@ -256,7 +262,35 @@ impl<'a> Expander<'a> {
                 return self.call(Arc::clone(function), args, scope, expr.span, depth + 1);
             }
         }
-        if matches!(expr.kind, ExprKind::ToScalar(_)) {
+        if let ExprKind::InList {
+            expr: value,
+            values,
+            negated,
+            case_insensitive,
+        } = &expr.kind
+            && values.len() == 1
+            && let ExprKind::Call { name, .. } = &values[0].kind
+            && scope
+                .map_or(self.functions, |scope| &scope.functions)
+                .get(name)
+                .is_some_and(|f| f.tabular())
+        {
+            let value = self.expand(value, scope, depth + 1)?;
+            return Ok(ast::Expr {
+                kind: ExprKind::InList {
+                    expr: Box::new(value),
+                    values: values.clone(),
+                    negated: *negated,
+                    case_insensitive: *case_insensitive,
+                },
+                span: expr.span,
+                depth: expr.depth,
+            });
+        }
+        if matches!(
+            expr.kind,
+            ExprKind::ToScalar(_) | ExprKind::InTabular { .. }
+        ) {
             if scope.is_some() {
                 return Err(Error::unsupported(
                     "scalar subqueries in scalar functions require a row-independent closure",
@@ -299,6 +333,30 @@ impl<'a> Expander<'a> {
                 "a tabular function cannot be used as a scalar",
                 span,
             ));
+        }
+        if function.deferred {
+            let args = args
+                .iter()
+                .map(|arg| match &arg.kind {
+                    ExprKind::NamedArgument { name, value } => Ok(ast::Expr {
+                        kind: ExprKind::NamedArgument {
+                            name: name.clone(),
+                            value: Box::new(self.expand(value, outer, depth + 1)?),
+                        },
+                        span: arg.span,
+                        depth: arg.depth,
+                    }),
+                    _ => self.expand(arg, outer, depth + 1),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let key = format!("__kql_deferred_function_{}", self.next);
+            *self.next += 1;
+            self.deferred.insert(key.clone(), function);
+            return Ok(ast::Expr {
+                kind: ExprKind::DeferredCall { name: key, args },
+                span,
+                depth: 1,
+            });
         }
         let names = args
             .iter()
@@ -407,6 +465,58 @@ impl<'a> Expander<'a> {
         };
         self.expand(body, Some(&scope), depth + 1)
     }
+}
+
+fn query_planning(
+    definition: &ast::Function,
+    functions: &Functions,
+    symbols: &HashMap<String, bool>,
+) -> bool {
+    fn expression(
+        expr: &ast::Expr,
+        functions: &Functions,
+        symbols: &HashMap<String, bool>,
+    ) -> bool {
+        if matches!(
+            expr.kind,
+            ExprKind::ToScalar(_) | ExprKind::InTabular { .. }
+        ) {
+            return true;
+        }
+        if let ExprKind::Call { name, .. } = &expr.kind
+            && functions
+                .get(name)
+                .is_some_and(|function| function.deferred || function.tabular)
+        {
+            return true;
+        }
+        if let ExprKind::InList { values, .. } = &expr.kind
+            && values.len() == 1
+            && matches!(&values[0].kind,ExprKind::Identifier(name) if symbols.get(&name[0])==Some(&true))
+        {
+            return true;
+        }
+        let mut found = false;
+        expr.map_children(|child| {
+            found |= expression(child, functions, symbols);
+            Ok(child.clone())
+        })
+        .expect("function-planning inspection does not fail");
+        found
+    }
+    definition
+        .bindings
+        .iter()
+        .any(|binding| match &binding.value {
+            BindingValue::Tabular(_) => true,
+            BindingValue::Scalar(value) => expression(value, functions, symbols),
+            BindingValue::Function(function) => query_planning(function, functions, symbols),
+            BindingValue::Parameter { .. } => false,
+        })
+        || match &definition.body {
+            FunctionBody::Scalar(value) => expression(value, functions, symbols),
+            FunctionBody::Tabular(_) => false,
+        }
 }
 
 fn infer_tabular(definition: &ast::Function, outer: &HashMap<String, bool>) -> bool {

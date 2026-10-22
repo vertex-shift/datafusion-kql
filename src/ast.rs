@@ -368,6 +368,11 @@ pub enum ExprKind {
     BindingReference(String),
     Literal(Literal),
     ToScalar(Box<ArgumentValue>),
+    #[doc(hidden)]
+    DeferredCall {
+        name: String,
+        args: Vec<Expr>,
+    },
     Cast {
         expr: Box<Expr>,
         ty: ScalarType,
@@ -400,6 +405,19 @@ pub enum ExprKind {
     InList {
         expr: Box<Expr>,
         values: Vec<Expr>,
+        negated: bool,
+        case_insensitive: bool,
+    },
+    InTabular {
+        expr: Box<Expr>,
+        query: Box<Query>,
+        negated: bool,
+        case_insensitive: bool,
+    },
+    #[doc(hidden)]
+    InPrepared {
+        expr: Box<Expr>,
+        binding: String,
         negated: bool,
         case_insensitive: bool,
     },
@@ -467,6 +485,40 @@ pub enum BinaryOp {
 }
 
 impl Expr {
+    pub(crate) fn any(&self, predicate: impl Fn(&ExprKind) -> bool + Copy) -> bool {
+        if predicate(&self.kind) {
+            return true;
+        }
+        match &self.kind {
+            ExprKind::Call { args, .. }
+            | ExprKind::DeferredCall { args, .. }
+            | ExprKind::Array(args) => args.iter().any(|expr| expr.any(predicate)),
+            ExprKind::Dynamic(expr)
+            | ExprKind::Cast { expr, .. }
+            | ExprKind::Unary { expr, .. }
+            | ExprKind::NamedArgument { value: expr, .. }
+            | ExprKind::InPrepared { expr, .. }
+            | ExprKind::InTabular { expr, .. } => expr.any(predicate),
+            ExprKind::Binary { left, right, .. }
+            | ExprKind::Access {
+                expr: left,
+                index: right,
+            } => left.any(predicate) || right.any(predicate),
+            ExprKind::Object(items) => items.iter().any(|(_, expr)| expr.any(predicate)),
+            ExprKind::ToScalar(value) => match value.as_ref() {
+                ArgumentValue::Scalar(expr) => expr.any(predicate),
+                ArgumentValue::Tabular(_) => false,
+            },
+            ExprKind::InList { expr, values, .. } => {
+                expr.any(predicate) || values.iter().any(|expr| expr.any(predicate))
+            }
+            ExprKind::Between {
+                expr, low, high, ..
+            } => expr.any(predicate) || low.any(predicate) || high.any(predicate),
+            _ => false,
+        }
+    }
+
     pub(crate) fn map_children(
         &self,
         mut map: impl FnMut(&Self) -> crate::Result<Self>,
@@ -484,6 +536,10 @@ impl Expr {
                 ArgumentValue::Scalar(expr) => ArgumentValue::Scalar(map(expr)?),
                 ArgumentValue::Tabular(query) => ArgumentValue::Tabular(query.clone()),
             })),
+            ExprKind::DeferredCall { name, args } => ExprKind::DeferredCall {
+                name: name.clone(),
+                args: args.iter().map(&mut map).collect::<crate::Result<_>>()?,
+            },
             ExprKind::Call { name, args } => ExprKind::Call {
                 name: name.clone(),
                 args: args.iter().map(&mut map).collect::<crate::Result<_>>()?,
@@ -522,6 +578,28 @@ impl Expr {
                 negated: *negated,
                 case_insensitive: *case_insensitive,
             },
+            ExprKind::InTabular {
+                expr,
+                query,
+                negated,
+                case_insensitive,
+            } => ExprKind::InTabular {
+                expr: Box::new(map(expr)?),
+                query: query.clone(),
+                negated: *negated,
+                case_insensitive: *case_insensitive,
+            },
+            ExprKind::InPrepared {
+                expr,
+                binding,
+                negated,
+                case_insensitive,
+            } => ExprKind::InPrepared {
+                expr: Box::new(map(expr)?),
+                binding: binding.clone(),
+                negated: *negated,
+                case_insensitive: *case_insensitive,
+            },
             ExprKind::Between {
                 expr,
                 low,
@@ -544,6 +622,45 @@ impl Expr {
 }
 
 impl Operator {
+    pub(crate) fn expression_refs(&self) -> Vec<&Expr> {
+        match self {
+            Self::Where(expr) | Self::Take(expr) | Self::Parse { input: expr, .. } => vec![expr],
+            Self::Project(items) | Self::Extend(items) | Self::Serialize(items) => {
+                items.iter().map(|i| &i.expr).collect()
+            }
+            Self::MvExpand { columns, .. } | Self::MvApply { columns, .. } => {
+                columns.iter().map(|c| &c.value.expr).collect()
+            }
+            Self::Summarize { aggregates, by } => {
+                aggregates.iter().chain(by).map(|i| &i.expr).collect()
+            }
+            Self::MakeSeries(series) => series
+                .aggregates
+                .iter()
+                .flat_map(|a| std::iter::once(&a.value.expr).chain(a.default.iter()))
+                .chain(series.by.iter().map(|b| &b.expr))
+                .chain([&series.axis, &series.step])
+                .chain(series.from.iter())
+                .chain(series.to.iter())
+                .collect(),
+            Self::Sort(keys) => keys.iter().map(|k| &k.expr).collect(),
+            Self::Top { count, key } => vec![count, &key.expr],
+            Self::Sample { count, distinct } => {
+                std::iter::once(count).chain(distinct.iter()).collect()
+            }
+            Self::Distinct(items) => items.iter().collect(),
+            Self::Scan(scan) => scan
+                .declarations
+                .iter()
+                .filter_map(|d| d.default.as_ref())
+                .chain(scan.steps.iter().flat_map(|s| {
+                    std::iter::once(&s.condition).chain(s.assignments.iter().map(|(_, e)| e))
+                }))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) fn map_expressions(
         &self,
         mut map: impl FnMut(&Expr) -> crate::Result<Expr>,
