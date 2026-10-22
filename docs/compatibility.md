@@ -279,6 +279,13 @@ ordinary `summarize`/windows or the vectorized partition fast paths where
 equivalent. Group-local materialization rebinds its input and cache per group;
 unrelated outer snapshots remain shared.
 
+Single-array typed-long/real `mv-apply (top ...)` uses a batch Arrow top-k
+kernel. Top-k followed by row counts, long sums, or ordered lists also stays in
+batch expressions, avoiding one physical-plan initialization per source row.
+Mixed scalar types, empty arrays, null placement, output limits, and exact
+large integers retain the general template's semantics. Item-index, multiple
+arrays, arbitrary predicates, and more complex aggregates use the general path.
+
 ## Stateful scans
 
 `scan [with_match_id=...] [declare(...)] with (step ...; ...)` is a native

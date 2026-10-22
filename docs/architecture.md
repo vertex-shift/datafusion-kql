@@ -81,7 +81,9 @@ errors rather than silently execute with different semantics.
   percentiles, correlated row-selection aggregates, and aggregate arithmetic.
   Typed `parse`/`parse-where`, regex extraction and JSONPath extraction are also
   implemented. `mv-apply` compiles reusable native subquery templates with
-  per-row Arrow input binding. Continue with broader specialized parsing.
+  per-row Arrow input binding, specializing common typed-array top/aggregate
+  transformations into batch Arrow kernels. Continue with broader specialized
+  parsing.
 - Serialization, offsets, row numbering, restart-aware cumulative sums/ranks,
   and bounded session windows are implemented. `make-series`, common series
   arithmetic/interpolation/statistics, line fitting, and FIR/IIR processing are

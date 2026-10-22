@@ -1205,13 +1205,20 @@ impl<'s> Planner<'s> {
                     limit,
                     operators,
                 } => {
-                    self.apply_grouped(
-                        plan,
-                        None,
-                        Some((index.as_deref(), columns, *limit)),
-                        operators,
-                    )
-                    .await?
+                    if index.is_none()
+                        && let Some(native) =
+                            self.fast_apply(plan.clone(), columns, *limit, operators)?
+                    {
+                        native
+                    } else {
+                        self.apply_grouped(
+                            plan,
+                            None,
+                            Some((index.as_deref(), columns, *limit)),
+                            operators,
+                        )
+                        .await?
+                    }
                 }
                 Operator::Scan(scan) => {
                     let name = self.temporary_name(&plan);
@@ -1552,6 +1559,159 @@ impl<'s> Planner<'s> {
             check_plan(&plan)?;
         }
         Ok(plan)
+    }
+
+    fn fast_apply(
+        &mut self,
+        input: LogicalPlan,
+        columns: &[ast::ExpandColumn],
+        expansion_limit: usize,
+        operators: &[ast::SpannedOperator],
+    ) -> Result<Option<LogicalPlan>> {
+        use crate::dynamic::TopReduction;
+        let [column] = columns else {
+            return Ok(None);
+        };
+        let Some(ty @ (ast::ScalarType::Long | ast::ScalarType::Real)) = column.ty else {
+            return Ok(None);
+        };
+        let [first, rest @ ..] = operators else {
+            return Ok(None);
+        };
+        let Operator::Top { count, key } = &first.kind else {
+            return Ok(None);
+        };
+        let target = output_name(&column.value, 0, &mut HashSet::new())?;
+        if !matches!(&key.expr.kind,ExprKind::Identifier(parts) if parts.as_slice()==std::slice::from_ref(&target))
+        {
+            return Ok(None);
+        }
+        let aggregates = match rest {
+            [] => None,
+            [
+                ast::SpannedOperator {
+                    kind: Operator::Summarize { aggregates, by },
+                    ..
+                },
+            ] if by.is_empty() => Some(aggregates),
+            _ => return Ok(None),
+        };
+        let count = self.row_limit(count)?;
+        let source = self
+            .expressions()
+            .scalar(&column.value.expr, input.schema())?;
+        if !dynamic::is_dynamic(&source.get_type(input.schema())?) {
+            return Ok(None);
+        }
+        let mut reductions = Vec::new();
+        let mut names = HashSet::new();
+        if let Some(aggregates) = aggregates {
+            for (index, aggregate) in aggregates.iter().enumerate() {
+                let ExprKind::Call { name, args } = &aggregate.expr.kind else {
+                    return Ok(None);
+                };
+                let column_matches=args.first().is_some_and(|arg| matches!(&arg.kind,ExprKind::Identifier(parts) if parts.as_slice()==std::slice::from_ref(&target)));
+                let reduction = match name.as_str() {
+                    "sum" if args.len() == 1 && column_matches && ty == ast::ScalarType::Long => {
+                        TopReduction::Sum
+                    }
+                    "count" if args.is_empty() || args.len() == 1 && column_matches => {
+                        TopReduction::Count
+                    }
+                    "make_list" | "make_list_with_nulls"
+                        if (1..=2).contains(&args.len()) && column_matches =>
+                    {
+                        let limit = if let Some(limit) = args.get(1) {
+                            self.row_limit(limit)?
+                        } else {
+                            1_048_576
+                        };
+                        if limit == 0 || limit > 1_048_576 {
+                            return Ok(None);
+                        }
+                        TopReduction::List {
+                            limit,
+                            include_nulls: name == "make_list_with_nulls",
+                        }
+                    }
+                    _ => return Ok(None),
+                };
+                reductions.push((output_name(aggregate, index, &mut names)?, reduction));
+            }
+        }
+        let temporary = self.temporary_name(&input);
+        let mut projection = (0..input.schema().fields().len())
+            .map(|i| field_expr(&input, i))
+            .collect::<Vec<_>>();
+        projection.push(ordering::helper(
+            dynamic::call(
+                Kernel::TopValues {
+                    real: ty == ast::ScalarType::Real,
+                    descending: !key.ascending,
+                    nulls_first: key.nulls_first,
+                    expanded_limit: expansion_limit,
+                    count,
+                },
+                vec![source],
+            ),
+            temporary.clone(),
+            false,
+        ));
+        let selected = LogicalPlanBuilder::from(input)
+            .project(projection)?
+            .build()?;
+        if aggregates.is_none() {
+            let value = NamedExpr {
+                name: Some(target),
+                expr: ast::Expr {
+                    kind: ExprKind::BindingReference(temporary.clone()),
+                    span: column.value.expr.span,
+                    depth: 1,
+                },
+            };
+            self.scalars.insert(
+                temporary.clone(),
+                Expr::Column(Column::from_name(&temporary)),
+            );
+            return self
+                .mv_expand(
+                    selected,
+                    (false, true),
+                    None,
+                    &[ast::ExpandColumn {
+                        value,
+                        ty: Some(ty),
+                    }],
+                    2_147_483_647,
+                )
+                .map(Some);
+        }
+        let mut projection = selected
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| {
+                field.name() != &target
+                    && field.name() != &temporary
+                    && !names.contains(field.name())
+            })
+            .map(|(i, _)| field_expr(&selected, i))
+            .collect::<Vec<_>>();
+        for (name, reduction) in reductions {
+            projection.push(
+                dynamic::call(
+                    Kernel::TopReduce(reduction),
+                    vec![Expr::Column(Column::from_name(&temporary))],
+                )
+                .alias(name),
+            );
+        }
+        Ok(Some(
+            LogicalPlanBuilder::from(selected)
+                .project(projection)?
+                .build()?,
+        ))
     }
 
     async fn native_partition(

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::catalog::{Session, TableProvider};
-use datafusion::common::tree_node::{Transformed, TreeNodeRecursion};
+use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column, DFSchema, DataFusionError, Result, ScalarValue};
 use datafusion::datasource::provider_as_source;
 use datafusion::execution::TaskContext;
@@ -454,7 +454,22 @@ impl TableProvider for ScanTable {
         );
         let physical = |expr: &Expr| {
             let expr = simplifier.coerce(expr.clone(), &self.context)?;
-            state.create_physical_expr(simplifier.simplify(expr)?, &self.context)
+            let physical = state.create_physical_expr(simplifier.simplify(expr)?, &self.context)?;
+            Ok::<_, DataFusionError>(
+                physical
+                    .transform_up(|expr| {
+                        if let Some(column) =
+                            expr.downcast_ref::<datafusion::physical_expr::expressions::Column>()
+                        {
+                            Ok(Transformed::yes(
+                                Arc::new(ScalarColumn(column.clone())) as Arc<dyn PhysicalExpr>
+                            ))
+                        } else {
+                            Ok(Transformed::no(expr))
+                        }
+                    })?
+                    .data,
+            )
         };
         let steps = self
             .steps
@@ -662,6 +677,51 @@ struct Sequence {
     match_id: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ScalarColumn(datafusion::physical_expr::expressions::Column);
+
+impl fmt::Display for ScalarColumn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl PhysicalExpr for ScalarColumn {
+    fn data_type(&self, schema: &Schema) -> Result<DataType> {
+        self.0.data_type(schema)
+    }
+    fn nullable(&self, schema: &Schema) -> Result<bool> {
+        self.0.nullable(schema)
+    }
+    fn evaluate(&self, batch: &RecordBatch) -> Result<datafusion::logical_expr::ColumnarValue> {
+        let value = self.0.evaluate(batch)?;
+        if batch.num_rows() == 1 {
+            Ok(datafusion::logical_expr::ColumnarValue::Scalar(
+                ScalarValue::try_from_array(&value.to_array(1)?, 0)?,
+            ))
+        } else {
+            Ok(value)
+        }
+    }
+    fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
+        Vec::new()
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        if !children.is_empty() {
+            return Err(DataFusionError::Internal(
+                "scan scalar column is a leaf".into(),
+            ));
+        }
+        Ok(self)
+    }
+    fn fmt_sql(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt_sql(f)
+    }
+}
+
 struct ScanStream {
     input: SendableRecordBatchStream,
     pending: Option<RecordBatch>,
@@ -684,10 +744,21 @@ struct ScanStream {
 
 impl ScanStream {
     fn context(&self, current: &[ScalarValue], sequence: Option<&Sequence>) -> Result<RecordBatch> {
-        let mut arrays = current
+        let input = self
+            .pending
+            .as_ref()
+            .ok_or_else(|| DataFusionError::Internal("scan context has no input".into()))?;
+        let mut arrays = input
+            .columns()
             .iter()
-            .map(|value| value.to_array())
-            .collect::<Result<Vec<_>>>()?;
+            .map(|column| column.slice(self.position, 1))
+            .collect::<Vec<_>>();
+        arrays.extend(
+            current[input.num_columns()..]
+                .iter()
+                .map(|value| value.to_array())
+                .collect::<Result<Vec<_>>>()?,
+        );
         for &(step, column) in self.references.iter() {
             let value = sequence
                 .and_then(|s| s.records.get(step))

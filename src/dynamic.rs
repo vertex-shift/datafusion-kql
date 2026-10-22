@@ -369,6 +369,14 @@ fn failure(message: impl Into<String>) -> DataFusionError {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Kernel {
     IntoDynamic,
+    TopValues {
+        real: bool,
+        descending: bool,
+        nulls_first: bool,
+        expanded_limit: usize,
+        count: usize,
+    },
+    TopReduce(TopReduction),
     ParseJson,
     ParseJsonStrict,
     EncodeJson,
@@ -418,13 +426,22 @@ pub(crate) enum Kernel {
     Split,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum TopReduction {
+    Sum,
+    Count,
+    List { limit: usize, include_nulls: bool },
+}
+
 impl Kernel {
     fn output_type(&self) -> DataType {
         match self {
             Self::GetType | Self::StrcatArray | Self::EncodeJson | Self::EncodeWindow => {
                 DataType::Utf8
             }
-            Self::ArrayLength | Self::ArrayIndexOf => DataType::Int64,
+            Self::ArrayLength
+            | Self::ArrayIndexOf
+            | Self::TopReduce(TopReduction::Sum | TopReduction::Count) => DataType::Int64,
             Self::Equal(_) | Self::BagHasKey | Self::ArrayHas | Self::Membership { .. } => {
                 DataType::Boolean
             }
@@ -444,6 +461,8 @@ impl Kernel {
             "__kql_{}",
             match self {
                 Self::IntoDynamic => "dynamic",
+                Self::TopValues { .. } => "mv_apply_top_values",
+                Self::TopReduce(_) => "mv_apply_top_reduce",
                 Self::ParseJson => "parse_json",
                 Self::ParseJsonStrict => "parse_json_strict",
                 Self::EncodeJson => "to_json",
@@ -499,6 +518,8 @@ impl Kernel {
         }
         let valid = match self {
             Self::IntoDynamic
+            | Self::TopValues { .. }
+            | Self::TopReduce(_)
             | Self::ParseJson
             | Self::ParseJsonStrict
             | Self::EncodeJson
@@ -1359,6 +1380,67 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
                     .collect()
             };
             Json::Array(result)
+        }
+        K::TopValues {
+            real,
+            descending,
+            nulls_first,
+            expanded_limit,
+            count,
+        } => {
+            let mut items = expanded(values[0], false, true, *expanded_limit)?;
+            for item in &mut items {
+                let valid = if *real {
+                    matches!(item,Json::Number(n) if n.is_f64())
+                } else {
+                    item.as_i64().is_some()
+                };
+                if !valid {
+                    *item = Json::Null;
+                }
+            }
+            let array: ArrayRef = if *real {
+                Arc::new(Float64Array::from_iter(items.iter().map(Json::as_f64)))
+            } else {
+                Arc::new(Int64Array::from_iter(items.iter().map(Json::as_i64)))
+            };
+            let indices = datafusion::arrow::compute::sort_to_indices(
+                array.as_ref(),
+                Some(datafusion::arrow::compute::SortOptions {
+                    descending: *descending,
+                    nulls_first: *nulls_first,
+                }),
+                Some(*count),
+            )?;
+            Json::Array(
+                indices
+                    .values()
+                    .iter()
+                    .map(|&i| items[i as usize].clone())
+                    .collect(),
+            )
+        }
+        K::TopReduce(reduction) => {
+            let Json::Array(items) = values[0].json()? else {
+                return Err(failure("invalid optimized mv-apply input"));
+            };
+            match reduction {
+                TopReduction::Sum => {
+                    let array = Int64Array::from_iter(items.iter().map(Json::as_i64));
+                    datafusion::arrow::compute::sum(&array).unwrap_or(0).into()
+                }
+                TopReduction::Count => (items.len() as i64).into(),
+                TopReduction::List {
+                    limit,
+                    include_nulls,
+                } => Json::Array(
+                    items
+                        .into_iter()
+                        .filter(|value| *include_nulls || !value.is_null())
+                        .take(*limit)
+                        .collect(),
+                ),
+            }
         }
         K::IntoDynamic
         | K::Coalesce

@@ -211,6 +211,70 @@ async fn native_partition_aggregates_use_one_native_grouped_plan() {
 }
 
 #[tokio::test]
+async fn vectorized_mv_apply_matches_native_templates_for_nulls_limits_and_large_integers() {
+    let ctx = SessionContext::new();
+    for values in [
+        "[1,5,3]",
+        "[]",
+        "[null,'5',3,1]",
+        "[9007199254740993,9007199254740991]",
+        "[-9223372036854775808,0,1]",
+    ] {
+        for (order, count) in [("desc nulls last", 2), ("asc nulls first", 3), ("desc", 0)] {
+            let suffix = format!(
+                "top {count} by v {order} | summarize Total=sum(v),N=count(),Values=make_list(v),Nulls=make_list_with_nulls(v)"
+            );
+            let prefix =
+                format!("print source=dynamic({values}) | mv-apply v=source to typeof(long) on (");
+            let finish = ") | project Total,N,Values=tostring(Values),Nulls=tostring(Nulls)";
+            let fast = result(&ctx, &format!("{prefix}{suffix}{finish}")).await;
+            let template = result(&ctx, &format!("{prefix}where true | {suffix}{finish}")).await;
+            assert_eq!(fast, template, "{values} {order} {count}");
+        }
+    }
+    check("print a=dynamic([1.0,3,2.5,'4',null]) | mv-apply v=a to typeof(real) on (top 3 by v asc nulls last | summarize Values=make_list_with_nulls(v)) | project Values=tostring(Values)",
+        &[&["[1.0,2.5,null]"]]).await;
+}
+
+#[tokio::test]
+async fn vectorized_mv_apply_uses_an_arrow_batch_kernel_not_per_row_native_plans() {
+    let ctx = SessionContext::new();
+    let frame=ctx.kql("print a=dynamic([1,2,3]) | mv-apply v=a to typeof(long) on (top 2 by v | summarize Total=sum(v))").await.unwrap();
+    let plan = frame.create_physical_plan().await.unwrap();
+    let text = datafusion::physical_plan::displayable(plan.as_ref())
+        .indent(false)
+        .to_string();
+    assert!(!text.contains("KqlApplyExec"), "{text}");
+}
+
+#[tokio::test]
+async fn vectorized_mv_apply_sum_matches_native_overflow_behavior() {
+    let ctx = SessionContext::new();
+    let base = "print source=dynamic([9223372036854775807,9223372036854775807]) | mv-apply v=source to typeof(long) on (";
+    let suffix = "top 2 by v | summarize Total=sum(v)) | project Total";
+    let fast = ctx
+        .kql(&format!("{base}{suffix}"))
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    let native = ctx
+        .kql(&format!("{base}where true | {suffix}"))
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    match (fast, native) {
+        (Ok(fast), Ok(native)) => assert_eq!(
+            array_value_to_string(fast[0].column(0), 0).unwrap(),
+            array_value_to_string(native[0].column(0), 0).unwrap()
+        ),
+        (Err(_), Err(_)) => {}
+        (fast, native) => panic!("optimized/native overflow mismatch: {fast:?} {native:?}"),
+    }
+}
+
+#[tokio::test]
 async fn grouped_subqueries_can_be_reexecuted_without_stale_operator_state() {
     let ctx = SessionContext::new();
     let frame = ctx.kql("range x from 1 to 8 step 1 | extend k=x%2 | partition hint.strategy=native by k (top 2 by x) | sort by x asc").await.unwrap();
