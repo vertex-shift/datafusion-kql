@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.1 implements the typed tabular and dynamic subset below. Keywords, function names, table
+0.2 implements the typed tabular and dynamic subset below. Keywords, function names, table
 names, and column names are case-sensitive. Unsupported syntax/functions return
 an error; there is no SQL fallback.
 
@@ -16,7 +16,7 @@ an error; there is no SQL fallback.
 | Parenthesized queries | Nested pipelines and scoped `let` statements |
 | `print` | One row of scalar expressions |
 | `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan`, `dynamic` columns |
-| `range` | Inclusive, lazy native `generate_series`; non-null `long` bounds/step, including descending ranges |
+| `range` | Inclusive lazy native `generate_series`; integer, real, datetime, and timespan sequences, including descending ranges |
 | `union` | Source form and pipe form |
 
 Tabular bindings are inlined plans, **not materialized results**. Reusing one can
@@ -133,7 +133,9 @@ and `bag_remove_keys`, `array_concat`, `array_slice` (inclusive end),
 `set_intersect`, `set_difference`, `zip`, `repeat`, integer `range()`,
 `strcat_array`, and `split`. Array-producing builders and expansion reject
 collections exceeding 1,048,576 elements instead of allocating without a bound.
-JSONPath writes and noninteger scalar `range()` bounds are not yet implemented.
+JSONPath writes are not yet implemented. Scalar `range()` supports integers,
+reals, datetimes, and timespans and validates its collection budget before
+allocating integral/temporal sequences.
 
 `mv-expand` lowers to one batch kernel producing zipped struct rows and one
 native DataFusion `Unnest`. Each source is expanded in parallel, shorter
@@ -177,6 +179,25 @@ Nullable datetime conversion accepts ISO-8601 and common US log timestamps.
 Timespan conversion accepts the same unit/day-clock formats as literals.
 Regex execution uses Rust regex syntax, not unsupported .NET backreferences or
 look-around.
+
+## Calendar and formatting functions
+
+Calendar helpers include date components (`getyear`, `getmonth`,
+`monthofyear`, `dayofmonth`, `dayofyear`, `hourofday`, `week_of_year`,
+`datetime_part`), timespan-valued `dayofweek`, `datetime_add`, `datetime_diff`,
+period starts/ends for day/week/month/year, `make_datetime`, `make_timespan`,
+and Unix conversions from seconds through nanoseconds. Weeks start on Sunday
+for period boundaries. Calendar differences count crossed period boundaries;
+month/year addition clamps leap days and month ends. Ends subtract one Kusto
+tick (100 ns), not one nanosecond. Nulls and unrepresentable constructor results
+remain typed nulls.
+
+`format_datetime` and `format_timespan` compile constant KQL-style format tokens
+instead of passing incompatible `.NET` precision patterns into Chrono. Common
+date/day/month/time tokens, quoted/escaped literals, AM/PM, UTC offsets, and
+1-7 required/optional fractional digits are supported. Unsupported tokens
+produce planning errors. Date/time arithmetic uses UTC and remains subject to
+the signed nanosecond range described below.
 
 ## Serialized rows and windows
 

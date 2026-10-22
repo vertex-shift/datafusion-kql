@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** typed-tabular and dynamic/JSON query support, targeting **DataFusion
+**Status:** version 0.2 typed-tabular, dynamic/JSON, window and time-series support, targeting **DataFusion
 55.2.x** and **Rust 1.94+**. This is not yet a complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
 and known semantic differences.
@@ -126,6 +126,9 @@ Limits and top-k counts can use constant `let` bindings and arithmetic.
 `make-series` supports sparse native aggregation, exact time/numeric axes,
 defaults and group bounds; series functions add interpolation, statistics,
 line fitting, arithmetic and FIR/IIR processing.
+Calendar arithmetic, period boundaries, Unix conversions, constructors, and
+compiled KQL date/time formatting are supported. Both tabular and scalar ranges
+handle numeric, datetime, and timespan values.
 
 `mv-apply`, advanced signal processing, management commands, hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.

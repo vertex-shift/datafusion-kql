@@ -6,7 +6,6 @@ use std::sync::Arc;
 use datafusion::arrow::array::new_empty_array;
 use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::catalog::TableFunctionArgs;
 use datafusion::common::{Column, DFSchema, ScalarValue, TableReference};
 use datafusion::dataframe::DataFrame;
 use datafusion::datasource::{MemTable, provider_as_source};
@@ -226,41 +225,7 @@ impl<'s> Planner<'s> {
                     start,
                     end,
                     step,
-                } => {
-                    let expressions = self.expressions();
-                    let mut args = Vec::with_capacity(3);
-                    for expr in [start, end, step] {
-                        let lowered = expressions.scalar(expr, &DFSchema::empty())?;
-                        let value = expressions.constant(lowered, expr.span)?;
-                        if !matches!(value, ScalarValue::Int64(Some(_))) {
-                            return Err(Error::unsupported(
-                                "range currently supports non-null long bounds and step",
-                                expr.span,
-                            ));
-                        }
-                        args.push(lit(value));
-                    }
-                    let function = self
-                        .state
-                        .table_functions()
-                        .get("generate_series")
-                        .ok_or_else(|| {
-                            Error::Plan("session has no generate_series table function".into())
-                        })?;
-                    let provider = function.create_table_provider_with_args(
-                        TableFunctionArgs::new(&args, self.state),
-                    )?;
-                    let plan = LogicalPlanBuilder::scan(
-                        "__kql_range",
-                        provider_as_source(provider),
-                        None,
-                    )?
-                    .build()?;
-                    let column = field_expr(&plan, 0).alias(name);
-                    Ok(LogicalPlanBuilder::from(plan)
-                        .project(vec![column])?
-                        .build()?)
-                }
+                } => crate::ranges::plan(&self.expressions(), name, start, end, step),
                 Source::Union {
                     kind,
                     withsource,

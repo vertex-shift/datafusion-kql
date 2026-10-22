@@ -49,7 +49,8 @@ repeatedly by simply cloning their `Arc`.
 
 ## Measured local baseline
 
-Measured on 2026-10-22 with an Apple M4 (arm64), Rust 1.95.0, DataFusion 55.2.0,
+The initial baseline below was measured at commit `6add036`, before the 0.2
+coverage expansion, on 2026-10-22 with an Apple M4 (arm64), Rust 1.95.0, DataFusion 55.2.0,
 the default optimized bench profile, and four target partitions:
 
 ```bash

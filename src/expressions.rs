@@ -572,6 +572,201 @@ impl Expressions<'_> {
             return Ok(dynamic::call(kernel, values));
         }
         Ok(match name {
+            "format_datetime" | "format_timespan" => {
+                arity(2)?;
+                let pattern = self.constant_string(values[1].clone(), args[1].span)?;
+                let duration = name == "format_timespan";
+                let value = if duration {
+                    cast(values[0].clone(), DataType::Duration(TimeUnit::Nanosecond))
+                } else {
+                    self.date_value(values[0].clone(), schema)?
+                };
+                crate::format_time::call(value, &pattern, duration, args[1].span)?
+            }
+            "getyear" | "getmonth" | "monthofyear" | "dayofmonth" | "dayofyear" | "hourofday"
+            | "week_of_year" | "weekofyear" => {
+                arity(1)?;
+                let part = match name {
+                    "getyear" => "year",
+                    "getmonth" | "monthofyear" => "month",
+                    "dayofmonth" => "day",
+                    "dayofyear" => "doy",
+                    "hourofday" => "hour",
+                    _ => "week",
+                };
+                let value = self.date_value(values[0].clone(), schema)?;
+                cast(
+                    self.function("date_part", vec![lit(part), value])?,
+                    DataType::Int32,
+                )
+            }
+            "datetime_part" | "datepart" => {
+                arity(2)?;
+                let part = self
+                    .constant_string(values[0].clone(), args[0].span)?
+                    .to_ascii_lowercase();
+                let part = match part.as_str() {
+                    "week_of_year" | "weekofyear" => "week",
+                    "dayofyear" => "doy",
+                    part => part,
+                }
+                .to_owned();
+                let value = self.date_value(values[1].clone(), schema)?;
+                cast(
+                    self.function("date_part", vec![lit(part), value])?,
+                    DataType::Int32,
+                )
+            }
+            "dayofweek" => {
+                arity(1)?;
+                let value = self.date_value(values[0].clone(), schema)?;
+                let days = cast(
+                    self.function("date_part", vec![lit("dow"), value])?,
+                    DataType::Int64,
+                );
+                cast(
+                    days * lit(86_400_000_000_000_i64),
+                    DataType::Duration(TimeUnit::Nanosecond),
+                )
+            }
+            "startofday" | "startofweek" | "startofmonth" | "startofyear" | "endofday"
+            | "endofweek" | "endofmonth" | "endofyear" => {
+                if !(1..=2).contains(&values.len()) {
+                    return Err(Error::syntax(
+                        "period boundary functions expect date and optional offset",
+                        span,
+                    ));
+                }
+                let unit = if name.ends_with("day") {
+                    crate::calendar::Unit::Day
+                } else if name.ends_with("week") {
+                    crate::calendar::Unit::Week
+                } else if name.ends_with("month") {
+                    crate::calendar::Unit::Month
+                } else {
+                    crate::calendar::Unit::Year
+                };
+                let date = self.date_value(values[0].clone(), schema)?;
+                let offset = if let Some(value) = values.get(1) {
+                    cast(value.clone(), DataType::Int64)
+                } else {
+                    lit(0_i64)
+                };
+                let op = if name.starts_with("start") {
+                    crate::calendar::Op::Start(unit)
+                } else {
+                    crate::calendar::Op::End(unit)
+                };
+                crate::calendar::call(op, vec![date, offset])
+            }
+            "datetime_add" | "datetime_diff" => {
+                arity(3)?;
+                let unit = self.constant_string(values[0].clone(), args[0].span)?;
+                let unit = crate::calendar::Unit::parse(&unit)
+                    .ok_or_else(|| Error::syntax("unknown datetime period", args[0].span))?;
+                if name == "datetime_add" {
+                    let date = self.date_value(values[2].clone(), schema)?;
+                    crate::calendar::call(
+                        crate::calendar::Op::Add(unit),
+                        vec![date, cast(values[1].clone(), DataType::Int64)],
+                    )
+                } else {
+                    let left = self.date_value(values[1].clone(), schema)?;
+                    let right = self.date_value(values[2].clone(), schema)?;
+                    crate::calendar::call(crate::calendar::Op::Diff(unit), vec![left, right])
+                }
+            }
+            "datetime_to_unixtime" => {
+                arity(1)?;
+                crate::calendar::call(
+                    crate::calendar::Op::ToUnix,
+                    vec![self.date_value(values[0].clone(), schema)?],
+                )
+            }
+            "unixtime_seconds_todatetime"
+            | "unixtime_milliseconds_todatetime"
+            | "unixtime_microseconds_todatetime"
+            | "unixtime_nanoseconds_todatetime" => {
+                arity(1)?;
+                let unit = match name {
+                    "unixtime_seconds_todatetime" => 1_000_000_000,
+                    "unixtime_milliseconds_todatetime" => 1_000_000,
+                    "unixtime_microseconds_todatetime" => 1_000,
+                    _ => 1,
+                };
+                let ty = values[0].get_type(schema)?;
+                if !ty.is_numeric() && ty != DataType::Null {
+                    return Err(Error::syntax(
+                        "Unix time requires a numeric value",
+                        args[0].span,
+                    ));
+                }
+                let value = cast(
+                    values[0].clone(),
+                    if ty.is_integer() {
+                        DataType::Int64
+                    } else {
+                        DataType::Float64
+                    },
+                );
+                crate::calendar::call(crate::calendar::Op::FromUnix(unit), vec![value])
+            }
+            "make_datetime" => {
+                if values.len() == 1 {
+                    self.date_value(values[0].clone(), schema)?
+                } else {
+                    if !(3..=6).contains(&values.len()) {
+                        return Err(Error::syntax(
+                            "make_datetime expects 1 or 3-6 arguments",
+                            span,
+                        ));
+                    }
+                    let args = values
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, value)| {
+                            cast(
+                                value,
+                                if i == 5 {
+                                    DataType::Float64
+                                } else {
+                                    DataType::Int64
+                                },
+                            )
+                        })
+                        .collect();
+                    crate::calendar::call(crate::calendar::Op::MakeDatetime, args)
+                }
+            }
+            "make_timespan" => {
+                if values.len() == 1 {
+                    let value = cast(
+                        self.string_value(values[0].clone(), schema)?,
+                        DataType::Utf8,
+                    );
+                    crate::temporal::parse(crate::temporal::Target::Timespan, value)
+                } else {
+                    if !(2..=4).contains(&values.len()) {
+                        return Err(Error::syntax("make_timespan expects 1-4 arguments", span));
+                    }
+                    let length = values.len();
+                    let args = values
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, value)| {
+                            cast(
+                                value,
+                                if length >= 3 && i == length - 1 {
+                                    DataType::Float64
+                                } else {
+                                    DataType::Int64
+                                },
+                            )
+                        })
+                        .collect();
+                    crate::calendar::call(crate::calendar::Op::MakeTimespan, args)
+                }
+            }
             "extract" => {
                 if !(3..=4).contains(&values.len()) {
                     return Err(Error::syntax(
@@ -684,7 +879,12 @@ impl Expressions<'_> {
             "totimespan" | "totime" => {
                 arity(1)?;
                 let ty = values[0].get_type(schema)?;
-                if matches!(ty, DataType::Duration(_)) {
+                if dynamic::is_dynamic(&ty) {
+                    dynamic::call(
+                        Kernel::Convert(DataType::Duration(TimeUnit::Nanosecond)),
+                        values,
+                    )
+                } else if matches!(ty, DataType::Duration(_)) {
                     cast(values[0].clone(), DataType::Duration(TimeUnit::Nanosecond))
                 } else {
                     let text = cast(
@@ -896,6 +1096,21 @@ impl Expressions<'_> {
                 function.call(values)
             }
         })
+    }
+
+    fn date_value(&self, value: Expr, schema: &DFSchema) -> Result<Expr> {
+        let ty = value.get_type(schema)?;
+        Ok(
+            if matches!(
+                ty,
+                DataType::Timestamp(_, _) | DataType::Date32 | DataType::Date64
+            ) {
+                cast(value, DataType::Timestamp(TimeUnit::Nanosecond, None))
+            } else {
+                let value = cast(self.string_value(value, schema)?, DataType::Utf8);
+                crate::temporal::parse(crate::temporal::Target::Datetime, value)
+            },
+        )
     }
 
     pub(crate) fn extracted_type(

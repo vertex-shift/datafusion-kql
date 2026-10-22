@@ -125,15 +125,18 @@ impl Value<'_> {
             Self::Timespan(value) => {
                 let negative = if value < 0 { "-" } else { "" };
                 let value = value.unsigned_abs();
-                format!(
-                    "{negative}{}.{:02}:{:02}:{:02}.{:07}",
+                let base = format!(
+                    "{negative}{}.{:02}:{:02}:{:02}",
                     value / 86_400_000_000_000,
                     value / 3_600_000_000_000 % 24,
                     value / 60_000_000_000 % 60,
                     value / 1_000_000_000 % 60,
-                    value % 1_000_000_000 / 100,
-                )
-                .into()
+                );
+                if value % 100 == 0 {
+                    format!("{base}.{:07}", value % 1_000_000_000 / 100).into()
+                } else {
+                    format!("{base}.{:09}", value % 1_000_000_000).into()
+                }
             }
         })
     }
@@ -730,6 +733,36 @@ fn convert(input: &Input, ty: &DataType, type_only: bool) -> Result<ArrayRef> {
     let mut casted = Vec::with_capacity(FIELDS.len());
     for (id, _) in FIELDS.iter() {
         let source = union.child(id);
+        if *ty == DataType::Duration(TimeUnit::Nanosecond)
+            && !type_only
+            && matches!(id, STRING | LONG | REAL)
+        {
+            let array: ArrayRef = match id {
+                STRING => Arc::new(DurationNanosecondArray::from_iter(
+                    downcast::<StringArray>(source)?
+                        .iter()
+                        .map(|value| value.and_then(crate::temporal::try_timespan)),
+                )),
+                LONG => Arc::new(DurationNanosecondArray::from_iter(
+                    downcast::<Int64Array>(source)?.iter().map(|value| {
+                        value.and_then(|v| i64::try_from(i128::from(v) * 86_400_000_000_000).ok())
+                    }),
+                )),
+                _ => Arc::new(DurationNanosecondArray::from_iter(
+                    downcast::<Float64Array>(source)?.iter().map(|value| {
+                        value.and_then(|v| {
+                            let nanos = v * 86_400_000_000_000.0;
+                            (nanos.is_finite()
+                                && nanos >= i64::MIN as f64
+                                && nanos < 9_223_372_036_854_775_808.0)
+                                .then_some(nanos as i64)
+                        })
+                    }),
+                )),
+            };
+            casted.push(array);
+            continue;
+        }
         let compatible = match ty {
             DataType::Boolean => id == BOOL,
             DataType::Int32 | DataType::Int64 => id == LONG,
@@ -870,6 +903,72 @@ fn size(value: usize) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+fn range(values: &[Value<'_>]) -> Result<Json> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Json::Null);
+    }
+    let integers = match (values[0], values[1], values[2]) {
+        (Value::Long(a), Value::Long(b), Value::Long(step)) => Some((a, b, step, 0)),
+        (Value::Datetime(a), Value::Datetime(b), Value::Timespan(step)) => Some((a, b, step, 1)),
+        (Value::Timespan(a), Value::Timespan(b), Value::Timespan(step)) => Some((a, b, step, 2)),
+        _ => None,
+    };
+    if let Some((start, end, step, kind)) = integers {
+        if step == 0 {
+            return Err(failure("range() step cannot be zero"));
+        }
+        let distance = i128::from(end) - i128::from(start);
+        let count = if distance.signum() != i128::from(step).signum() && distance != 0 {
+            0
+        } else {
+            distance / i128::from(step) + 1
+        };
+        let count = usize::try_from(count).map_err(|_| failure("invalid range size"))?;
+        size(count)?;
+        let mut output = Vec::with_capacity(count);
+        for index in 0..count {
+            let value = i64::try_from(i128::from(start) + i128::from(step) * index as i128)
+                .map_err(|_| failure("range value overflow"))?;
+            output.push(match kind {
+                1 => Value::Datetime(value).json()?,
+                2 => Value::Timespan(value).json()?,
+                _ => Json::from(value),
+            });
+        }
+        return Ok(Json::Array(output));
+    }
+    let mut numbers = Vec::new();
+    for value in values {
+        let value = match value {
+            Value::Long(v) => *v as f64,
+            Value::Real(v) => *v,
+            _ => {
+                return Err(failure(
+                    "range() requires numeric bounds or matching temporal types",
+                ));
+            }
+        };
+        if !value.is_finite() {
+            return Err(failure("range() requires finite values"));
+        }
+        numbers.push(value);
+    }
+    let (start, end, step) = (numbers[0], numbers[1], numbers[2]);
+    if step == 0.0 {
+        return Err(failure("range() step cannot be zero"));
+    }
+    let count = ((end - start) / step).floor();
+    if !count.is_finite() || count >= MAX_COLLECTION_SIZE as f64 {
+        return Err(failure("dynamic collection exceeds 1048576 elements"));
+    }
+    let count = if count < 0.0 { 0 } else { count as usize + 1 };
+    Ok(Json::Array(
+        (0..count)
+            .map(|i| Json::from(start + i as f64 * step))
+            .collect(),
+    ))
 }
 
 fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
@@ -1213,29 +1312,7 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
             size(count)?;
             Json::Array(vec![values[0].json()?; count])
         }
-        K::Range => {
-            let (Some(start), Some(end), Some(step)) =
-                (integer(values[0]), integer(values[1]), integer(values[2]))
-            else {
-                return Err(failure(
-                    "range() currently requires integer bounds and step",
-                ));
-            };
-            if step == 0 {
-                return Err(failure("range() step cannot be zero"));
-            }
-            let mut result = Vec::new();
-            let mut value = start;
-            while if step > 0 { value <= end } else { value >= end } {
-                size(result.len() + 1)?;
-                result.push(value.into());
-                let Some(next) = value.checked_add(step) else {
-                    break;
-                };
-                value = next;
-            }
-            Json::Array(result)
-        }
+        K::Range => range(values)?,
         K::StrcatArray => {
             let Some(items) = json_array(values[0])? else {
                 return Ok(Json::Null);
