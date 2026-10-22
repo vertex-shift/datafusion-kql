@@ -40,6 +40,7 @@ column; assignments in a single `extend` resolve against its input.
 | `join` | Default `innerunique`; explicit `inner`, `leftouter`, `rightouter`, `fullouter`, left/right semi and anti |
 | `union` | Default outer; inner intersection; align by name and preserve duplicate rows |
 | `mv-expand`, `mvexpand` | Arrays and bags, zipped multiple columns, per-row limits, `with_itemindex`, cast-only `to typeof(...)` |
+| `parse`, `parse-where` | Simple, regex, and relaxed patterns; typed captures, regex flags, and strict failure filtering |
 
 Joins accept a table or parenthesized query on the right. Keys can be `on Key`
 or `$left.Key == $right.OtherKey`, with comma/`and` conjunctions. The default
@@ -85,7 +86,8 @@ nulls.
 - `tostring`, `tolong`, `toint`, `toreal`/`todouble`, `tobool`, `todatetime`,
   scalar type constructors; failed conversions use Arrow `TRY_CAST` semantics.
 - `strcat`, `strlen`, `tolower`, `toupper`, `substring` (zero-based),
-  `replace_string`.
+  `replace_string`, `extract`, `extract_all`/`extractall`, `extract_json`/`extractjson`,
+  `totimespan`/`totime`, and `todate`.
 - Other names already registered in the session scalar registry are callable
   with **their DataFusion-defined semantics**. This is an extension point, not
   a promise that every SQL function has Kusto semantics. The frontend does not
@@ -127,6 +129,37 @@ is zero-based. The default per-row limit is 2,147,483,647 (legacy `mvexpand`:
 `to typeof(...)` checks underlying dynamic types and does not parse strings into
 numbers. For example, `"2"` becomes null under `to typeof(long)`; use `tolong`
 after an untyped expansion to request conversion.
+
+## Parsing and extraction
+
+`extract(regex, group, source [, typeof(type)])` uses native regex and array
+expressions. Group 0 is the complete match; capture indices can vary by row.
+Missing/out-of-range captures produce empty strings or typed nulls.
+`extract_all` compiles its constant pattern once, supports numbered/named group
+selection, returns one- or two-dimensional dynamic arrays, and returns dynamic
+null for no matches. It requires 1-16 capture groups and enforces the collection
+budget.
+
+`extract_json(path, source [, typeof(type)])` defaults to **string**, as in
+Kusto's published language signatures. Explicit `typeof(dynamic)` retains
+dynamic values. JSONPath supports the root, dotted keys, quoted-key subscripts,
+and literal array indices; recursive descent and wildcard selectors error.
+Malformed JSON produces empty strings or typed nulls, not a retained invalid
+string as with `parse_json`.
+
+`parse` performs one compiled regex match per input row to obtain all captures,
+then uses native nullable conversions and projections. Simple/regex modes
+invalidate every capture when a required type fails; relaxed mode retains
+other captures. `parse-where` drops unsuccessful rows. Delimiters, leading/trailing
+wildcards, captures, optional scalar types, and regex flags are supported.
+Captures must be separated by delimiters; a wildcard cannot immediately follow
+a string capture. Dynamic capture types are not supported; extract a string and
+apply `parse_json`. Patterns are bounded to 256 segments.
+
+Nullable datetime conversion accepts ISO-8601 and common US log timestamps.
+Timespan conversion accepts the same unit/day-clock formats as literals.
+Regex execution uses Rust regex syntax, not unsupported .NET backreferences or
+look-around.
 
 ## Aggregations
 

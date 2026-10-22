@@ -110,6 +110,10 @@ and `mv-expand` are supported with typed Arrow unions and native batch kernels.
 Multiple expanded columns zip with null padding rather than forming an
 accidental Cartesian product.
 
+Typed `parse`/`parse-where`, regex/JSON extraction, collection and percentile
+aggregations, correlated `arg_min`/`arg_max`, and scalar expressions over
+aggregates are also supported.
+
 `mv-apply`, `make-series`, management commands, hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.
 

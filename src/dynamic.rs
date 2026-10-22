@@ -83,6 +83,17 @@ pub(crate) fn from_json(value: &Json) -> Result<ScalarValue> {
     ScalarValue::try_from_array(&builder.finish()?, 0)
 }
 
+pub(crate) fn from_json_rows(
+    values: impl IntoIterator<Item = Result<Json>>,
+    count: usize,
+) -> Result<ArrayRef> {
+    let mut builder = Builder::new(count);
+    for value in values {
+        builder.append_json(&value?)?;
+    }
+    builder.finish()
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Value<'a> {
     Null,
@@ -356,6 +367,7 @@ fn failure(message: impl Into<String>) -> DataFusionError {
 pub(crate) enum Kernel {
     IntoDynamic,
     ParseJson,
+    ParseJsonStrict,
     EncodeJson,
     Coalesce,
     DecodeList {
@@ -424,6 +436,7 @@ impl Kernel {
             match self {
                 Self::IntoDynamic => "dynamic",
                 Self::ParseJson => "parse_json",
+                Self::ParseJsonStrict => "parse_json_strict",
                 Self::EncodeJson => "to_json",
                 Self::Coalesce => "dynamic_coalesce",
                 Self::DecodeList { .. } => "decode_ordered_list",
@@ -472,6 +485,7 @@ impl Kernel {
         let valid = match self {
             Self::IntoDynamic
             | Self::ParseJson
+            | Self::ParseJsonStrict
             | Self::EncodeJson
             | Self::DecodeList { .. }
             | Self::GetType
@@ -820,6 +834,10 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
         K::ParseJson => match values[0] {
             // KQL deliberately retains invalid JSON as a dynamic string.
             Value::String(text) => serde_json::from_str(text).unwrap_or_else(|_| text.into()),
+            value => value.json()?,
+        },
+        K::ParseJsonStrict => match values[0] {
+            Value::String(text) => serde_json::from_str(text).unwrap_or(Json::Null),
             value => value.json()?,
         },
         K::EncodeJson => values[0].json()?.to_string().into(),

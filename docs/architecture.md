@@ -79,7 +79,8 @@ errors rather than silently execute with different semantics.
 - Dynamic JSON values, property access, bag/array/set functions, and `mv-expand`
   are implemented, together with bounded collection aggregation, nearest-rank
   percentiles, correlated row-selection aggregates, and aggregate arithmetic.
-  Continue with `mv-apply`, `parse`, and `extract`.
+  Typed `parse`/`parse-where`, regex extraction and JSONPath extraction are also
+  implemented. Continue with `mv-apply` and broader specialized parsing.
 - Time-series operators (`make-series`, series functions), window/serialization
   semantics, `scan`, and `partition`.
 - Broader aggregate coverage, Kusto-specific approximate algorithms, schema

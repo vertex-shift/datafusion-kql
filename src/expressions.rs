@@ -57,6 +57,15 @@ impl Expressions<'_> {
         }
     }
 
+    pub(crate) fn constant_string(&self, expr: Expr, span: Span) -> Result<String> {
+        let value = self.constant(expr, span)?;
+        value
+            .try_as_str()
+            .flatten()
+            .map(str::to_owned)
+            .ok_or_else(|| Error::syntax("expected a constant string", span))
+    }
+
     fn lower(&self, expr: &ast::Expr, schema: &DFSchema, filter: bool) -> Result<Expr> {
         Ok(match &expr.kind {
             ExprKind::Literal(value) => lit(literal_value(value, expr.span)?),
@@ -506,7 +515,7 @@ impl Expressions<'_> {
         }
     }
 
-    fn string_value(&self, value: Expr, schema: &DFSchema) -> Result<Expr> {
+    pub(crate) fn string_value(&self, value: Expr, schema: &DFSchema) -> Result<Expr> {
         Ok(if dynamic::is_dynamic(&value.get_type(schema)?) {
             dynamic::call(Kernel::Convert(DataType::Utf8), vec![value])
         } else {
@@ -530,7 +539,7 @@ impl Expressions<'_> {
             }
         };
         let kernel = match name {
-            "parse_json" | "todynamic" => Some(Kernel::ParseJson),
+            "parse_json" | "parsejson" | "todynamic" => Some(Kernel::ParseJson),
             "gettype" => Some(Kernel::GetType),
             "array_length" => Some(Kernel::ArrayLength),
             "pack_array" => Some(Kernel::PackArray),
@@ -560,6 +569,128 @@ impl Expressions<'_> {
             return Ok(dynamic::call(kernel, values));
         }
         Ok(match name {
+            "extract" => {
+                if !(3..=4).contains(&values.len()) {
+                    return Err(Error::syntax(
+                        "extract expects regex, capture group, source, and optional typeof",
+                        span,
+                    ));
+                }
+                let pattern = self.constant_string(values[0].clone(), args[0].span)?;
+                let compiled = regex::Regex::new(&pattern)
+                    .map_err(|e| Error::syntax(format!("invalid regex: {e}"), args[0].span))?;
+                let source = cast(
+                    self.string_value(values[2].clone(), schema)?,
+                    DataType::Utf8,
+                );
+                let captures =
+                    self.function("regexp_match", vec![source, lit(format!("({pattern})"))])?;
+                let index = cast(values[1].clone(), DataType::Int64);
+                let valid = index
+                    .clone()
+                    .gt_eq(lit(0_i64))
+                    .and(index.clone().lt(lit(compiled.captures_len() as i64)));
+                let index =
+                    when(valid, index).otherwise(lit(ScalarValue::Int64(None)))? + lit(1_i64);
+                let extracted = self.function("array_element", vec![captures, index])?;
+                self.extracted_type(extracted, args.get(3), span)?
+            }
+            "extract_all" | "extractall" => {
+                if !(2..=3).contains(&values.len()) {
+                    return Err(Error::syntax(
+                        "extract_all expects regex, optional groups, and source",
+                        span,
+                    ));
+                }
+                let pattern = self.constant_string(values[0].clone(), args[0].span)?;
+                let groups = if values.len() == 3 {
+                    let json = self.constant_string(
+                        dynamic::call(Kernel::EncodeJson, vec![values[1].clone()]),
+                        args[1].span,
+                    )?;
+                    let groups: Vec<serde_json::Value> =
+                        serde_json::from_str(&json).map_err(|_| {
+                            Error::syntax("capture groups must be a dynamic array", args[1].span)
+                        })?;
+                    Some(
+                        groups
+                            .into_iter()
+                            .map(|group| match group {
+                                serde_json::Value::String(name) => {
+                                    Ok(crate::regex_extract::Capture::Name(name))
+                                }
+                                value => value
+                                    .as_u64()
+                                    .and_then(|i| usize::try_from(i).ok())
+                                    .map(crate::regex_extract::Capture::Index)
+                                    .ok_or_else(|| {
+                                        Error::syntax(
+                                            "capture groups must be integer indices or names",
+                                            args[1].span,
+                                        )
+                                    }),
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                    )
+                } else {
+                    None
+                };
+                let source = cast(
+                    self.string_value(values[values.len() - 1].clone(), schema)?,
+                    DataType::Utf8,
+                );
+                crate::regex_extract::extract_all(pattern, groups, source, span)?
+            }
+            "extract_json" | "extractjson" => {
+                if !(2..=3).contains(&values.len()) {
+                    return Err(Error::syntax(
+                        "extract_json expects path, JSON text, and optional typeof",
+                        span,
+                    ));
+                }
+                let path = self.constant_string(values[0].clone(), args[0].span)?;
+                let path = crate::json_path::parse(&path, args[0].span)?;
+                let mut value = dynamic::call(Kernel::ParseJsonStrict, vec![values[1].clone()]);
+                for segment in path {
+                    let index = match segment {
+                        crate::json_path::Segment::Key(key) => lit(key),
+                        crate::json_path::Segment::Index(index) => lit(index),
+                    };
+                    value = dynamic::call(Kernel::Get, vec![value, index]);
+                }
+                let ty = args
+                    .get(2)
+                    .map(|arg| {
+                        if let ExprKind::Type(ty) = arg.kind {
+                            Ok(ty)
+                        } else {
+                            Err(Error::syntax("expected typeof(type)", arg.span))
+                        }
+                    })
+                    .transpose()?
+                    .unwrap_or(ScalarType::String);
+                if ty == ScalarType::Dynamic {
+                    value
+                } else if ty == ScalarType::Datetime || ty == ScalarType::Timespan {
+                    let text = dynamic::call(Kernel::Convert(DataType::Utf8), vec![value]);
+                    self.extracted_type(text, args.get(2), span)?
+                } else {
+                    dynamic::call(Kernel::Convert(data_type(ty)), vec![value])
+                }
+            }
+            "totimespan" | "totime" => {
+                arity(1)?;
+                let ty = values[0].get_type(schema)?;
+                if matches!(ty, DataType::Duration(_)) {
+                    cast(values[0].clone(), DataType::Duration(TimeUnit::Nanosecond))
+                } else {
+                    let text = cast(
+                        self.string_value(values[0].clone(), schema)?,
+                        DataType::Utf8,
+                    );
+                    crate::temporal::parse(crate::temporal::Target::Timespan, text)
+                }
+            }
             "now" | "ago" => {
                 if name == "ago" {
                     arity(1)?;
@@ -635,14 +766,26 @@ impl Expressions<'_> {
                     vec![try_cast(values[0].clone(), DataType::Utf8), lit("")],
                 )?
             }
-            "tolong" | "toint" | "toreal" | "todouble" | "tobool" | "todatetime" => {
+            "todatetime" | "todate" => {
+                arity(1)?;
+                let ty = values[0].get_type(schema)?;
+                if matches!(ty, DataType::Timestamp(_, _)) {
+                    cast(values[0].clone(), data_type(ScalarType::Datetime))
+                } else {
+                    let text = cast(
+                        self.string_value(values[0].clone(), schema)?,
+                        DataType::Utf8,
+                    );
+                    crate::temporal::parse(crate::temporal::Target::Datetime, text)
+                }
+            }
+            "tolong" | "toint" | "toreal" | "todouble" | "tobool" => {
                 arity(1)?;
                 let ty = match name {
                     "tolong" => ScalarType::Long,
                     "toint" => ScalarType::Int,
                     "toreal" | "todouble" => ScalarType::Real,
-                    "tobool" => ScalarType::Bool,
-                    _ => ScalarType::Datetime,
+                    _ => ScalarType::Bool,
                 };
                 if dynamic::is_dynamic(&values[0].get_type(schema)?) {
                     return Ok(dynamic::call(Kernel::Convert(data_type(ty)), values));
@@ -739,6 +882,33 @@ impl Expressions<'_> {
                     })?;
                 function.call(values)
             }
+        })
+    }
+
+    pub(crate) fn extracted_type(
+        &self,
+        value: Expr,
+        ty: Option<&ast::Expr>,
+        span: Span,
+    ) -> Result<Expr> {
+        let ty = match ty {
+            Some(ast::Expr {
+                kind: ExprKind::Type(ty),
+                ..
+            }) => *ty,
+            None => ScalarType::String,
+            _ => return Err(Error::syntax("expected typeof(type)", span)),
+        };
+        Ok(match ty {
+            ScalarType::String => self.function("coalesce", vec![value, lit("")])?,
+            ScalarType::Datetime => {
+                crate::temporal::parse(crate::temporal::Target::Datetime, value)
+            }
+            ScalarType::Timespan => {
+                crate::temporal::parse(crate::temporal::Target::Timespan, value)
+            }
+            ScalarType::Dynamic => dynamic::call(Kernel::ParseJson, vec![value]),
+            _ => try_cast(value, data_type(ty)),
         })
     }
 

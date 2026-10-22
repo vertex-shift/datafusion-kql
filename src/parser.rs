@@ -337,6 +337,97 @@ impl<'a> Parser<'a, '_> {
             "take" | "limit" => Operator::Take(self.row_count()?),
             "project" => Operator::Project(self.named_list()?),
             "extend" => Operator::Extend(self.named_list()?),
+            "parse" | "parse-where" => {
+                let kind = if self.eat_keyword("kind") {
+                    self.expect(Kind::Assign)?;
+                    let span = self.current().span;
+                    match self.identifier()?.as_str() {
+                        "simple" => ParseKind::Simple,
+                        "regex" => ParseKind::Regex,
+                        "relaxed" => ParseKind::Relaxed,
+                        _ => {
+                            return Err(Error::syntax(
+                                "parse kind must be simple, regex, or relaxed",
+                                span,
+                            ));
+                        }
+                    }
+                } else {
+                    ParseKind::Simple
+                };
+                let flags = if self.eat_keyword("flags") {
+                    if kind != ParseKind::Regex {
+                        return Err(self.expected("kind=regex for flags"));
+                    }
+                    self.expect(Kind::Assign)?;
+                    if let Kind::String(value) = self.current().kind.clone() {
+                        self.advance();
+                        value.into_owned()
+                    } else {
+                        self.identifier()?
+                    }
+                } else {
+                    String::new()
+                };
+                let input = self.expr(0)?;
+                self.expect_keyword("with")?;
+                let mut pattern = Vec::new();
+                let mut names = std::collections::HashSet::new();
+                while !matches!(
+                    self.current().kind,
+                    Kind::Pipe | Kind::Semi | Kind::RParen | Kind::Eof
+                ) {
+                    let part = match self.current().kind.clone() {
+                        Kind::Star => {
+                            self.advance();
+                            ParsePart::Wildcard
+                        }
+                        Kind::String(value) => {
+                            self.advance();
+                            ParsePart::Literal(value.into_owned())
+                        }
+                        _ => {
+                            let span = self.current().span;
+                            let name = self.identifier()?;
+                            if !names.insert(name.clone()) {
+                                return Err(Error::syntax("duplicate parse column", span));
+                            }
+                            let ty = if self.eat(Kind::Colon) {
+                                let name = self.identifier()?;
+                                ScalarType::parse(&name).ok_or_else(|| {
+                                    Error::unsupported(format!("parse type '{name}'"), span)
+                                })?
+                            } else {
+                                ScalarType::String
+                            };
+                            if ty == ScalarType::Dynamic {
+                                return Err(Error::unsupported(
+                                    "parse dynamic captures; use parse_json after extracting a string",
+                                    span,
+                                ));
+                            }
+                            ParsePart::Capture { name, ty }
+                        }
+                    };
+                    pattern.push(part);
+                    if pattern.len() > 256 {
+                        return Err(Error::syntax(
+                            "parse pattern limit exceeded",
+                            self.current().span,
+                        ));
+                    }
+                }
+                if pattern.is_empty() {
+                    return Err(self.expected("a parse pattern"));
+                }
+                Operator::Parse {
+                    input,
+                    kind,
+                    flags,
+                    pattern,
+                    filter: name == "parse-where",
+                }
+            }
             "mv-expand" | "mvexpand" => {
                 let mut array_mode = false;
                 let mut index = None;

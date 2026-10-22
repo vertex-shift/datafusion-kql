@@ -315,6 +315,10 @@ impl<'s> Planner<'s> {
                     columns,
                     limit,
                 } => self.mv_expand(plan, *array_mode, index.as_deref(), columns, *limit)?,
+                Operator::Parse { .. } => {
+                    let temporary = self.temporary_name(&plan);
+                    crate::parsing::plan(&self.expressions(), plan, operator, temporary)?
+                }
                 Operator::Summarize { aggregates, by } => self.summarize(plan, aggregates, by)?,
                 Operator::Sort(keys) => {
                     let sorts = keys

@@ -117,6 +117,13 @@ pub enum Operator {
         columns: Vec<ExpandColumn>,
         limit: usize,
     },
+    Parse {
+        input: Expr,
+        kind: ParseKind,
+        flags: String,
+        pattern: Vec<ParsePart>,
+        filter: bool,
+    },
     Summarize {
         aggregates: Vec<NamedExpr>,
         by: Vec<NamedExpr>,
@@ -149,6 +156,20 @@ pub struct NamedExpr {
 pub struct ExpandColumn {
     pub value: NamedExpr,
     pub ty: Option<ScalarType>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseKind {
+    Simple,
+    Regex,
+    Relaxed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParsePart {
+    Literal(String),
+    Capture { name: String, ty: ScalarType },
+    Wildcard,
 }
 
 #[derive(Debug, Clone, PartialEq)]

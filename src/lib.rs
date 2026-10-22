@@ -20,10 +20,14 @@ pub mod ast;
 mod dynamic;
 mod error;
 mod expressions;
+mod json_path;
 mod lexer;
 mod literals;
 mod parser;
+mod parsing;
 mod planner;
+mod regex_extract;
+mod temporal;
 
 pub use error::{Error, Result};
 pub use parser::{ParserOptions, parse, parse_with_options};
