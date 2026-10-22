@@ -39,6 +39,7 @@ pub fn parse_with_options(query: &str, options: &ParserOptions) -> Result<Query>
         tokens: lex(query)?,
         pos: 0,
         nesting: 0,
+        dynamic_depth: 0,
         options,
     };
     let result = parser.query()?;
@@ -50,6 +51,7 @@ struct Parser<'a, 'o> {
     tokens: Vec<Token<'a>>,
     pos: usize,
     nesting: usize,
+    dynamic_depth: usize,
     options: &'o ParserOptions,
 }
 
@@ -193,8 +195,13 @@ impl<'a> Parser<'a, '_> {
         }
         if matches!(
             self.tokens[at].kind,
-            Kind::Ident("print" | "datatable" | "union" | "range" | "let")
+            Kind::Ident("print" | "datatable" | "union" | "let")
         ) {
+            return true;
+        }
+        if matches!(self.tokens[at].kind, Kind::Ident("range"))
+            && !matches!(self.tokens.get(at + 1).map(|t| &t.kind), Some(Kind::LParen))
+        {
             return true;
         }
         self.tokens[self.pos..]
@@ -330,6 +337,75 @@ impl<'a> Parser<'a, '_> {
             "take" | "limit" => Operator::Take(self.row_count()?),
             "project" => Operator::Project(self.named_list()?),
             "extend" => Operator::Extend(self.named_list()?),
+            "mv-expand" | "mvexpand" => {
+                let mut array_mode = false;
+                let mut index = None;
+                while self.keyword("kind")
+                    || self.keyword("bagexpansion")
+                    || self.keyword("with_itemindex")
+                {
+                    let parameter = self.identifier()?;
+                    self.expect(Kind::Assign)?;
+                    if parameter == "with_itemindex" {
+                        if index.is_some() {
+                            return Err(self.expected("only one with_itemindex"));
+                        }
+                        index = Some(self.identifier()?);
+                    } else {
+                        let span = self.current().span;
+                        array_mode = match self.identifier()?.as_str() {
+                            "bag" => false,
+                            "array" => true,
+                            _ => {
+                                return Err(Error::syntax(
+                                    "mv-expand kind must be bag or array",
+                                    span,
+                                ));
+                            }
+                        };
+                    }
+                }
+                let mut columns = Vec::new();
+                loop {
+                    let value = self.named_expr()?;
+                    let ty = if self.eat_keyword("to") {
+                        self.expect_keyword("typeof")?;
+                        self.expect(Kind::LParen)?;
+                        let span = self.current().span;
+                        let name = self.identifier()?;
+                        let ty = ScalarType::parse(&name).ok_or_else(|| {
+                            Error::unsupported(format!("scalar type '{name}'"), span)
+                        })?;
+                        self.expect(Kind::RParen)?;
+                        Some(ty)
+                    } else {
+                        None
+                    };
+                    columns.push(ExpandColumn { value, ty });
+                    if columns.len() > 128 {
+                        return Err(Error::syntax(
+                            "mv-expand column limit exceeded",
+                            self.current().span,
+                        ));
+                    }
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                }
+                let limit = if self.eat_keyword("limit") {
+                    self.row_count()?
+                } else if name == "mvexpand" {
+                    128
+                } else {
+                    2_147_483_647
+                };
+                Operator::MvExpand {
+                    array_mode,
+                    index,
+                    columns,
+                    limit,
+                }
+            }
             "project-away" => Operator::ProjectAway(self.pattern_list()?),
             "project-keep" => Operator::ProjectKeep(self.pattern_list()?),
             "project-rename" => {
@@ -577,6 +653,41 @@ impl<'a> Parser<'a, '_> {
         self.enter()?;
         let mut left = self.prefix()?;
         loop {
+            if self.eat(Kind::LBracket) {
+                let index = self.expr(0)?;
+                self.expect(Kind::RBracket)?;
+                let span = Span::new(left.span.start, self.tokens[self.pos - 1].span.end);
+                let depth = left.depth.max(index.depth) + 1;
+                left = self.node(
+                    ExprKind::Access {
+                        expr: Box::new(left),
+                        index: Box::new(index),
+                    },
+                    span,
+                    depth,
+                )?;
+                continue;
+            }
+            if self.eat(Kind::Dot) {
+                let start = self.current().span.start;
+                let name = self.identifier()?;
+                let index = self.node(
+                    ExprKind::Literal(Literal::String(name)),
+                    Span::new(start, self.tokens[self.pos - 1].span.end),
+                    1,
+                )?;
+                let span = Span::new(left.span.start, index.span.end);
+                let depth = left.depth + 1;
+                left = self.node(
+                    ExprKind::Access {
+                        expr: Box::new(left),
+                        index: Box::new(index),
+                    },
+                    span,
+                    depth,
+                )?;
+                continue;
+            }
             let negated = self.at(&Kind::Bang);
             let next = if negated { self.pos + 1 } else { self.pos };
             let keyword = match self.tokens.get(next).map(|t| &t.kind) {
@@ -689,6 +800,28 @@ impl<'a> Parser<'a, '_> {
             Kind::Ident("true") => ExprKind::Literal(Literal::Bool(true)),
             Kind::Ident("false") => ExprKind::Literal(Literal::Bool(false)),
             Kind::Ident("null") => ExprKind::Literal(Literal::Null),
+            Kind::Ident("typeof") => {
+                self.expect(Kind::LParen)?;
+                let token = self.current().span;
+                let name = self.identifier()?;
+                let ty = ScalarType::parse(&name)
+                    .ok_or_else(|| Error::unsupported(format!("scalar type '{name}'"), token))?;
+                self.expect(Kind::RParen)?;
+                ExprKind::Type(ty)
+            }
+            Kind::Ident("dynamic") => {
+                self.expect(Kind::LParen)?;
+                self.dynamic_depth += 1;
+                let value = self.expr(0)?;
+                self.dynamic_depth -= 1;
+                self.expect(Kind::RParen)?;
+                let depth = value.depth + 1;
+                return self.node(
+                    ExprKind::Dynamic(Box::new(value)),
+                    Span::new(span.start, self.tokens[self.pos - 1].span.end),
+                    depth,
+                );
+            }
             Kind::Ident(name) => {
                 let name = name.to_owned();
                 if self.eat(Kind::LParen) {
@@ -714,6 +847,51 @@ impl<'a> Parser<'a, '_> {
                     parts.push(self.identifier()?);
                 }
                 ExprKind::Identifier(parts)
+            }
+            Kind::LBracket if self.dynamic_depth > 0 => {
+                let mut items = Vec::new();
+                if !self.at(&Kind::RBracket) {
+                    loop {
+                        items.push(self.expr(0)?);
+                        if !self.eat(Kind::Comma) || self.at(&Kind::RBracket) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(Kind::RBracket)?;
+                let depth = items.iter().map(|e| e.depth).max().unwrap_or(0) + 1;
+                return self.node(
+                    ExprKind::Array(items),
+                    Span::new(span.start, self.tokens[self.pos - 1].span.end),
+                    depth,
+                );
+            }
+            Kind::LBrace if self.dynamic_depth > 0 => {
+                let mut items = Vec::new();
+                if !self.at(&Kind::RBrace) {
+                    loop {
+                        let token = self.advance();
+                        let Kind::String(name) = token.kind else {
+                            return Err(Error::syntax(
+                                "dynamic object keys must be strings",
+                                token.span,
+                            ));
+                        };
+                        let name = name.into_owned();
+                        self.expect(Kind::Colon)?;
+                        items.push((name, self.expr(0)?));
+                        if !self.eat(Kind::Comma) || self.at(&Kind::RBrace) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(Kind::RBrace)?;
+                let depth = items.iter().map(|(_, e)| e.depth).max().unwrap_or(0) + 1;
+                return self.node(
+                    ExprKind::Object(items),
+                    Span::new(span.start, self.tokens[self.pos - 1].span.end),
+                    depth,
+                );
             }
             Kind::LBracket => {
                 self.pos -= 1;

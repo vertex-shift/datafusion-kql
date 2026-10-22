@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.1 implements the typed tabular subset below. Keywords, function names, table
+0.1 implements the typed tabular and dynamic subset below. Keywords, function names, table
 names, and column names are case-sensitive. Unsupported syntax/functions return
 an error; there is no SQL fallback.
 
@@ -14,7 +14,7 @@ an error; there is no SQL fallback.
 | `let` | Scalar expressions, tabular plans, aliases, nested lexical scopes |
 | Parenthesized queries | Nested pipelines and scoped `let` statements |
 | `print` | One row of scalar expressions |
-| `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan` columns |
+| `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan`, `dynamic` columns |
 | `range` | Inclusive, lazy native `generate_series`; non-null `long` bounds/step, including descending ranges |
 | `union` | Source form and pipe form |
 
@@ -39,6 +39,7 @@ column; assignments in a single `extend` resolve against its input.
 | `count` | One `Count:long` result column, including zero for empty input |
 | `join` | Default `innerunique`; explicit `inner`, `leftouter`, `rightouter`, `fullouter`, left/right semi and anti |
 | `union` | Default outer; inner intersection; align by name and preserve duplicate rows |
+| `mv-expand`, `mvexpand` | Arrays and bags, zipped multiple columns, per-row limits, `with_itemindex`, cast-only `to typeof(...)` |
 
 Joins accept a table or parenthesized query on the right. Keys can be `on Key`
 or `$left.Key == $right.OtherKey`, with comma/`and` conjunctions. The default
@@ -90,6 +91,43 @@ nulls.
   a promise that every SQL function has Kusto semantics. The frontend does not
   install or overwrite session functions.
 
+## Dynamic values and collection expansion
+
+`dynamic(...)` supports nested arrays and property bags with single- or
+double-quoted strings, scalar literals, and nulls. Dynamic values are real
+Arrow **dense unions**, distinguishing null, bool, long, real, string, array,
+bag, datetime, and timespan. Arrays and bags use JSON-marked UTF-8 child buffers;
+they are not confused with ordinary string columns or normalized to empty
+strings. Nested non-JSON scalar types serialize as strings inside collections.
+
+`parse_json`/`todynamic`, dotted properties, arbitrary string-key subscripts,
+zero-based and negative array indices, `gettype`, and scalar conversion
+functions are implemented. As in KQL, malformed JSON deliberately becomes a
+dynamic string holding the original text. Missing properties/indices produce
+dynamic nulls. `dynamic(...)` itself must be a constant expression; use
+`parse_json`, `pack_array`, or `bag_pack` for runtime values.
+
+Functions: `array_length`, `pack_array`, `bag_pack`/`pack`/`pack_dictionary`,
+`bag_keys`, `bag_has_key`, `bag_merge` (leftmost wins), root-key `bag_set_key`
+and `bag_remove_keys`, `array_concat`, `array_slice` (inclusive end),
+`array_index_of`, `set_has_element`, `array_reverse`, `array_sum`, `set_union`,
+`set_intersect`, `set_difference`, `zip`, `repeat`, integer `range()`,
+`strcat_array`, and `split`. Array-producing builders and expansion reject
+collections exceeding 1,048,576 elements instead of allocating without a bound.
+JSONPath writes and noninteger scalar `range()` bounds are not yet implemented.
+
+`mv-expand` lowers to one batch kernel producing zipped struct rows and one
+native DataFusion `Unnest`. Each source is expanded in parallel, shorter
+collections are padded with real dynamic nulls, and other columns are retained.
+Null produces one row; empty arrays/bags produce none. Bags support default
+single-entry bag expansion and `kind=array` key/value pairs. `with_itemindex`
+is zero-based. The default per-row limit is 2,147,483,647 (legacy `mvexpand`:
+128), subject to the collection resource budget.
+
+`to typeof(...)` checks underlying dynamic types and does not parse strings into
+numbers. For example, `"2"` becomes null under `to typeof(long)`; use `tolong`
+after an untyped expansion to request conversion.
+
 ## Aggregations
 
 `count`, `countif`, `sum`, `sumif`, `avg`, `avgif`, `min`, `minif`, `max`,
@@ -136,9 +174,9 @@ aggregations are not yet implemented.
   NaN/infinity ordering, and approximate aggregation can differ from the Kusto
   service. No string term index is installed: `has` scans Arrow batches using
   native regex kernels, rather than promising Kusto's indexed search complexity.
-- Only one final tabular result is supported. Management commands, dynamic JSON,
+- Only one final tabular result is supported. Management commands,
   parameter declarations, user-defined KQL functions, `materialize`, `render`,
-  hints, `make-series`, window/serialization operators, and `mv-*` are future
+  hints, `make-series`, window/serialization operators, and `mv-apply` are future
   work. See [the delivery plan](architecture.md).
 - Default parsing limits: 1 MiB of query text, nesting/expression depth 64,
   and 128 operators per pipeline. `parse_with_options` permits changing these

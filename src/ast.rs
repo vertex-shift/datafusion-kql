@@ -77,6 +77,7 @@ pub enum ScalarType {
     String,
     Datetime,
     Timespan,
+    Dynamic,
 }
 
 impl ScalarType {
@@ -89,6 +90,7 @@ impl ScalarType {
             "string" => Self::String,
             "datetime" | "date" => Self::Datetime,
             "timespan" | "time" => Self::Timespan,
+            "dynamic" => Self::Dynamic,
             _ => return None,
         })
     }
@@ -109,6 +111,12 @@ pub enum Operator {
     ProjectAway(Vec<String>),
     ProjectKeep(Vec<String>),
     ProjectRename(Vec<(String, String)>),
+    MvExpand {
+        array_mode: bool,
+        index: Option<String>,
+        columns: Vec<ExpandColumn>,
+        limit: usize,
+    },
     Summarize {
         aggregates: Vec<NamedExpr>,
         by: Vec<NamedExpr>,
@@ -135,6 +143,12 @@ pub enum Operator {
 pub struct NamedExpr {
     pub name: Option<String>,
     pub expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpandColumn {
+    pub value: NamedExpr,
+    pub ty: Option<ScalarType>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -184,6 +198,14 @@ pub enum ExprKind {
         name: String,
         args: Vec<Expr>,
     },
+    Dynamic(Box<Expr>),
+    Array(Vec<Expr>),
+    Object(Vec<(String, Expr)>),
+    Access {
+        expr: Box<Expr>,
+        index: Box<Expr>,
+    },
+    Type(ScalarType),
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,

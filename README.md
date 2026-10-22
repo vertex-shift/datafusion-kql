@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** initial typed-tabular compatibility release, targeting **DataFusion
+**Status:** typed-tabular and dynamic/JSON query support, targeting **DataFusion
 55.2.x** and **Rust 1.94+**. This is not yet a complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
 and known semantic differences.
@@ -14,11 +14,15 @@ and known semantic differences.
 
 ```bash
 cargo run --example quickstart
+cargo run --example telemetry_json
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
 and prints the native logical plan and results. No Azure account or service is
 required.
+
+`telemetry_json` parses JSON telemetry, reads nested properties, expands latency
+arrays with native `Unnest`, and aggregates the expanded measurements.
 
 ## Extend an existing DataFusion session
 
@@ -101,7 +105,12 @@ functions and string predicates lower to native DataFusion expressions.
 KQL-specific null equality, non-null strings, aggregate defaults, and sort
 defaults are handled explicitly.
 
-Dynamic JSON, `mv-*`, `make-series`, management commands, hints, and complete
+Dynamic literals, JSON parsing, property/index access, bag/array/set functions,
+and `mv-expand` are supported with typed Arrow unions and native batch kernels.
+Multiple expanded columns zip with null padding rather than forming an
+accidental Cartesian product.
+
+`mv-apply`, `make-series`, management commands, hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.
 
 ## Architecture and performance
@@ -112,7 +121,9 @@ KQL -> lexer / AST -> DataFusion LogicalPlan / Expr
 ```
 
 Ordinary filters, projections, joins, aggregations, and limits remain visible to
-DataFusion's optimizer. There are no row-at-a-time frontend UDFs. `has` currently
+DataFusion's optimizer. Dynamic/JSON operations use expression-local Arrow batch
+kernels, not a separate row-oriented query interpreter, and do not overwrite the
+session's function registry. `has` currently
 uses native regex scanning, not a Kusto-style inverted index. Normalizing
 nullable Arrow strings can add work; non-null source schemas avoid that cost.
 

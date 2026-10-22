@@ -15,6 +15,7 @@
 //! ```
 
 pub mod ast;
+mod dynamic;
 mod error;
 mod expressions;
 mod lexer;

@@ -18,12 +18,14 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 datafusion = { version = "55.2.0", default-features = false, features = [
     "datetime_expressions",
     "math_expressions",
+    "nested_expressions",
     "recursive_protection",
     "regex_expressions",
     "string_expressions",
     "unicode_expressions",
 ] }
 regex = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
 
 [dev-dependencies]

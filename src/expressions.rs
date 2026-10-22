@@ -12,6 +12,7 @@ use datafusion::optimizer::simplify_expressions::{ExprSimplifier, SimplifyContex
 use datafusion::prelude::lit;
 
 use crate::ast::{self, BinaryOp, ExprKind, ScalarType, Span, UnaryOp};
+use crate::dynamic::{self, Kernel};
 use crate::error::{Error, Result};
 use crate::literals::{data_type, literal_value};
 
@@ -60,14 +61,8 @@ impl Expressions<'_> {
         Ok(match &expr.kind {
             ExprKind::Literal(value) => lit(literal_value(value, expr.span)?),
             ExprKind::Identifier(parts) => {
-                if parts.len() != 1 {
-                    return Err(Error::unsupported(
-                        "property access; use ['a.b'] for a column whose name contains a dot",
-                        expr.span,
-                    ));
-                }
                 let name = &parts[0];
-                if let Some(index) = schema.index_of_column_by_name(None, name) {
+                let mut value = if let Some(index) = schema.index_of_column_by_name(None, name) {
                     Expr::Column(Column::from(schema.qualified_field(index)))
                 } else if let Some(value) = self.scalars.get(name) {
                     value.clone()
@@ -75,8 +70,38 @@ impl Expressions<'_> {
                     return Err(Error::Plan(format!(
                         "unknown column or scalar binding '{name}'"
                     )));
+                };
+                for property in &parts[1..] {
+                    value = self.access(value, lit(property.clone()), schema)?;
                 }
+                value
             }
+            ExprKind::Dynamic(value) => {
+                let value = self.lower(value, schema, false)?;
+                let value = dynamic::call(Kernel::IntoDynamic, vec![value]);
+                self.constant(value, expr.span).map(lit)?
+            }
+            ExprKind::Array(items) => dynamic::call(
+                Kernel::PackArray,
+                items
+                    .iter()
+                    .map(|item| self.lower(item, schema, false))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            ExprKind::Object(items) => {
+                let mut args = Vec::with_capacity(items.len() * 2);
+                for (key, value) in items {
+                    args.push(lit(key.clone()));
+                    args.push(self.lower(value, schema, false)?);
+                }
+                dynamic::call(Kernel::BagPack, args)
+            }
+            ExprKind::Access { expr, index } => {
+                let value = self.lower(expr, schema, false)?;
+                let index = self.lower(index, schema, false)?;
+                self.access(value, index, schema)?
+            }
+            ExprKind::Type(ty) => lit(format!("{ty:?}").to_lowercase()),
             ExprKind::Unary { op, expr } => {
                 let value = self.lower(expr, schema, false)?;
                 match op {
@@ -193,6 +218,15 @@ impl Expressions<'_> {
         filter: bool,
     ) -> Result<Expr> {
         use BinaryOp as B;
+        if matches!(op, B::Eq | B::NotEq)
+            && (dynamic::is_dynamic(&left.get_type(schema)?)
+                || dynamic::is_dynamic(&right.get_type(schema)?))
+        {
+            return Ok(dynamic::call(
+                Kernel::Equal(op == B::NotEq),
+                vec![left, right],
+            ));
+        }
         Ok(match op {
             B::And => left.and(right),
             B::Or => left.or(right),
@@ -201,8 +235,8 @@ impl Expressions<'_> {
                 let negated = matches!(op, B::NotEq | B::NotEqInsensitive);
                 let (left, right) = if insensitive {
                     (
-                        self.function("lower", vec![left])?,
-                        self.function("lower", vec![right])?,
+                        self.function("lower", vec![self.string_value(left, schema)?])?,
+                        self.function("lower", vec![self.string_value(right, schema)?])?,
                     )
                 } else {
                     (left, right)
@@ -428,6 +462,29 @@ impl Expressions<'_> {
         )
     }
 
+    fn access(&self, value: Expr, index: Expr, schema: &DFSchema) -> Result<Expr> {
+        match value.get_type(schema)? {
+            ty if dynamic::is_dynamic(&ty) => Ok(dynamic::call(Kernel::Get, vec![value, index])),
+            DataType::Struct(_) => self.function("get_field", vec![value, index]),
+            DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(_, _) => {
+                let index = when(index.clone().lt(lit(0_i64)), index.clone())
+                    .otherwise(index + lit(1_i64))?;
+                self.function("array_element", vec![value, index])
+            }
+            ty => Err(Error::Plan(format!(
+                "cannot subscript {ty}; parse JSON or use a dynamic value"
+            ))),
+        }
+    }
+
+    fn string_value(&self, value: Expr, schema: &DFSchema) -> Result<Expr> {
+        Ok(if dynamic::is_dynamic(&value.get_type(schema)?) {
+            dynamic::call(Kernel::Convert(DataType::Utf8), vec![value])
+        } else {
+            value
+        })
+    }
+
     fn call(&self, name: &str, args: &[ast::Expr], span: Span, schema: &DFSchema) -> Result<Expr> {
         let values = args
             .iter()
@@ -443,6 +500,36 @@ impl Expressions<'_> {
                 ))
             }
         };
+        let kernel = match name {
+            "parse_json" | "todynamic" => Some(Kernel::ParseJson),
+            "gettype" => Some(Kernel::GetType),
+            "array_length" => Some(Kernel::ArrayLength),
+            "pack_array" => Some(Kernel::PackArray),
+            "bag_pack" | "pack" | "pack_dictionary" => Some(Kernel::BagPack),
+            "bag_keys" => Some(Kernel::BagKeys),
+            "bag_has_key" => Some(Kernel::BagHasKey),
+            "bag_merge" => Some(Kernel::BagMerge),
+            "bag_set_key" => Some(Kernel::BagSetKey),
+            "bag_remove_keys" => Some(Kernel::BagRemoveKeys),
+            "array_concat" => Some(Kernel::ArrayConcat),
+            "array_slice" => Some(Kernel::ArraySlice),
+            "array_index_of" => Some(Kernel::ArrayIndexOf),
+            "set_has_element" => Some(Kernel::ArrayHas),
+            "array_reverse" => Some(Kernel::ArrayReverse),
+            "array_sum" => Some(Kernel::ArraySum),
+            "set_union" => Some(Kernel::SetUnion),
+            "set_intersect" => Some(Kernel::SetIntersect),
+            "set_difference" => Some(Kernel::SetDifference),
+            "zip" => Some(Kernel::Zip),
+            "repeat" => Some(Kernel::Repeat),
+            "range" => Some(Kernel::Range),
+            "strcat_array" => Some(Kernel::StrcatArray),
+            "split" => Some(Kernel::Split),
+            _ => None,
+        };
+        if let Some(kernel) = kernel {
+            return Ok(dynamic::call(kernel, values));
+        }
         Ok(match name {
             "now" | "ago" => {
                 if name == "ago" {
@@ -511,6 +598,9 @@ impl Expressions<'_> {
             }
             "tostring" => {
                 arity(1)?;
+                if dynamic::is_dynamic(&values[0].get_type(schema)?) {
+                    return Ok(dynamic::call(Kernel::Convert(DataType::Utf8), values));
+                }
                 self.function(
                     "coalesce",
                     vec![try_cast(values[0].clone(), DataType::Utf8), lit("")],
@@ -525,11 +615,17 @@ impl Expressions<'_> {
                     "tobool" => ScalarType::Bool,
                     _ => ScalarType::Datetime,
                 };
+                if dynamic::is_dynamic(&values[0].get_type(schema)?) {
+                    return Ok(dynamic::call(Kernel::Convert(data_type(ty)), values));
+                }
                 try_cast(values[0].clone(), data_type(ty))
             }
             "bool" | "boolean" | "int" | "long" | "real" | "double" | "string" => {
                 arity(1)?;
                 let ty = data_type(ScalarType::parse(name).expect("known type constructor"));
+                if dynamic::is_dynamic(&values[0].get_type(schema)?) {
+                    return Ok(dynamic::call(Kernel::Convert(ty), values));
+                }
                 if name == "string" {
                     self.function("coalesce", vec![try_cast(values[0].clone(), ty), lit("")])?
                 } else {

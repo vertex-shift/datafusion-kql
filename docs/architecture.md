@@ -27,7 +27,12 @@ KQL text -> borrowed lexer tokens -> typed AST -> schema-aware planner
 ```
 
 There is no row-oriented query interpreter, SQL string generation, custom
-execution engine, or implicit query execution during planning. Existing
+execution engine, or implicit query execution during planning. Dynamic/JSON
+operations use expression-local Arrow batch kernels without installing global
+functions. Dynamic values use compact dense unions; nulls and strings retain
+distinct types. Zipped expansion builds one list of struct rows and uses native
+DataFusion `Unnest`, avoiding both Cartesian expansion and null-index padding
+of union arrays. Existing
 `TableProvider`s, catalogs, runtime configuration, memory limits, object stores,
 and user-defined functions remain owned by the embedding DataFusion application.
 SQL is a development dependency for differential testing, not a runtime
@@ -54,7 +59,8 @@ errors rather than silently execute with different semantics.
   necessary and build an owned, reusable AST.
 - Keep ordinary predicates, arithmetic, sorting, and aggregations in native
   DataFusion expressions so optimizer rules can inspect them.
-- Use native string/regex kernels instead of per-row Rust UDF callbacks.
+- Use native string/regex kernels; implement KQL-specific dynamic semantics in
+  batch kernels while retaining standard DataFusion operators around them.
 - Reuse Arrow buffers and existing table providers; do not collect input data in
   the frontend.
 - Keep limits lazy; let DataFusion select top-k, hash joins, and partial/final
@@ -70,8 +76,9 @@ errors rather than silently execute with different semantics.
 
 ## Later compatibility milestones
 
-- Dynamic JSON values and property access, `mv-expand`, `mv-apply`, `parse`,
-  `extract`, and bag/list aggregations with explicit Arrow type mappings.
+- Dynamic JSON values, property access, bag/array/set functions, and `mv-expand`
+  are implemented. Continue with `mv-apply`, `parse`, `extract`, and collection
+  aggregations.
 - Time-series operators (`make-series`, series functions), window/serialization
   semantics, `scan`, and `partition`.
 - Broader aggregate coverage, Kusto-specific approximate algorithms, schema

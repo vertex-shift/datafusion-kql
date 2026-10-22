@@ -13,12 +13,13 @@ use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::session_state::SessionState;
 use datafusion::logical_expr::expr_fn::{ExprFunctionExt, cast};
 use datafusion::logical_expr::registry::FunctionRegistry;
-use datafusion::logical_expr::{Expr, JoinType, LogicalPlan, LogicalPlanBuilder};
+use datafusion::logical_expr::{Expr, ExprSchemable, JoinType, LogicalPlan, LogicalPlanBuilder};
 use datafusion::prelude::{SessionContext, lit};
 
 use crate::ast::{
     self, BindingValue, ExprKind, JoinKind, NamedExpr, Operator, Source, Span, UnionKind,
 };
+use crate::dynamic::{self, Kernel};
 use crate::error::{Error, Result};
 use crate::expressions::{Expressions, is_string};
 use crate::literals::data_type;
@@ -95,7 +96,7 @@ impl<'s> Planner<'s> {
                 BindingValue::Scalar(ast::Expr {
                     kind: ExprKind::Identifier(parts),
                     ..
-                }) if parts.len() != 1 || !self.scalars.contains_key(&parts[0]) => Some(parts),
+                }) if !self.scalars.contains_key(&parts[0]) => Some(parts),
                 _ => None,
             };
             if let Some(parts) = table_name {
@@ -308,6 +309,12 @@ impl<'s> Planner<'s> {
                         .project(expressions)?
                         .build()?
                 }
+                Operator::MvExpand {
+                    array_mode,
+                    index,
+                    columns,
+                    limit,
+                } => self.mv_expand(plan, *array_mode, index.as_deref(), columns, *limit)?,
                 Operator::Summarize { aggregates, by } => self.summarize(plan, aggregates, by)?,
                 Operator::Sort(keys) => {
                     let sorts = keys
@@ -368,6 +375,119 @@ impl<'s> Planner<'s> {
             check_plan(&plan)?;
         }
         Ok(plan)
+    }
+
+    fn mv_expand(
+        &mut self,
+        plan: LogicalPlan,
+        array_mode: bool,
+        index: Option<&str>,
+        columns: &[ast::ExpandColumn],
+        limit: usize,
+    ) -> Result<LogicalPlan> {
+        let mut used = HashSet::new();
+        let mut targets = Vec::new();
+        let mut sources = Vec::new();
+        let mut projection = (0..plan.schema().fields().len())
+            .map(|i| field_expr(&plan, i))
+            .collect::<Vec<_>>();
+        for (i, column) in columns.iter().enumerate() {
+            let name = output_name(&column.value, i, &mut used)?;
+            let expression = self
+                .expressions()
+                .scalar(&column.value.expr, plan.schema())?;
+            if !dynamic::is_dynamic(&expression.get_type(plan.schema().as_ref())?) {
+                return Err(Error::syntax(
+                    "mv-expand requires a dynamic array or property bag",
+                    column.value.expr.span,
+                ));
+            }
+            sources.push(expression);
+            targets.push((name, i, column.ty));
+        }
+        if let Some(index) = index
+            && (plan.schema().index_of_column_by_name(None, index).is_some()
+                || used.contains(index))
+        {
+            return Err(Error::Plan(format!(
+                "mv-expand index column '{index}' already exists"
+            )));
+        }
+        let temporary = self.temporary_name(&plan);
+        projection.push(
+            dynamic::call(
+                Kernel::Expand {
+                    array_mode,
+                    limit,
+                    columns: columns.len(),
+                },
+                sources,
+            )
+            .alias(&temporary),
+        );
+        let expanded = LogicalPlanBuilder::from(plan.clone())
+            .project(projection)?
+            .unnest_column(Column::from_name(&temporary))?
+            .build()?;
+        let expanded_column = |index: usize, ty: Option<ast::ScalarType>| -> Result<Expr> {
+            let column = self.expressions().function(
+                "get_field",
+                vec![
+                    Expr::Column(Column::from_name(&temporary)),
+                    lit(format!("column_{index}")),
+                ],
+            )?;
+            Ok(
+                if let Some(ty) = ty.filter(|ty| *ty != ast::ScalarType::Dynamic) {
+                    dynamic::call(Kernel::TypeOnly(data_type(ty)), vec![column])
+                } else {
+                    column
+                },
+            )
+        };
+        let mut projection = plan
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(i, field)| {
+                if let Some((name, index, ty)) =
+                    targets.iter().find(|(name, _, _)| name == field.name())
+                {
+                    Ok(expanded_column(*index, *ty)?.alias(name))
+                } else {
+                    Ok(field_expr(&plan, i))
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for (name, index, ty) in &targets {
+            if plan.schema().index_of_column_by_name(None, name).is_none() {
+                projection.push(expanded_column(*index, *ty)?.alias(name));
+            }
+        }
+        if let Some(index) = index {
+            projection.push(
+                self.expressions()
+                    .function(
+                        "get_field",
+                        vec![Expr::Column(Column::from_name(temporary)), lit("index")],
+                    )?
+                    .alias(index),
+            );
+        }
+        Ok(LogicalPlanBuilder::from(expanded)
+            .project(projection)?
+            .build()?)
+    }
+
+    fn temporary_name(&mut self, plan: &LogicalPlan) -> String {
+        loop {
+            let name = format!("__kql_temporary_{}", self.next_alias);
+            self.next_alias += 1;
+            if plan.schema().index_of_column_by_name(None, &name).is_none() {
+                return name;
+            }
+        }
     }
 
     fn datatable(
