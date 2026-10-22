@@ -119,6 +119,10 @@ cumulative sums and ranks, and bounded session windows. Hidden order tracking
 preserves semantics through projections, filters, and expansion without adding
 window overhead to ordinary analytic queries.
 
+Lookup, schema introspection, projection reordering, sampling, wildcard table
+sources, and source-labelled/type-splitting unions extend the tabular surface.
+Limits and top-k counts can use constant `let` bindings and arithmetic.
+
 `mv-apply`, `make-series`, management commands, hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.
 

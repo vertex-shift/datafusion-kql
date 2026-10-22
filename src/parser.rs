@@ -250,14 +250,44 @@ impl<'a> Parser<'a, '_> {
                 step: Box::new(step),
             }
         } else if self.eat_keyword("union") {
-            let (kind, inputs) = self.union_inputs()?;
-            Source::Union { kind, inputs }
+            let (kind, withsource, inputs) = self.union_inputs()?;
+            Source::Union {
+                kind,
+                withsource,
+                inputs,
+            }
         } else {
             let start = self.current().span.start;
-            let name = self.path()?;
-            Source::Table {
-                name,
-                span: Span::new(start, self.tokens[self.pos - 1].span.end),
+            if self.at(&Kind::Star) {
+                let pattern = self.pattern_one()?;
+                Source::Pattern {
+                    prefix: Vec::new(),
+                    pattern,
+                    span: Span::new(start, self.tokens[self.pos - 1].span.end),
+                }
+            } else {
+                let mut name = vec![self.identifier()?];
+                while self.eat(Kind::Dot) {
+                    if self.at(&Kind::Star) {
+                        name.push(String::new());
+                        break;
+                    }
+                    name.push(self.identifier()?);
+                }
+                if self.at(&Kind::Star) {
+                    let mut pattern = name.pop().ok_or_else(|| self.expected("table pattern"))?;
+                    pattern.push_str(&self.pattern_one()?);
+                    Source::Pattern {
+                        prefix: name,
+                        pattern,
+                        span: Span::new(start, self.tokens[self.pos - 1].span.end),
+                    }
+                } else {
+                    Source::Table {
+                        name,
+                        span: Span::new(start, self.tokens[self.pos - 1].span.end),
+                    }
+                }
             }
         };
         self.nesting -= 1;
@@ -304,25 +334,41 @@ impl<'a> Parser<'a, '_> {
         Ok(Source::Datatable { columns, values })
     }
 
-    fn union_inputs(&mut self) -> Result<(UnionKind, Vec<Source>)> {
-        let kind = if self.eat_keyword("kind") {
+    fn union_inputs(&mut self) -> Result<(UnionKind, Option<String>, Vec<Source>)> {
+        let mut kind = UnionKind::Outer;
+        let mut withsource = None;
+        while self.keyword("kind") || self.keyword("withsource") || self.keyword("isfuzzy") {
+            let parameter = self.identifier()?;
             self.expect(Kind::Assign)?;
             let span = self.current().span;
-            match self.identifier()?.as_str() {
-                "outer" => UnionKind::Outer,
-                "inner" => UnionKind::Inner,
-                other => {
-                    return Err(Error::unsupported(format!("union kind '{other}'"), span));
+            if parameter == "withsource" {
+                if withsource.is_some() {
+                    return Err(Error::syntax("duplicate withsource parameter", span));
                 }
+                withsource = Some(self.identifier()?);
+            } else if parameter == "isfuzzy" {
+                if self.eat_keyword("true") {
+                    return Err(Error::unsupported(
+                        "fuzzy unions require a warning result channel",
+                        span,
+                    ));
+                }
+                self.expect_keyword("false")?;
+            } else {
+                kind = match self.identifier()?.as_str() {
+                    "outer" => UnionKind::Outer,
+                    "inner" => UnionKind::Inner,
+                    other => {
+                        return Err(Error::unsupported(format!("union kind '{other}'"), span));
+                    }
+                };
             }
-        } else {
-            UnionKind::Outer
-        };
+        }
         let mut inputs = vec![self.source()?];
         while self.eat(Kind::Comma) {
             inputs.push(self.source()?);
         }
-        Ok((kind, inputs))
+        Ok((kind, withsource, inputs))
     }
 
     fn operator(&mut self) -> Result<SpannedOperator> {
@@ -334,7 +380,7 @@ impl<'a> Parser<'a, '_> {
         }
         let kind = match name.as_str() {
             "where" | "filter" => Operator::Where(self.expr(0)?),
-            "take" | "limit" => Operator::Take(self.row_count()?),
+            "take" | "limit" => Operator::Take(self.row_count_expression()?),
             "project" => Operator::Project(self.named_list()?),
             "extend" => Operator::Extend(self.named_list()?),
             "serialize" => Operator::Serialize(
@@ -509,6 +555,49 @@ impl<'a> Parser<'a, '_> {
             }
             "project-away" => Operator::ProjectAway(self.pattern_list()?),
             "project-keep" => Operator::ProjectKeep(self.pattern_list()?),
+            "project-reorder" => {
+                let mut columns = Vec::new();
+                if !matches!(
+                    self.current().kind,
+                    Kind::Pipe | Kind::Semi | Kind::RParen | Kind::Eof
+                ) {
+                    loop {
+                        let pattern = self.pattern_one()?;
+                        let natural = self.eat_keyword("granny");
+                        if natural {
+                            self.expect(Kind::Minus)?;
+                        }
+                        let order = if self.eat_keyword("asc") {
+                            Some((true, natural))
+                        } else if self.eat_keyword("desc") {
+                            Some((false, natural))
+                        } else if natural {
+                            return Err(self.expected("asc or desc after granny-"));
+                        } else {
+                            None
+                        };
+                        columns.push(ReorderColumn { pattern, order });
+                        if !self.eat(Kind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                Operator::ProjectReorder(columns)
+            }
+            "getschema" => Operator::GetSchema,
+            "as" => Operator::As(self.identifier()?),
+            "sample" => Operator::Sample {
+                count: self.row_count_expression()?,
+                distinct: None,
+            },
+            "sample-distinct" => {
+                let count = self.row_count_expression()?;
+                self.expect_keyword("of")?;
+                Operator::Sample {
+                    count,
+                    distinct: Some(self.expr(0)?),
+                }
+            }
             "project-rename" => {
                 let mut renames = Vec::new();
                 loop {
@@ -544,7 +633,7 @@ impl<'a> Parser<'a, '_> {
                 Operator::Sort(keys)
             }
             "top" => {
-                let count = self.row_count()?;
+                let count = self.row_count_expression()?;
                 self.expect_keyword("by")?;
                 Operator::Top {
                     count,
@@ -559,10 +648,15 @@ impl<'a> Parser<'a, '_> {
                 Operator::Distinct(expressions)
             }
             "count" => Operator::Count,
-            "join" => self.join()?,
+            "join" => self.join(false)?,
+            "lookup" => self.join(true)?,
             "union" => {
-                let (kind, inputs) = self.union_inputs()?;
-                Operator::Union { kind, inputs }
+                let (kind, withsource, inputs) = self.union_inputs()?;
+                Operator::Union {
+                    kind,
+                    withsource,
+                    inputs,
+                }
             }
             _ => {
                 return Err(Error::unsupported(
@@ -590,27 +684,52 @@ impl<'a> Parser<'a, '_> {
         }
     }
 
+    fn row_count_expression(&mut self) -> Result<Expr> {
+        let expr = self.expr(0)?;
+        if matches!(
+            &expr.kind,
+            ExprKind::Literal(Literal::Real(_))
+                | ExprKind::Unary {
+                    op: UnaryOp::Negate,
+                    ..
+                }
+        ) {
+            return Err(Error::syntax(
+                "row count must be a nonnegative integer",
+                expr.span,
+            ));
+        }
+        Ok(expr)
+    }
+
     fn pattern_list(&mut self) -> Result<Vec<String>> {
         let mut patterns = Vec::new();
         loop {
-            let mut pattern = if self.at(&Kind::Star) {
-                String::new()
-            } else {
-                self.identifier()?
-            };
-            while self.eat(Kind::Star) {
-                pattern.push('*');
-                if let Kind::Ident(text) = self.current().kind {
-                    pattern.push_str(text);
-                    self.advance();
-                }
-            }
+            let pattern = self.pattern_one()?;
             patterns.push(pattern);
             if !self.eat(Kind::Comma) {
                 break;
             }
         }
         Ok(patterns)
+    }
+
+    fn pattern_one(&mut self) -> Result<String> {
+        let mut pattern = if self.at(&Kind::Star) {
+            String::new()
+        } else {
+            self.identifier()?
+        };
+        while self.eat(Kind::Star) {
+            pattern.push('*');
+            if let Kind::Ident(text) = self.current().kind
+                && self.current().span.start == self.tokens[self.pos - 1].span.end
+            {
+                pattern.push_str(text);
+                self.advance();
+            }
+        }
+        Ok(pattern)
     }
 
     fn named_list(&mut self) -> Result<Vec<NamedExpr>> {
@@ -671,7 +790,7 @@ impl<'a> Parser<'a, '_> {
         })
     }
 
-    fn join(&mut self) -> Result<Operator> {
+    fn join(&mut self, lookup: bool) -> Result<Operator> {
         let kind = if self.eat_keyword("kind") {
             self.expect(Kind::Assign)?;
             let span = self.current().span;
@@ -690,8 +809,18 @@ impl<'a> Parser<'a, '_> {
                 }
             }
         } else {
-            JoinKind::InnerUnique
+            if lookup {
+                JoinKind::LeftOuter
+            } else {
+                JoinKind::InnerUnique
+            }
         };
+        if lookup && !matches!(kind, JoinKind::LeftOuter | JoinKind::Inner) {
+            return Err(Error::syntax(
+                "lookup kind must be leftouter or inner",
+                self.current().span,
+            ));
+        }
         let input = if self.eat(Kind::LParen) {
             let input = self.query()?;
             self.expect(Kind::RParen)?;
@@ -736,10 +865,18 @@ impl<'a> Parser<'a, '_> {
                 break;
             }
         }
-        Ok(Operator::Join {
-            kind,
-            input: Box::new(input),
-            keys,
+        Ok(if lookup {
+            Operator::Lookup {
+                kind,
+                input: Box::new(input),
+                keys,
+            }
+        } else {
+            Operator::Join {
+                kind,
+                input: Box::new(input),
+                keys,
+            }
         })
     }
 

@@ -28,6 +28,7 @@ mod parser;
 mod parsing;
 mod planner;
 mod regex_extract;
+mod tabular;
 mod temporal;
 mod windows;
 

@@ -10,6 +10,7 @@ an error; there is no SQL fallback.
 | Construct | Supported behavior |
 | --- | --- |
 | Tables | Existing session table providers; one-, two-, and three-component catalog paths |
+| Table patterns | `*` wildcards in the selected catalog/schema; discovery is limited to 1024 matching providers |
 | Escaped identifiers | `['column name']`, including literal dots |
 | `let` | Scalar expressions, tabular plans, aliases, nested lexical scopes |
 | Parenthesized queries | Nested pipelines and scoped `let` statements |
@@ -31,14 +32,19 @@ column; assignments in a single `extend` resolve against its input.
 | `project`, `extend` | Named expressions, column selection, `*`; replacement columns move to the end with `extend` |
 | `project-away`, `project-keep` | Column names and `*` patterns; preserve input column order |
 | `project-rename` | `New=Old`; preserve input column order |
+| `project-reorder` | Explicit columns, wildcard ordering, and natural `granny-asc`/`granny-desc` ordering |
 | `summarize` | Named aggregate calls and arbitrary scalar grouping expressions; group-only form |
 | `sort`, `order` | Default **descending/nulls last**; ascending defaults to nulls first; explicit null placement |
-| `top` | Literal nonnegative count, one sort expression; default descending |
-| `take`, `limit` | Literal nonnegative counts; no ordering guarantee without a sort |
+| `top` | Constant integer expression for count, one sort expression; default descending |
+| `take`, `limit` | Constant integer expressions; no ordering guarantee without a sort |
+| `sample`, `sample-distinct` | Native random top-k sampling; distinct sampling returns unique projected values |
+| `as` | Lazy intermediate table binding within the query |
+| `getschema` | KQL schema rows, excluding hidden helpers; does not execute the input |
 | `distinct` | Scalar expressions or `*` |
 | `count` | One `Count:long` result column, including zero for empty input |
 | `join` | Default `innerunique`; explicit `inner`, `leftouter`, `rightouter`, `fullouter`, left/right semi and anti |
-| `union` | Default outer; inner intersection; align by name and preserve duplicate rows |
+| `lookup` | Default leftouter or explicit inner, preserves left duplicates, suppresses right lookup keys |
+| `union` | Name/type alignment, conflicting-type suffixes, inner intersection, wildcard legs, `withsource` |
 | `mv-expand`, `mvexpand` | Arrays and bags, zipped multiple columns, per-row limits, `with_itemindex`, cast-only `to typeof(...)` |
 | `parse`, `parse-where` | Simple, regex, and relaxed patterns; typed captures, regex flags, and strict failure filtering |
 | `serialize` | Freezes row order and supports calculated columns and native window expressions |
@@ -50,11 +56,20 @@ Selection among duplicate left rows is unspecified. Null join keys do not match.
 Both key columns remain in ordinary join outputs; conflicting right names get
 numeric suffixes. Suffix selection avoids overwriting other output columns.
 
-Union's conflicting-type schema splitting is **not implemented**: the same name
-with different non-string Arrow types errors instead of silently coercing data.
-Use explicit conversions before union. UTF-8 Arrow string representations align
-to `Utf8`. Missing strings become empty strings; other missing values are typed
-nulls.
+Union keeps distinct name/type pairs and suffixes conflicting types, such as
+`x_long` and `x_string`, without coercing one into the other. Generated names
+avoid overwriting actual columns. Inner unions retain only common name/type
+pairs. UTF-8 representations align to `Utf8`; smaller signed integers and real
+representations normalize losslessly to KQL scalar widths. Missing strings
+become empty strings; other missing values are typed nulls.
+
+`withsource` labels named and wildcard legs and uses the initial source name for
+parenthesized pipelines. It errors on a conflicting requested output name.
+Fuzzy/best-effort union resolution is not implemented because the DataFrame API
+has no warning-result channel; missing providers are never silently ignored.
+
+Lookup uses DataFusion's join selection rather than forcing Kusto's broadcast
+strategy or its service-specific right-side size limit.
 
 ## Expressions and functions
 

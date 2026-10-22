@@ -84,8 +84,9 @@ errors rather than silently execute with different semantics.
 - Serialization, offsets, row numbering, restart-aware cumulative sums/ranks,
   and bounded session windows are implemented. Continue with time-series
   operators (`make-series`, series functions), `scan`, and `partition`.
-- Broader aggregate coverage, Kusto-specific approximate algorithms, schema
-  splitting for unions with conflicting column types, and additional hints.
+- Lookup, schema introspection, projection reordering, sampling, wildcard table
+  discovery, source-labelled unions and conflicting-type schema splitting are
+  implemented. Continue with Kusto-specific approximate algorithms and hints.
 - Functions, query parameters, management commands, remote Kusto connectors,
   visualization metadata, CLI/Python bindings, and language tooling.
 - Conformance fixtures against a real Kusto cluster and production workload

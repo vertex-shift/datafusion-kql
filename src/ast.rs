@@ -50,6 +50,11 @@ pub enum Source {
         name: Vec<String>,
         span: Span,
     },
+    Pattern {
+        prefix: Vec<String>,
+        pattern: String,
+        span: Span,
+    },
     Subquery(Box<Query>),
     Print(Vec<NamedExpr>),
     Datatable {
@@ -64,6 +69,7 @@ pub enum Source {
     },
     Union {
         kind: UnionKind,
+        withsource: Option<String>,
         inputs: Vec<Source>,
     },
 }
@@ -105,13 +111,20 @@ pub struct SpannedOperator {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operator {
     Where(Expr),
-    Take(usize),
+    Take(Expr),
     Project(Vec<NamedExpr>),
     Extend(Vec<NamedExpr>),
     Serialize(Vec<NamedExpr>),
     ProjectAway(Vec<String>),
     ProjectKeep(Vec<String>),
     ProjectRename(Vec<(String, String)>),
+    ProjectReorder(Vec<ReorderColumn>),
+    GetSchema,
+    As(String),
+    Sample {
+        count: Expr,
+        distinct: Option<Expr>,
+    },
     MvExpand {
         array_mode: bool,
         index: Option<String>,
@@ -131,7 +144,7 @@ pub enum Operator {
     },
     Sort(Vec<SortKey>),
     Top {
-        count: usize,
+        count: Expr,
         key: SortKey,
     },
     Distinct(Vec<Expr>),
@@ -141,8 +154,14 @@ pub enum Operator {
         input: Box<Query>,
         keys: Vec<JoinKey>,
     },
+    Lookup {
+        kind: JoinKind,
+        input: Box<Query>,
+        keys: Vec<JoinKey>,
+    },
     Union {
         kind: UnionKind,
+        withsource: Option<String>,
         inputs: Vec<Source>,
     },
 }
@@ -157,6 +176,12 @@ pub struct NamedExpr {
 pub struct ExpandColumn {
     pub value: NamedExpr,
     pub ty: Option<ScalarType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReorderColumn {
+    pub pattern: String,
+    pub order: Option<(bool, bool)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

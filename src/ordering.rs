@@ -195,6 +195,10 @@ pub(crate) fn expressions(operator: &Operator) -> Vec<&ast::Expr> {
         }
         Operator::Sort(keys) => keys.iter().map(|k| &k.expr).collect(),
         Operator::Top { key, .. } => vec![&key.expr],
+        Operator::Sample {
+            distinct: Some(value),
+            ..
+        } => vec![value],
         Operator::Distinct(items) => items.iter().collect(),
         _ => Vec::new(),
     }
@@ -230,7 +234,9 @@ pub(crate) fn needed(query: &ast::Query) -> bool {
                         .iter()
                         .any(|e| any_expression(e, interesting))
                     || match &operator.kind {
-                        Operator::Join { input, .. } => needed(input),
+                        Operator::Join { input, .. } | Operator::Lookup { input, .. } => {
+                            needed(input)
+                        }
                         Operator::Union { inputs, .. } => inputs.iter().any(source),
                         _ => false,
                     }

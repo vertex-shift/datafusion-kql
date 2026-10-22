@@ -26,6 +26,7 @@ use crate::literals::data_type;
 use crate::ordering;
 
 type PlanFuture<'a> = Pin<Box<dyn Future<Output = Result<LogicalPlan>> + Send + 'a>>;
+type LegsFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<(String, LogicalPlan)>>> + Send + 'a>>;
 
 /// Plan a previously parsed query against this session's current catalog.
 /// No input batches are read or collected.
@@ -145,19 +146,7 @@ impl<'s> Planner<'s> {
                 ));
             }
         }
-        let reference = match parts {
-            [table] => TableReference::bare(table.clone()),
-            [schema, table] => TableReference::partial(schema.clone(), table.clone()),
-            [catalog, schema, table] => {
-                TableReference::full(catalog.clone(), schema.clone(), table.clone())
-            }
-            _ => {
-                return Err(Error::syntax(
-                    "table paths have at most three components",
-                    span,
-                ));
-            }
-        };
+        let reference = table_reference(parts, span)?;
         let provider = self
             .state
             .schema_for_ref(reference.clone())?
@@ -169,9 +158,59 @@ impl<'s> Planner<'s> {
         self.normalize_strings(plan)
     }
 
+    fn legs<'a>(&'a mut self, source: &'a Source) -> LegsFuture<'a> {
+        Box::pin(async move {
+            if let Source::Pattern {
+                prefix,
+                pattern,
+                span,
+            } = source
+            {
+                let mut path = prefix.clone();
+                path.push("__kql_pattern".into());
+                let schema = self.state.schema_for_ref(table_reference(&path, *span)?)?;
+                let mut names = schema.table_names();
+                names.sort();
+                let mut legs = Vec::new();
+                for name in names
+                    .into_iter()
+                    .filter(|name| pattern_matches(pattern, name))
+                {
+                    if legs.len() >= 1024 {
+                        return Err(Error::Plan(
+                            "table wildcard matched more than 1024 sources".into(),
+                        ));
+                    }
+                    let provider = schema.table(&name).await?.ok_or_else(|| {
+                        Error::Plan(format!("table '{name}' was removed during planning"))
+                    })?;
+                    let mut path = prefix.clone();
+                    path.push(name);
+                    let reference = table_reference(&path, *span)?;
+                    let label = reference.to_string();
+                    let plan =
+                        LogicalPlanBuilder::scan(reference, provider_as_source(provider), None)?
+                            .build()?;
+                    legs.push((label, self.normalize_strings(plan)?));
+                }
+                Ok(legs)
+            } else {
+                Ok(vec![(
+                    crate::tabular::source_name(source),
+                    self.source(source).await?,
+                )])
+            }
+        })
+    }
+
     fn source<'a>(&'a mut self, source: &'a Source) -> PlanFuture<'a> {
         Box::pin(async move {
             match source {
+                Source::Pattern { .. } => {
+                    let legs = self.legs(source).await?;
+                    let (labels, plans): (Vec<_>, Vec<_>) = legs.into_iter().unzip();
+                    self.union(plans, UnionKind::Outer, None, &labels)
+                }
                 Source::Table { name, span } => self.table(name, *span).await,
                 Source::Subquery(query) => self.query(query).await,
                 Source::Print(items) => {
@@ -222,12 +261,17 @@ impl<'s> Planner<'s> {
                         .project(vec![column])?
                         .build()?)
                 }
-                Source::Union { kind, inputs } => {
-                    let mut plans = Vec::with_capacity(inputs.len());
+                Source::Union {
+                    kind,
+                    withsource,
+                    inputs,
+                } => {
+                    let mut legs = Vec::new();
                     for input in inputs {
-                        plans.push(self.source(input).await?);
+                        legs.extend(self.legs(input).await?);
                     }
-                    self.union(plans, *kind, Span::default())
+                    let (labels, plans): (Vec<_>, Vec<_>) = legs.into_iter().unzip();
+                    self.union(plans, *kind, withsource.as_deref(), &labels)
                 }
             }
         })
@@ -268,9 +312,12 @@ impl<'s> Planner<'s> {
                     let expression = self.expressions().predicate(predicate, plan.schema())?;
                     LogicalPlanBuilder::from(plan).filter(expression)?.build()?
                 }
-                Operator::Take(count) => LogicalPlanBuilder::from(plan)
-                    .limit(0, Some(*count))?
-                    .build()?,
+                Operator::Take(count) => {
+                    let count = self.row_limit(count)?;
+                    LogicalPlanBuilder::from(plan)
+                        .limit(0, Some(count))?
+                        .build()?
+                }
                 Operator::Project(items) => {
                     let mut expressions = self.named_expressions(items, plan.schema())?;
                     if let Some(order) = ordering::ordinal(plan.schema()) {
@@ -352,6 +399,66 @@ impl<'s> Planner<'s> {
                         .project(expressions)?
                         .build()?
                 }
+                Operator::ProjectReorder(columns) => crate::tabular::reorder(plan, columns)?,
+                Operator::GetSchema => {
+                    let result = crate::tabular::schema(&plan)?;
+                    if self.track_order {
+                        ordering::sequence(
+                            self.state,
+                            &self.scalars,
+                            result,
+                            vec![
+                                Expr::Column(Column::from_name("ColumnOrdinal")).sort(true, false),
+                            ],
+                        )?
+                    } else {
+                        result
+                    }
+                }
+                Operator::As(name) => {
+                    if self.tables.contains_key(name) || self.scalars.contains_key(name) {
+                        return Err(Error::Plan(format!(
+                            "query binding '{name}' already exists"
+                        )));
+                    }
+                    self.tables.insert(name.clone(), plan.clone());
+                    plan
+                }
+                Operator::Sample { count, distinct } => {
+                    let count = self.row_limit(count)?;
+                    let mut input = ordering::visible(plan)?;
+                    if let Some(value) = distinct {
+                        let projected = self.named_expressions(
+                            &[NamedExpr {
+                                name: None,
+                                expr: value.clone(),
+                            }],
+                            input.schema(),
+                        )?;
+                        input = LogicalPlanBuilder::from(input)
+                            .project(projected)?
+                            .distinct()?
+                            .build()?;
+                    }
+                    let visible = (0..input.schema().fields().len())
+                        .map(|i| field_expr(&input, i))
+                        .collect::<Vec<_>>();
+                    let random = self.temporary_name(&input);
+                    let mut projected = visible.clone();
+                    projected.push(
+                        self.expressions()
+                            .function("random", Vec::new())?
+                            .alias(&random),
+                    );
+                    LogicalPlanBuilder::from(input)
+                        .project(projected)?
+                        .sort(vec![
+                            Expr::Column(Column::from_name(random)).sort(true, false),
+                        ])?
+                        .limit(0, Some(count))?
+                        .project(visible)?
+                        .build()?
+                }
                 Operator::MvExpand {
                     array_mode,
                     index,
@@ -383,13 +490,14 @@ impl<'s> Planner<'s> {
                     }
                 }
                 Operator::Top { count, key } => {
+                    let count = self.row_limit(count)?;
                     let sort = self
                         .expressions()
                         .scalar(&key.expr, plan.schema())?
                         .sort(key.ascending, key.nulls_first);
                     let sorted = LogicalPlanBuilder::from(plan)
                         .sort(vec![sort.clone()])?
-                        .limit(0, Some(*count))?
+                        .limit(0, Some(count))?
                         .build()?;
                     if self.track_order {
                         ordering::sequence(self.state, &self.scalars, sorted, vec![sort])?
@@ -423,12 +531,41 @@ impl<'s> Planner<'s> {
                     let right = self.query(input).await?;
                     self.join(plan, right, *kind, keys)?
                 }
-                Operator::Union { kind, inputs } => {
+                Operator::Lookup { kind, input, keys } => {
+                    let left = ordering::visible(plan)?;
+                    let right = ordering::visible(self.query(input).await?)?;
+                    let left_len = left.schema().fields().len();
+                    let excluded = right
+                        .schema()
+                        .fields()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, field)| keys.iter().any(|key| key.right == *field.name()))
+                        .map(|(i, _)| left_len + i)
+                        .collect::<HashSet<_>>();
+                    let result = self.join(left, right, *kind, keys)?;
+                    let projected = (0..result.schema().fields().len())
+                        .filter(|i| !excluded.contains(i))
+                        .map(|i| field_expr(&result, i))
+                        .collect::<Vec<_>>();
+                    LogicalPlanBuilder::from(result)
+                        .project(projected)?
+                        .build()?
+                }
+                Operator::Union {
+                    kind,
+                    withsource,
+                    inputs,
+                } => {
                     let mut plans = vec![plan];
+                    let mut labels = vec![crate::tabular::source_name(&pipeline.source)];
                     for input in inputs {
-                        plans.push(self.source(input).await?);
+                        for (label, plan) in self.legs(input).await? {
+                            labels.push(label);
+                            plans.push(plan);
+                        }
                     }
-                    self.union(plans, *kind, operator.span)?
+                    self.union(plans, *kind, withsource.as_deref(), &labels)?
                 }
             };
             if let Some(saved) = saved {
@@ -628,6 +765,26 @@ impl<'s> Planner<'s> {
         .build()?)
     }
 
+    fn row_limit(&self, value: &ast::Expr) -> Result<usize> {
+        let number = if let ExprKind::Literal(ast::Literal::Integer(value)) = &value.kind {
+            *value
+        } else {
+            let expression = self.expressions().scalar(value, &DFSchema::empty())?;
+            match self.expressions().constant(expression, value.span)? {
+                ScalarValue::Int64(Some(number)) => number,
+                ScalarValue::Int32(Some(number)) => i64::from(number),
+                _ => {
+                    return Err(Error::syntax(
+                        "row count must be a nonnegative constant integer",
+                        value.span,
+                    ));
+                }
+            }
+        };
+        usize::try_from(number)
+            .map_err(|_| Error::syntax("row count must be nonnegative and fit usize", value.span))
+    }
+
     fn named_expressions(&self, items: &[NamedExpr], schema: &DFSchema) -> Result<Vec<Expr>> {
         let mut used = HashSet::new();
         let mut result = Vec::with_capacity(items.len());
@@ -805,75 +962,33 @@ impl<'s> Planner<'s> {
         self.normalize_strings(LogicalPlanBuilder::from(plan).project(projected)?.build()?)
     }
 
-    fn union(&self, plans: Vec<LogicalPlan>, kind: UnionKind, span: Span) -> Result<LogicalPlan> {
-        let plans = plans
-            .into_iter()
-            .map(ordering::visible)
-            .collect::<Result<Vec<_>>>()?;
-        let mut fields: Vec<(String, DataType)> = Vec::new();
-        for plan in &plans {
-            for field in plan.schema().fields() {
-                let ty = if is_string(field.data_type()) {
-                    DataType::Utf8
-                } else {
-                    field.data_type().clone()
-                };
-                if let Some((_, previous)) = fields.iter().find(|(name, _)| name == field.name()) {
-                    if previous != &ty {
-                        return Err(Error::unsupported(
-                            format!(
-                                "union type splitting for column '{}'; use project/extend to cast it explicitly",
-                                field.name()
-                            ),
-                            span,
-                        ));
-                    }
-                } else {
-                    fields.push((field.name().clone(), ty));
-                }
-            }
-        }
-        if kind == UnionKind::Inner {
-            fields.retain(|(name, _)| {
-                plans
-                    .iter()
-                    .all(|p| p.schema().fields().iter().any(|f| f.name() == name))
-            });
-        }
-        let mut aligned = Vec::with_capacity(plans.len());
-        for plan in plans {
-            let expressions = fields
-                .iter()
-                .map(|(name, ty)| {
-                    let index = plan.schema().index_of_column_by_name(None, name);
-                    let expr = if let Some(index) = index {
-                        cast(field_expr(&plan, index), ty.clone())
-                    } else if is_string(ty) {
-                        cast(lit(""), ty.clone())
-                    } else {
-                        lit(ScalarValue::try_from(ty)?)
-                    };
-                    Ok(expr.alias(name))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            aligned.push(
-                LogicalPlanBuilder::from(plan)
-                    .project(expressions)?
-                    .build()?,
-            );
-        }
-        let mut aligned = aligned.into_iter();
-        let first = aligned
-            .next()
-            .ok_or_else(|| Error::Plan("union requires input tables".into()))?;
-        let mut result = LogicalPlanBuilder::from(first);
-        for input in aligned {
-            result = result.union(input)?;
-        }
-        let plan = result.build()?;
+    fn union(
+        &self,
+        plans: Vec<LogicalPlan>,
+        kind: UnionKind,
+        withsource: Option<&str>,
+        labels: &[String],
+    ) -> Result<LogicalPlan> {
+        let plan = crate::tabular::union(plans, kind, withsource, labels)?;
         check_plan(&plan)?;
         Ok(plan)
     }
+}
+
+fn table_reference(parts: &[String], span: Span) -> Result<TableReference> {
+    Ok(match parts {
+        [table] => TableReference::bare(table.clone()),
+        [schema, table] => TableReference::partial(schema.clone(), table.clone()),
+        [catalog, schema, table] => {
+            TableReference::full(catalog.clone(), schema.clone(), table.clone())
+        }
+        _ => {
+            return Err(Error::syntax(
+                "table paths have at most three components",
+                span,
+            ));
+        }
+    })
 }
 
 fn field_expr(plan: &LogicalPlan, index: usize) -> Expr {
@@ -963,7 +1078,7 @@ fn check_plan(plan: &LogicalPlan) -> Result<()> {
     visit(plan, 0, &mut 0)
 }
 
-fn pattern_matches(pattern: &str, name: &str) -> bool {
+pub(crate) fn pattern_matches(pattern: &str, name: &str) -> bool {
     let (mut p, mut n, mut star, mut matched) = (0, 0, None, 0);
     let pattern = pattern.as_bytes();
     let name = name.as_bytes();
