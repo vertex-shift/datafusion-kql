@@ -199,7 +199,14 @@ impl<'a> Parser<'a, '_> {
             self.expect_keyword("let")?;
             let name = self.identifier()?;
             self.expect(Kind::Assign)?;
-            let value = if self.looks_function() {
+            let value = if self.eat_keyword("view") {
+                let mut function = self.function()?;
+                if !function.parameters.is_empty() {
+                    return Err(self.expected("a parameterless view"));
+                }
+                function.view = true;
+                BindingValue::Function(Box::new(function))
+            } else if self.looks_function() {
                 BindingValue::Function(Box::new(self.function()?))
             } else if self.looks_tabular() {
                 BindingValue::Tabular(self.pipeline()?)
@@ -353,6 +360,7 @@ impl<'a> Parser<'a, '_> {
         self.expect(Kind::RBrace)?;
         self.nesting -= 1;
         Ok(Function {
+            view: false,
             parameters,
             bindings,
             body,
@@ -366,7 +374,16 @@ impl<'a> Parser<'a, '_> {
         }
         if matches!(
             self.tokens[at].kind,
-            Kind::Ident("print" | "datatable" | "union" | "let" | "declare")
+            Kind::Ident(
+                "print"
+                    | "datatable"
+                    | "union"
+                    | "let"
+                    | "declare"
+                    | "materialize"
+                    | "search"
+                    | "find"
+            )
         ) {
             return true;
         }
@@ -376,9 +393,9 @@ impl<'a> Parser<'a, '_> {
             return true;
         }
         let mut depth = 0;
-        for token in &self.tokens[self.pos..] {
+        for token in &self.tokens[at..] {
             match token.kind {
-                Kind::Pipe => return true,
+                Kind::Pipe if depth == 0 => return true,
                 Kind::LParen | Kind::LBracket | Kind::LBrace => depth += 1,
                 Kind::RParen | Kind::RBracket | Kind::RBrace if depth == 0 => break,
                 Kind::RParen | Kind::RBracket | Kind::RBrace => depth -= 1,
@@ -435,6 +452,75 @@ impl<'a> Parser<'a, '_> {
                 kind,
                 withsource,
                 inputs,
+            }
+        } else if self.keyword("search") || self.keyword("find") {
+            let find = self.eat_keyword("find");
+            if !find {
+                self.expect_keyword("search")?;
+            }
+            let sensitive = if !find { self.search_kind()? } else { false };
+            let source = if find && self.eat_keyword("withsource") {
+                self.expect(Kind::Assign)?;
+                self.identifier()?
+            } else {
+                "source_".into()
+            };
+            let inputs = if self.eat_keyword("in") {
+                self.expect(Kind::LParen)?;
+                let mut inputs = vec![self.source()?];
+                while self.eat(Kind::Comma) {
+                    inputs.push(self.source()?);
+                }
+                self.expect(Kind::RParen)?;
+                inputs
+            } else {
+                vec![Source::Pattern {
+                    prefix: Vec::new(),
+                    pattern: "*".into(),
+                    span: self.current().span,
+                }]
+            };
+            if find {
+                self.eat_keyword("where");
+            }
+            let predicate = Box::new(self.expr(0)?);
+            let mut project = None;
+            let mut pack_all = false;
+            if find && self.eat_keyword("project") {
+                if self.eat(Kind::Minus) {
+                    self.expect_keyword("smart")?;
+                } else {
+                    let mut columns = Vec::new();
+                    loop {
+                        if self.eat_keyword("pack_all") {
+                            self.expect(Kind::LParen)?;
+                            self.expect(Kind::RParen)?;
+                            pack_all = true;
+                            break;
+                        }
+                        let name = self.identifier()?;
+                        let ty = if self.eat(Kind::Colon) {
+                            Some(self.scalar_type()?)
+                        } else {
+                            None
+                        };
+                        columns.push((name, ty));
+                        if !self.eat(Kind::Comma) {
+                            break;
+                        }
+                    }
+                    project = Some(columns);
+                }
+            }
+            Source::Search {
+                inputs,
+                predicate,
+                case_sensitive: sensitive,
+                find: find.then_some(Find {
+                    source,
+                    project,
+                    pack_all,
+                }),
             }
         } else {
             let start = self.current().span.start;
@@ -603,6 +689,109 @@ impl<'a> Parser<'a, '_> {
         }
         let kind = match name.as_str() {
             "where" | "filter" => Operator::Where(self.expr(0)?),
+            "search" => {
+                let case_sensitive = self.search_kind()?;
+                Operator::Search {
+                    predicate: self.expr(0)?,
+                    case_sensitive,
+                }
+            }
+            "top-hitters" => {
+                let count = self.expr(0)?;
+                self.expect_keyword("of")?;
+                let value = self.expr(0)?;
+                let weight = if self.eat_keyword("by") {
+                    Some(self.expr(0)?)
+                } else {
+                    None
+                };
+                Operator::TopHitters {
+                    count,
+                    value,
+                    weight,
+                }
+            }
+            "evaluate" => {
+                let call = self.prefix()?;
+                let ExprKind::Call { name, args } = call.kind else {
+                    return Err(Error::syntax("evaluate expects a plugin call", call.span));
+                };
+                let schema = if self.eat(Kind::Colon) {
+                    self.expect(Kind::LParen)?;
+                    let include_input = self.eat(Kind::Star);
+                    let mut columns = Vec::new();
+                    let mut names = std::collections::HashSet::new();
+                    if include_input && !self.at(&Kind::RParen) {
+                        self.expect(Kind::Comma)?;
+                    }
+                    if !self.at(&Kind::RParen) {
+                        loop {
+                            let name = self.identifier()?;
+                            if !names.insert(name.clone()) {
+                                return Err(self.expected("unique output schema column names"));
+                            }
+                            self.expect(Kind::Colon)?;
+                            columns.push((name, self.scalar_type()?));
+                            if columns.len() > 1024 {
+                                return Err(self.expected("at most 1024 plugin output columns"));
+                            }
+                            if !self.eat(Kind::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(Kind::RParen)?;
+                    Some(OutputSchema {
+                        include_input,
+                        columns,
+                    })
+                } else {
+                    None
+                };
+                Operator::Evaluate { name, args, schema }
+            }
+            "top-nested" => {
+                let mut levels = Vec::new();
+                loop {
+                    let count = if self.keyword("of") {
+                        None
+                    } else {
+                        Some(self.expr(0)?)
+                    };
+                    self.expect_keyword("of")?;
+                    let value = self.named_expr()?;
+                    let others = if self.eat_keyword("with") {
+                        self.expect_keyword("others")?;
+                        self.expect(Kind::Assign)?;
+                        Some(self.expr(0)?)
+                    } else {
+                        None
+                    };
+                    self.expect_keyword("by")?;
+                    let aggregate = self.named_expr()?;
+                    let ascending = self.eat_keyword("asc");
+                    if !ascending {
+                        self.eat_keyword("desc");
+                    }
+                    levels.push(NestedTop {
+                        count,
+                        value,
+                        others,
+                        aggregate,
+                        ascending,
+                    });
+                    if levels.len() > 32 {
+                        return Err(self.expected("at most 32 top-nested levels"));
+                    }
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                    self.expect_keyword("top")?;
+                    self.expect(Kind::Minus)?;
+                    self.expect_keyword("nested")?;
+                }
+                Operator::TopNested(levels)
+            }
             "take" | "limit" => Operator::Take(self.row_count_expression()?),
             "project" => Operator::Project(self.named_list()?),
             "extend" => Operator::Extend(self.named_list()?),
@@ -620,6 +809,90 @@ impl<'a> Parser<'a, '_> {
                 let name = self.identifier()?;
                 let args = self.source_arguments()?;
                 Operator::Invoke { name, args }
+            }
+            "scan" => {
+                let match_id = if self.eat_keyword("with_match_id") {
+                    self.expect(Kind::Assign)?;
+                    Some(self.identifier()?)
+                } else {
+                    None
+                };
+                let mut declarations = Vec::new();
+                if self.eat_keyword("declare") {
+                    self.expect(Kind::LParen)?;
+                    loop {
+                        let name = self.identifier()?;
+                        self.expect(Kind::Colon)?;
+                        let ty = self.scalar_type()?;
+                        let default = if self.eat(Kind::Assign) {
+                            Some(self.expr(0)?)
+                        } else {
+                            None
+                        };
+                        declarations.push(ScanDeclaration { name, ty, default });
+                        if declarations.len() > 128 {
+                            return Err(self.expected("at most 128 scan declarations"));
+                        }
+                        if !self.eat(Kind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Kind::RParen)?;
+                }
+                self.expect_keyword("with")?;
+                self.expect(Kind::LParen)?;
+                let mut steps = Vec::new();
+                loop {
+                    self.expect_keyword("step")?;
+                    let name = self.identifier()?;
+                    let output = if self.eat_keyword("output") {
+                        self.expect(Kind::Assign)?;
+                        match self.identifier()?.as_str() {
+                            "all" => ScanOutput::All,
+                            "last" => ScanOutput::Last,
+                            "none" => ScanOutput::None,
+                            _ => return Err(self.expected("output=all, last, or none")),
+                        }
+                    } else {
+                        ScanOutput::All
+                    };
+                    self.expect(Kind::Colon)?;
+                    let condition = self.expr(0)?;
+                    let mut assignments = Vec::new();
+                    if self.eat(Kind::Assign) {
+                        self.expect(Kind::Gt)?;
+                        loop {
+                            let name = self.identifier()?;
+                            self.expect(Kind::Assign)?;
+                            assignments.push((name, self.expr(0)?));
+                            if assignments.len() > 128 {
+                                return Err(self.expected("at most 128 scan assignments per step"));
+                            }
+                            if !self.eat(Kind::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(Kind::Semi)?;
+                    steps.push(ScanStep {
+                        name,
+                        output,
+                        condition,
+                        assignments,
+                    });
+                    if steps.len() > 128 {
+                        return Err(self.expected("at most 128 scan steps"));
+                    }
+                    if self.at(&Kind::RParen) {
+                        break;
+                    }
+                }
+                self.expect(Kind::RParen)?;
+                Operator::Scan(Box::new(Scan {
+                    match_id,
+                    declarations,
+                    steps,
+                }))
             }
             "parse" | "parse-where" => {
                 let kind = if self.eat_keyword("kind") {
@@ -712,7 +985,29 @@ impl<'a> Parser<'a, '_> {
                     filter: name == "parse-where",
                 }
             }
-            "mv-expand" | "mvexpand" => {
+            "partition" => {
+                let mut strategy = PartitionStrategy::Legacy;
+                if self.eat_keyword("hint") {
+                    self.expect(Kind::Dot)?;
+                    self.expect_keyword("strategy")?;
+                    self.expect(Kind::Assign)?;
+                    strategy = match self.identifier()?.as_str() {
+                        "legacy" => PartitionStrategy::Legacy,
+                        "native" => PartitionStrategy::Native,
+                        "shuffle" => PartitionStrategy::Shuffle,
+                        _ => return Err(self.expected("legacy, native, or shuffle")),
+                    };
+                }
+                self.expect_keyword("by")?;
+                let key = self.identifier()?;
+                let operators = self.transformation()?;
+                Operator::Partition {
+                    key,
+                    strategy,
+                    operators,
+                }
+            }
+            "mv-expand" | "mvexpand" | "mv-apply" => {
                 let mut array_mode = false;
                 let mut index = None;
                 while self.keyword("kind")
@@ -720,6 +1015,11 @@ impl<'a> Parser<'a, '_> {
                     || self.keyword("with_itemindex")
                 {
                     let parameter = self.identifier()?;
+                    if name == "mv-apply" && parameter != "with_itemindex" {
+                        return Err(
+                            self.expected("with_itemindex; mv-apply has no bag expansion mode")
+                        );
+                    }
                     self.expect(Kind::Assign)?;
                     if parameter == "with_itemindex" {
                         if index.is_some() {
@@ -774,11 +1074,22 @@ impl<'a> Parser<'a, '_> {
                 } else {
                     2_147_483_647
                 };
-                Operator::MvExpand {
-                    array_mode,
-                    index,
-                    columns,
-                    limit,
+                if name == "mv-apply" {
+                    self.expect_keyword("on")?;
+                    Operator::MvApply {
+                        index,
+                        columns,
+                        limit,
+                        operators: self.transformation()?,
+                    }
+                } else {
+                    Operator::MvExpand {
+                        array_mode,
+                        arrays_only: false,
+                        index,
+                        columns,
+                        limit,
+                    }
                 }
             }
             "project-away" => Operator::ProjectAway(self.pattern_list()?),
@@ -1205,6 +1516,29 @@ impl<'a> Parser<'a, '_> {
         self.enter()?;
         let mut left = self.prefix()?;
         loop {
+            if minimum <= 3 && self.eat(Kind::Colon) {
+                let column = match &left.kind {
+                    ExprKind::Identifier(parts) if parts.len() == 1 => Some(parts[0].clone()),
+                    ExprKind::Wildcard => None,
+                    _ => return Err(self.expected("a search column name before ':'")),
+                };
+                let token = self.advance();
+                let Kind::String(term) = token.kind else {
+                    return Err(Error::syntax(
+                        "search terms after ':' must be strings",
+                        token.span,
+                    ));
+                };
+                left = self.node(
+                    ExprKind::SearchTerm {
+                        column,
+                        term: term.into_owned(),
+                    },
+                    Span::new(left.span.start, token.span.end),
+                    1,
+                )?;
+                continue;
+            }
             if self.eat(Kind::LBracket) {
                 let index = self.expr(0)?;
                 self.expect(Kind::RBracket)?;
@@ -1256,6 +1590,21 @@ impl<'a> Parser<'a, '_> {
                 if keyword == Some("in") {
                     let case_insensitive = self.eat(Kind::Tilde);
                     self.expect(Kind::LParen)?;
+                    if self.looks_tabular() {
+                        let query = self.query()?;
+                        self.expect(Kind::RParen)?;
+                        left = self.node(
+                            ExprKind::InTabular {
+                                expr: Box::new(left),
+                                query: Box::new(query),
+                                negated,
+                                case_insensitive,
+                            },
+                            Span::new(start, self.tokens[self.pos - 1].span.end),
+                            depth + 1,
+                        )?;
+                        continue;
+                    }
                     let mut values = Vec::new();
                     if !self.at(&Kind::RParen) {
                         loop {
@@ -1323,6 +1672,33 @@ impl<'a> Parser<'a, '_> {
         Ok(left)
     }
 
+    fn search_kind(&mut self) -> Result<bool> {
+        if !self.eat_keyword("kind") {
+            return Ok(false);
+        }
+        self.expect(Kind::Assign)?;
+        match self.identifier()?.as_str() {
+            "case_sensitive" => Ok(true),
+            "case_insensitive" | "default" => Ok(false),
+            _ => Err(self.expected("default, case_sensitive, or case_insensitive")),
+        }
+    }
+
+    fn transformation(&mut self) -> Result<Vec<SpannedOperator>> {
+        self.enter()?;
+        self.expect(Kind::LParen)?;
+        let mut operators = vec![self.operator()?];
+        while self.eat(Kind::Pipe) {
+            if operators.len() >= self.options.max_pipeline_operators {
+                return Err(self.expected("fewer subquery operators"));
+            }
+            operators.push(self.operator()?);
+        }
+        self.expect(Kind::RParen)?;
+        self.nesting -= 1;
+        Ok(operators)
+    }
+
     fn prefix(&mut self) -> Result<Expr> {
         let token = self.advance();
         let span = token.span;
@@ -1360,6 +1736,18 @@ impl<'a> Parser<'a, '_> {
                     .ok_or_else(|| Error::unsupported(format!("scalar type '{name}'"), token))?;
                 self.expect(Kind::RParen)?;
                 ExprKind::Type(ty)
+            }
+            Kind::Ident("toscalar") => {
+                let mut args = self.source_arguments()?;
+                if args.len() != 1 || args[0].name.is_some() {
+                    return Err(Error::syntax("toscalar expects one unnamed argument", span));
+                }
+                let value = args.remove(0).value;
+                return self.node(
+                    ExprKind::ToScalar(Box::new(value)),
+                    Span::new(span.start, self.tokens[self.pos - 1].span.end),
+                    1,
+                );
             }
             Kind::Ident("dynamic") => {
                 self.expect(Kind::LParen)?;

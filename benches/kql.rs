@@ -19,6 +19,18 @@ const ROWS: usize = 1_000_000;
 const JSON_ROWS: usize = 100_000;
 const JSON_QUERY: &str = "JsonEvents | extend Payload=parse_json(Raw) | project Service=tostring(Payload.service), Latency=Payload.latencies | mv-expand Latency to typeof(long) | summarize Total=sum(Latency) by Service";
 const SERIES_QUERY: &str = "Events | make-series Total=sum(Value) default=0 on Value from 0 to 100 step 1 by Category | project Category, Smoothed=series_fir(Total, dynamic([1,2,1]))";
+const PARTITION_QUERY: &str =
+    "Events | partition hint.strategy=native by Category (top 3 by Value) | summarize N=count()";
+const SCAN_QUERY: &str = "Events | scan declare(Total:long=0) with(step s:true=>Total=s.Total+Value;) | summarize Peak=max(Total)";
+const STATE_SCAN_QUERY: &str = "Events | take 10000 | scan declare(Total:long=0) with(step s:true=>Total=iff(s.Total>10000,Value,s.Total+Value);) | summarize Peak=max(Total)";
+const APPLY_QUERY: &str = "JsonEvents | take 1000 | extend P=parse_json(Raw) | mv-apply v=P.latencies to typeof(long) on (top 2 by v | summarize Total=sum(v)) | summarize Total=sum(Total)";
+const UNPACK_QUERY: &str = "JsonEvents | extend P=parse_json(Raw) | evaluate bag_unpack(P):(service:string,latencies:dynamic) | summarize Measurements=sum(array_length(latencies)) by service";
+const PIVOT_QUERY: &str = "Events | evaluate pivot(Category):(Value:long,api:long,worker:long,frontend:long,scheduler:long) | summarize Total=sum(api)+sum(worker)+sum(frontend)+sum(scheduler)";
+const FIELDS_QUERY: &str = "JsonEvents | extend P=parse_json(Raw) | project service=tostring(P.service),latencies=P.latencies | summarize Measurements=sum(array_length(latencies)) by service";
+const SEARCH_QUERY: &str = "Events | search Category:'api' and Value>42 | summarize N=count()";
+const HITTERS_QUERY: &str = "Events | top-hitters 2 of Category by Value";
+const GUID_QUERY: &str =
+    "GuidEvents | extend id=toguid(Text) | summarize Distinct=count_distinct(id)";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -70,6 +82,30 @@ fn json_context() -> SessionContext {
     ctx.register_table(
         TableReference::bare("JsonEvents"),
         Arc::new(MemTable::try_new(schema, partitions).unwrap()),
+    )
+    .unwrap();
+    ctx
+}
+
+fn guid_context() -> SessionContext {
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let values = [
+        "74be27de-1e4e-49d9-b579-fe0b331d3642",
+        "01234567-89ab-cdef-0123-456789abcdef",
+    ];
+    let batch = RecordBatch::try_from_iter(vec![(
+        "Text",
+        Arc::new(StringArray::from_iter_values(
+            (0..JSON_ROWS).map(|i| values[i % 2]),
+        )) as _,
+    )])
+    .unwrap();
+    let partitions = (0..4)
+        .map(|i| vec![batch.slice(i * JSON_ROWS / 4, JSON_ROWS / 4)])
+        .collect();
+    ctx.register_table(
+        TableReference::bare("GuidEvents"),
+        Arc::new(MemTable::try_new(batch.schema(), partitions).unwrap()),
     )
     .unwrap();
     ctx
@@ -137,10 +173,21 @@ fn benchmarks(c: &mut Criterion) {
     execution.finish();
 
     let json = json_context();
+    let guids = guid_context();
     let mut workloads = c.benchmark_group("workloads");
     for (name, query, context, rows, expected_rows) in [
         ("json_expand", JSON_QUERY, &json, JSON_ROWS, 2),
         ("make_series_fir", SERIES_QUERY, &ctx, ROWS, 4),
+        ("partition_top", PARTITION_QUERY, &ctx, ROWS, 1),
+        ("scan_cumulative", SCAN_QUERY, &ctx, ROWS, 1),
+        ("scan_stateful", STATE_SCAN_QUERY, &ctx, 10_000, 1),
+        ("mv_apply_top", APPLY_QUERY, &json, 1_000, 1),
+        ("bag_unpack", UNPACK_QUERY, &json, JSON_ROWS, 2),
+        ("pivot", PIVOT_QUERY, &ctx, ROWS, 1),
+        ("json_fields", FIELDS_QUERY, &json, JSON_ROWS, 2),
+        ("search", SEARCH_QUERY, &ctx, ROWS, 1),
+        ("top_hitters", HITTERS_QUERY, &ctx, ROWS, 2),
+        ("guid_parse", GUID_QUERY, &guids, JSON_ROWS, 1),
     ] {
         let plan = runtime.block_on(async {
             context
@@ -151,6 +198,25 @@ fn benchmarks(c: &mut Criterion) {
                 .await
                 .unwrap()
         });
+        let native = displayable(plan.as_ref()).indent(false).to_string();
+        if name == "partition_top" {
+            assert!(
+                !native.contains("KqlApplyExec"),
+                "partition benchmark must use the vectorized fast path"
+            );
+        }
+        if name == "mv_apply_top" {
+            assert!(
+                !native.contains("KqlApplyExec"),
+                "array-top benchmark must use batch kernels"
+            );
+        }
+        if name == "scan_cumulative" {
+            assert!(
+                native.contains("WindowAggExec") && !native.contains("KqlScanExec"),
+                "cumulative benchmark must use native windows"
+            );
+        }
         let result = runtime.block_on(async {
             collect(
                 reset_plan_states(Arc::clone(&plan)).unwrap(),
@@ -164,6 +230,34 @@ fn benchmarks(c: &mut Criterion) {
             expected_rows,
             "unexpected result cardinality for {name}",
         );
+        if matches!(name, "pivot" | "search") {
+            let expected = if name == "pivot" {
+                ROWS as i64
+            } else {
+                140_000
+            };
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(expected))
+            );
+        }
+        if name == "guid_parse" {
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(2))
+            );
+        }
+        if matches!(name, "bag_unpack" | "json_fields") {
+            for batch in &result {
+                for row in 0..batch.num_rows() {
+                    assert_eq!(
+                        datafusion::common::ScalarValue::try_from_array(batch.column(1), row)
+                            .unwrap(),
+                        datafusion::common::ScalarValue::Int64(Some(150_000))
+                    );
+                }
+            }
+        }
         workloads.throughput(Throughput::Elements(rows as u64));
         workloads.bench_function(name, |b| {
             b.to_async(&runtime).iter(|| async {

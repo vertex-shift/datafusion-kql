@@ -36,6 +36,16 @@ capacity estimates.
 | `execution/sql` | Execute the equivalent SQL physical plan over the same data |
 | `workloads/json_expand` | Parse 100,000 JSON payloads, extract fields, expand three latencies per payload, and aggregate by service |
 | `workloads/make_series_fir` | Aggregate 1,000,000 rows into four 100-point series and apply a normalized three-tap FIR filter |
+| `workloads/partition_top` | Native per-category top-three windows over 1,000,000 rows, followed by a count |
+| `workloads/scan_cumulative` | Native cumulative-window scan over 1,000,000 nonnullable longs, followed by a maximum |
+| `workloads/scan_stateful` | Conditional state-machine scan over 10,000 rows, followed by a maximum |
+| `workloads/mv_apply_top` | Parse 1,000 payloads and run native per-row top-two/aggregation subqueries |
+| `workloads/bag_unpack` | Parse/unpack 100,000 JSON payloads with a declared schema and aggregate array lengths by service |
+| `workloads/json_fields` | Equivalent service/latency extraction through ordinary property access over the same payloads |
+| `workloads/pivot` | Validate four pivot values and conditionally aggregate 1,000,000 rows, then check total row count |
+| `workloads/search` | Column-restricted regex term search and a numeric filter over 1,000,000 rows |
+| `workloads/top_hitters` | Exact native weighted heavy hitters over 1,000,000 rows |
+| `workloads/guid_parse` | Parse 100,000 canonical GUID strings to native 128-bit values and verify two distinct IDs |
 
 The fixture uses two non-null columns, four in-memory partitions, a filter,
 grouped sum, and top-k. Source data and physical planning are outside the
@@ -54,6 +64,104 @@ Each execution iteration uses DataFusion's `reset_plan_states` to create fresh
 operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
+
+## Measured 0.5 GUID workload
+
+At commit `32a4944`, parsing 100,000 valid GUID strings and performing exact
+distinct counting measured **1.14 ms** (95% interval **1.12-1.16 ms**), about
+87.5 million input rows/second on the same Apple M4/Rust 1.95/DataFusion 55.2
+configuration with four target partitions:
+
+```bash
+cargo bench --locked --bench kql -- workloads/guid_parse \
+  --warm-up-time 1 --measurement-time 3 --sample-size 30
+```
+
+The fixture repeats two valid canonical IDs and verifies exactly two distinct
+128-bit values. It measures conversion and a small exact hash state, not
+high-cardinality aggregation, UUID generation, persistent I/O, or arbitrary
+malformed strings. The shared-host and workload-specific comparison limits
+below apply.
+
+## Measured 0.4 operator workloads
+
+The new operators at commit `bef5a54` were measured on 2026-10-22 on the same
+Apple M4/arm64 host, Rust 1.95.0, DataFusion 55.2.0, optimized bench profile,
+and four target partitions:
+
+```bash
+cargo bench --locked --bench kql -- \
+  'workloads/(bag_unpack|json_fields|pivot|search|top_hitters)' \
+  --warm-up-time 1 --measurement-time 3 --sample-size 30
+```
+
+| Benchmark | Criterion estimate | 95% confidence interval |
+| --- | --- | --- |
+| Declared bag unpack, 100,000 JSON payloads | 39.67 ms | 38.14-41.10 ms |
+| Equivalent ordinary property extraction | 45.57 ms | 44.87-46.29 ms |
+| Strict-schema pivot, 1,000,000 rows | 5.97 ms | 5.91-6.03 ms |
+| Column-restricted search, 1,000,000 rows | 27.26 ms | 26.83-27.72 ms |
+| Exact weighted heavy hitters, 1,000,000 rows | 2.15 ms | 2.12-2.19 ms |
+
+The JSON fixture has two requested fields and verifies identical measurement
+totals for unpacking and ordinary extraction. It is not a general guarantee
+about JSON inputs with different widths/types. The pivot fixture validates all
+four allowed string buckets, groups by numeric value, and asserts a final
+one-million-row total. The search fixture combines a literal term regex with a
+numeric filter. Heavy hitters uses exact native aggregation, not a Kusto sketch.
+These measurements correspond to approximately 2.52 million unpacked payloads,
+167.5 million pivot input rows, 36.7 million search input rows, and 464.9 million
+heavy-hitter input rows per second for these memory-resident fixtures only.
+
+No result is a claim of an execution advantage over an equivalent native
+DataFusion plan or of performance for every KQL operator. Shared-host timing
+variance and all earlier comparison limits still apply.
+
+## Measured 0.3 baseline
+
+Version 0.3.0 at commit `81f01d7` was measured on 2026-10-22 on the same Apple
+M4/arm64 host, Rust 1.95.0, DataFusion 55.2.0, optimized bench profile, and four
+target partitions, using the 1-second warm-up/3-second target/30-sample command
+below. Criterion extended collection for workloads needing more time to collect
+30 samples.
+
+| Benchmark | Criterion estimate | 95% confidence interval |
+| --- | --- | --- |
+| Parse KQL | 1.30 us | 1.28-1.31 us |
+| Plan KQL, including parsing | 25.32 us | 24.76-26.10 us |
+| Plan a previously parsed AST | 24.36 us | 23.93-24.92 us |
+| Plan equivalent SQL | 58.44 us | 57.63-59.42 us |
+| Execute KQL over 1,000,000 rows | 4.54 ms | 4.33-4.84 ms |
+| Execute equivalent SQL over 1,000,000 rows | 4.10 ms | 4.05-4.15 ms |
+| JSON parse/expand/aggregate, 100,000 payloads | 95.37 ms | 92.71-98.05 ms |
+| Make-series and FIR, 1,000,000 rows | 13.78 ms | 13.57-14.01 ms |
+| Partition top-three, 1,000,000 rows | 52.91 ms | 52.31-53.58 ms |
+| Cumulative scan, 1,000,000 rows | 116.21 ms | 114.51-118.04 ms |
+| Conditional stateful scan, 10,000 rows | 273.47 ms | 267.67-280.60 ms |
+| Per-array top/aggregate, 1,000 payloads | 1.44 ms | 1.42-1.47 ms |
+
+The numeric execution fixture processes about 220 million input rows/second;
+the vectorized array-top fixture processes about 695,000 payloads/second. The
+benchmark asserts native cumulative-window/partition fast paths and identical
+SQL/KQL numeric physical plans. SQL's execution estimate was faster in this run;
+the choice of frontend itself does not accelerate an identical physical plan.
+
+The first 0.3 array-top implementation at `76e30e5` measured 144.73 ms
+(141.72-147.89 ms) for the same 1,000-payload workload because it initialized a
+native subquery template per input row. The batch Arrow specialization removes
+that setup cost. Differential cases cover empty/null/mixed-type arrays,
+integer precision, native overflow behavior, ordering, and limits.
+
+**General state machines are not a high-throughput substitute for native
+aggregates/windows.** The conditional scan fixture remains about 36,600 input
+rows/second here. Prefer `row_cumsum`, native aggregates, or the exact
+cumulative-scan fast path when equivalent. More general `mv-apply` subqueries
+also retain native-template initialization overhead; their performance should
+not be inferred from the specialized array-top fixture.
+
+The shared host showed material timing variation, including in unchanged SQL
+code. Cross-run changes are not statistically controlled code-only comparisons.
+These are workload-specific local measurements, not universal guarantees.
 
 ## Measured 0.2 baseline
 

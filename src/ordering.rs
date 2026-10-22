@@ -166,6 +166,10 @@ fn any_expression(expression: &ast::Expr, predicate: fn(&str) -> bool) -> bool {
             any_expression(expr, predicate)
         }
         ExprKind::NamedArgument { value, .. } => any_expression(value, predicate),
+        ExprKind::ToScalar(value) => match value.as_ref() {
+            ast::ArgumentValue::Scalar(expr) => any_expression(expr, predicate),
+            ast::ArgumentValue::Tabular(query) => needed(query),
+        },
         ExprKind::Binary { left, right, .. } => {
             any_expression(left, predicate) || any_expression(right, predicate)
         }
@@ -177,6 +181,8 @@ fn any_expression(expression: &ast::Expr, predicate: fn(&str) -> bool) -> bool {
         ExprKind::InList { expr, values, .. } => {
             any_expression(expr, predicate) || values.iter().any(|e| any_expression(e, predicate))
         }
+        ExprKind::InTabular { expr, query, .. } => any_expression(expr, predicate) || needed(query),
+        ExprKind::InPrepared { expr, .. } => any_expression(expr, predicate),
         ExprKind::Between {
             expr, low, high, ..
         } => [expr, low, high]
@@ -188,11 +194,25 @@ fn any_expression(expression: &ast::Expr, predicate: fn(&str) -> bool) -> bool {
 
 pub(crate) fn expressions(operator: &Operator) -> Vec<&ast::Expr> {
     match operator {
-        Operator::Where(expr) | Operator::Parse { input: expr, .. } => vec![expr],
+        Operator::Where(expr)
+        | Operator::Search {
+            predicate: expr, ..
+        }
+        | Operator::Parse { input: expr, .. } => vec![expr],
         Operator::Project(items) | Operator::Extend(items) | Operator::Serialize(items) => {
             items.iter().map(|i| &i.expr).collect()
         }
-        Operator::MvExpand { columns, .. } => columns.iter().map(|c| &c.value.expr).collect(),
+        Operator::MvExpand { columns, .. } | Operator::MvApply { columns, .. } => {
+            columns.iter().map(|c| &c.value.expr).collect()
+        }
+        Operator::Scan(scan) => scan
+            .steps
+            .iter()
+            .flat_map(|step| {
+                std::iter::once(&step.condition)
+                    .chain(step.assignments.iter().map(|(_, value)| value))
+            })
+            .collect(),
         Operator::Summarize { aggregates, by } => {
             aggregates.iter().chain(by).map(|i| &i.expr).collect()
         }
@@ -232,6 +252,7 @@ pub(crate) fn needed(query: &ast::Query) -> bool {
         match value {
             Source::Subquery(query) => needed(query),
             Source::Union { inputs, .. } => inputs.iter().any(source),
+            Source::Search { inputs, .. } => inputs.iter().any(source),
             Source::Print(items) => items.iter().any(|i| any_expression(&i.expr, interesting)),
             Source::Call { args, .. } => args.iter().any(|arg| match &arg.value {
                 ast::ArgumentValue::Scalar(expr) => any_expression(expr, interesting),
@@ -243,7 +264,7 @@ pub(crate) fn needed(query: &ast::Query) -> bool {
     fn pipeline(pipeline: &ast::Pipeline) -> bool {
         source(&pipeline.source)
             || pipeline.operators.iter().any(|operator| {
-                matches!(operator.kind, Operator::Serialize(_))
+                matches!(operator.kind, Operator::Serialize(_) | Operator::Scan(_))
                     || expressions(&operator.kind)
                         .iter()
                         .any(|e| any_expression(e, interesting))
@@ -252,6 +273,19 @@ pub(crate) fn needed(query: &ast::Query) -> bool {
                             needed(input)
                         }
                         Operator::Union { inputs, .. } => inputs.iter().any(source),
+                        Operator::MvApply { operators, .. }
+                        | Operator::Partition { operators, .. } => {
+                            operators.iter().any(|operator| {
+                                matches!(operator.kind, Operator::Serialize(_) | Operator::Scan(_))
+                                    || expressions(&operator.kind)
+                                        .iter()
+                                        .any(|expr| any_expression(expr, interesting))
+                                    || matches!(
+                                        &operator.kind,
+                                        Operator::MvApply { .. } | Operator::Partition { .. }
+                                    )
+                            })
+                        }
                         _ => false,
                     }
             })

@@ -1,5 +1,6 @@
 use datafusion::arrow::datatypes::{DataType, IntervalMonthDayNano, TimeUnit};
 use datafusion::catalog::TableFunctionArgs;
+use datafusion::common::tree_node::TreeNode;
 use datafusion::common::{Column, DFSchema, ScalarValue};
 use datafusion::datasource::provider_as_source;
 use datafusion::logical_expr::expr_fn::cast;
@@ -17,9 +18,19 @@ pub(crate) fn plan(
     end: &ast::Expr,
     step: &ast::Expr,
 ) -> Result<LogicalPlan> {
+    let lowered = [start, end, step]
+        .into_iter()
+        .map(|expr| expressions.scalar(expr, &DFSchema::empty()))
+        .collect::<Result<Vec<_>>>()?;
+    let mut deferred = false;
+    for value in &lowered {
+        deferred |= value.exists(|expr| Ok(matches!(expr, Expr::ScalarSubquery(_))))?;
+    }
+    if deferred {
+        return crate::range_source::plan(expressions.state, name, lowered, start.span);
+    }
     let mut values = Vec::new();
-    for expr in [start, end, step] {
-        let value = expressions.scalar(expr, &DFSchema::empty())?;
+    for (expr, value) in [start, end, step].into_iter().zip(lowered) {
         let value = expressions.constant(value, expr.span)?;
         if value.is_null() {
             return Err(Error::syntax(
@@ -29,6 +40,15 @@ pub(crate) fn plan(
         }
         values.push(value);
     }
+    value_plan(expressions, name, values, step.span)
+}
+
+pub(crate) fn value_plan(
+    expressions: &Expressions<'_>,
+    name: &str,
+    values: Vec<ScalarValue>,
+    span: ast::Span,
+) -> Result<LogicalPlan> {
     let mut projection = None;
     let arguments = if matches!(values[0].data_type(), DataType::Timestamp(_, _)) {
         if !matches!(values[1].data_type(), DataType::Timestamp(_, _))
@@ -36,13 +56,13 @@ pub(crate) fn plan(
         {
             return Err(Error::syntax(
                 "datetime range requires datetime bounds and a timespan step",
-                step.span,
+                span,
             ));
         }
         let ty = DataType::Timestamp(TimeUnit::Nanosecond, None);
         let stride = match values[2].cast_to(&DataType::Duration(TimeUnit::Nanosecond))? {
             ScalarValue::DurationNanosecond(Some(value)) if value != 0 => value,
-            _ => return Err(Error::syntax("range step cannot be zero", step.span)),
+            _ => return Err(Error::syntax("range step cannot be zero", span)),
         };
         vec![
             lit(values[0].cast_to(&ty)?),
@@ -62,7 +82,7 @@ pub(crate) fn plan(
                 .cast_to(&DataType::Int64)?));
         }
         if matches!(&args[2], Expr::Literal(ScalarValue::Int64(Some(0)), _)) {
-            return Err(Error::syntax("range step cannot be zero", step.span));
+            return Err(Error::syntax("range step cannot be zero", span));
         }
         projection = Some((None, DataType::Duration(TimeUnit::Nanosecond)));
         args
@@ -72,7 +92,7 @@ pub(crate) fn plan(
             .map(|value| Ok(lit(value.cast_to(&DataType::Int64)?)))
             .collect::<Result<Vec<_>>>()?;
         if matches!(&args[2], Expr::Literal(ScalarValue::Int64(Some(0)), _)) {
-            return Err(Error::syntax("range step cannot be zero", step.span));
+            return Err(Error::syntax("range step cannot be zero", span));
         }
         args
     } else if values.iter().all(|value| value.data_type().is_numeric()) {
@@ -83,7 +103,7 @@ pub(crate) fn plan(
                 _ => {
                     return Err(Error::syntax(
                         "real range requires finite bounds and step",
-                        step.span,
+                        span,
                     ));
                 }
             }
@@ -92,13 +112,13 @@ pub(crate) fn plan(
             .try_into()
             .map_err(|_| Error::Plan("invalid range argument count".into()))?;
         if stride == 0.0 {
-            return Err(Error::syntax("range step cannot be zero", step.span));
+            return Err(Error::syntax("range step cannot be zero", span));
         }
         let count = ((to - from) / stride).floor();
         if !count.is_finite() || count >= 9_223_372_036_854_775_808.0 {
             return Err(Error::syntax(
                 "real range requires too many representable indices",
-                step.span,
+                span,
             ));
         }
         let end = if count < 0.0 { -1 } else { count as i64 };
@@ -107,7 +127,7 @@ pub(crate) fn plan(
     } else {
         return Err(Error::syntax(
             "range supports numeric, datetime, or timespan sequences",
-            start.span,
+            span,
         ));
     };
     let function = expressions

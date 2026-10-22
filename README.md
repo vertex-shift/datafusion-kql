@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.2 typed-tabular, dynamic/JSON, window and time-series
+**Status:** version 0.5 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -18,6 +18,8 @@ cargo run --example quickstart
 cargo run --example telemetry_json
 cargo run --example time_series
 cargo run --example functions
+cargo run --example grouped_scan
+cargo run --example schema_plugins
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -138,6 +140,11 @@ Query parameters use typed request values rather than source interpolation:
 typed/default/named arguments, lexical captures, nested scalar definitions,
 tabular schemas, and `invoke`. Functions expand into ordinary native
 expressions/plans, without installing anything in the session registry.
+Parameterless `view` functions participate in wildcard discovery, and lazy
+`toscalar` supports staged scalar calculations from tabular subqueries.
+Row-independent scalar functions can contain tabular local bindings and scalar
+subqueries. Runtime scalar values can drive lazy native table ranges, and
+`in`/`!in` support tabular queries with KQL-specific null semantics.
 
 `materialize(...)` and `as hint.materialized=true` create lazy shared Arrow
 snapshots for repeated subqueries. Input partitions execute in parallel once,
@@ -146,7 +153,21 @@ belong to the planned query/DataFrame, including its clones; plan a new query
 for a fresh snapshot. See the compatibility contract for lifetime and memory
 boundaries.
 
-`mv-apply`, advanced signal processing, management commands, hints, and complete
+`mv-apply` runs native per-row subqueries over zipped dynamic arrays. `partition`
+supports per-key transformations, with vectorized fast paths for common
+aggregate/top-k workloads and reusable native templates for general subqueries.
+`scan` adds typed state machines, step promotion, match IDs, simultaneous
+assignments, output modes, and native cumulative-window fast paths.
+Cross-table `search`/`find`, smart record packing, exact heavy-hitter estimates,
+and hierarchical `top-nested` selection are supported. Schema-declared
+`evaluate bag_unpack` and `evaluate pivot` keep JSON extraction and conditional
+aggregation lazy and native.
+GUID/UUID values use native 128-bit Arrow storage, with literals, nullable
+conversion, generation, canonical formatting, typed parameters, and root dynamic
+GUID tags. Existing dynamic tag numbers and previous input schemas remain
+compatible.
+
+Advanced signal processing, management commands, additional hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.
 
 ## Architecture and performance
@@ -188,6 +209,12 @@ Tests cover parser diagnostics/limits, KQL-specific semantics, SQL result parity
 optimizer behavior, Arrow integration, and Parquet. SQL is enabled only by the
 development dependency for comparison; the frontend does not require
 DataFusion's SQL feature at runtime.
+
+`tests/conformance.rs` also provides an opt-in reference suite for a configured
+Kusto emulator or ADX test database. Default tests validate its synthetic
+fixtures/protocol locally; CI exercises its curl transport against a self-owned
+loopback fixture, **not a Kusto reference engine**. See the compatibility
+contract for explicit live-test setup and remaining conformance boundaries.
 
 ## License
 

@@ -3,8 +3,9 @@ use std::sync::{Arc, LazyLock};
 
 use datafusion::arrow::array::{
     Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBuilder, DurationNanosecondArray,
-    Float64Array, Float64Builder, Int64Array, Int64Builder, ListArray, NullArray, StringArray,
-    StringBuilder, StructArray, TimestampNanosecondArray, UnionArray, new_null_array,
+    FixedSizeBinaryArray, FixedSizeBinaryBuilder, Float64Array, Float64Builder, Int64Array,
+    Int64Builder, ListArray, NullArray, StringArray, StringBuilder, StructArray,
+    TimestampNanosecondArray, UnionArray, new_null_array,
 };
 use datafusion::arrow::buffer::OffsetBuffer;
 use datafusion::arrow::compute::{can_cast_types, cast_with_options, interleave};
@@ -24,6 +25,7 @@ const ARRAY: i8 = 5;
 const BAG: i8 = 6;
 const DATETIME: i8 = 7;
 const TIMESPAN: i8 = 8;
+const GUID: i8 = 9;
 pub(crate) const MAX_COLLECTION_SIZE: usize = 1_048_576;
 
 static FIELDS: LazyLock<UnionFields> = LazyLock::new(|| {
@@ -66,6 +68,10 @@ static FIELDS: LazyLock<UnionFields> = LazyLock::new(|| {
                 false,
             )),
         ),
+        (
+            GUID,
+            Arc::new(Field::new("guid", crate::guid::data_type(), false)),
+        ),
     ])
 });
 
@@ -74,7 +80,9 @@ pub(crate) fn data_type() -> DataType {
 }
 
 pub(crate) fn is_dynamic(ty: &DataType) -> bool {
-    ty == &data_type()
+    matches!(ty,DataType::Union(fields,UnionMode::Dense)
+        if fields.len()>TIMESPAN as usize && fields.len()<=FIELDS.len()
+            && fields.iter().zip(FIELDS.iter()).all(|(a,b)|a==b))
 }
 
 pub(crate) fn from_json(value: &Json) -> Result<ScalarValue> {
@@ -105,6 +113,7 @@ enum Value<'a> {
     Bag(&'a str),
     Datetime(i64),
     Timespan(i64),
+    Guid([u8; 16]),
 }
 
 impl Value<'_> {
@@ -117,6 +126,7 @@ impl Value<'_> {
                 .map(Json::Number)
                 .unwrap_or_else(|| Json::String(value.to_string())),
             Self::String(value) => value.into(),
+            Self::Guid(value) => crate::guid::format(&value).into(),
             Self::Array(value) | Self::Bag(value) => serde_json::from_str(value)
                 .map_err(|e| failure(format!("corrupt dynamic JSON: {e}")))?,
             Self::Datetime(value) => chrono::DateTime::from_timestamp_nanos(value)
@@ -152,6 +162,7 @@ impl Value<'_> {
             Self::Bag(_) => "dictionary",
             Self::Datetime(_) => "datetime",
             Self::Timespan(_) => "timespan",
+            Self::Guid(_) => "guid",
         }
     }
 }
@@ -168,6 +179,7 @@ struct Builder {
     bags: StringBuilder,
     datetimes: datafusion::arrow::array::TimestampNanosecondBuilder,
     timespans: datafusion::arrow::array::DurationNanosecondBuilder,
+    guids: FixedSizeBinaryBuilder,
 }
 
 impl Builder {
@@ -184,6 +196,7 @@ impl Builder {
             bags: StringBuilder::new(),
             datetimes: datafusion::arrow::array::TimestampNanosecondBuilder::new(),
             timespans: datafusion::arrow::array::DurationNanosecondBuilder::new(),
+            guids: FixedSizeBinaryBuilder::new(16),
         }
     }
 
@@ -225,6 +238,10 @@ impl Builder {
                 self.timespans.append_value(value);
                 (TIMESPAN, self.timespans.len() - 1)
             }
+            Value::Guid(value) => {
+                self.guids.append_value(value)?;
+                (GUID, self.guids.len() - 1)
+            }
         };
         self.ids.push(id);
         self.offsets.push(
@@ -265,6 +282,7 @@ impl Builder {
             Arc::new(self.bags.finish()),
             Arc::new(self.datetimes.finish()),
             Arc::new(self.timespans.finish()),
+            Arc::new(self.guids.finish()),
         ];
         Ok(Arc::new(UnionArray::try_new(
             FIELDS.clone(),
@@ -330,6 +348,12 @@ impl Input {
             DataType::Duration(TimeUnit::Nanosecond) => {
                 Value::Timespan(downcast::<DurationNanosecondArray>(&self.array)?.value(row))
             }
+            DataType::FixedSizeBinary(16) => Value::Guid(
+                downcast::<FixedSizeBinaryArray>(&self.array)?
+                    .value(row)
+                    .try_into()
+                    .map_err(|_| failure("invalid guid width"))?,
+            ),
             ty => {
                 return Err(failure(format!(
                     "cannot use Arrow {ty} as a dynamic scalar"
@@ -357,6 +381,12 @@ fn child_value(array: &ArrayRef, row: usize, id: i8) -> Result<Value<'_>> {
         BAG => Value::Bag(downcast::<StringArray>(array)?.value(row)),
         DATETIME => Value::Datetime(downcast::<TimestampNanosecondArray>(array)?.value(row)),
         TIMESPAN => Value::Timespan(downcast::<DurationNanosecondArray>(array)?.value(row)),
+        GUID => Value::Guid(
+            downcast::<FixedSizeBinaryArray>(array)?
+                .value(row)
+                .try_into()
+                .map_err(|_| failure("invalid guid width"))?,
+        ),
         _ => return Err(failure("unknown KQL dynamic type id")),
     })
 }
@@ -369,6 +399,21 @@ fn failure(message: impl Into<String>) -> DataFusionError {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Kernel {
     IntoDynamic,
+    PackAll {
+        names: Vec<String>,
+        ignore_empty: bool,
+    },
+    Unpack {
+        keys: Vec<String>,
+    },
+    TopValues {
+        real: bool,
+        descending: bool,
+        nulls_first: bool,
+        expanded_limit: usize,
+        count: usize,
+    },
+    TopReduce(TopReduction),
     ParseJson,
     ParseJsonStrict,
     EncodeJson,
@@ -385,6 +430,7 @@ pub(crate) enum Kernel {
     TypeOnly(DataType),
     Expand {
         array_mode: bool,
+        arrays_only: bool,
         limit: usize,
         columns: usize,
     },
@@ -417,13 +463,28 @@ pub(crate) enum Kernel {
     Split,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum TopReduction {
+    Sum,
+    Count,
+    List { limit: usize, include_nulls: bool },
+}
+
 impl Kernel {
     fn output_type(&self) -> DataType {
         match self {
+            Self::Unpack { keys } => DataType::Struct(
+                keys.iter()
+                    .enumerate()
+                    .map(|(i, _)| Arc::new(Field::new(format!("field{i}"), data_type(), true)))
+                    .collect(),
+            ),
             Self::GetType | Self::StrcatArray | Self::EncodeJson | Self::EncodeWindow => {
                 DataType::Utf8
             }
-            Self::ArrayLength | Self::ArrayIndexOf => DataType::Int64,
+            Self::ArrayLength
+            | Self::ArrayIndexOf
+            | Self::TopReduce(TopReduction::Sum | TopReduction::Count) => DataType::Int64,
             Self::Equal(_) | Self::BagHasKey | Self::ArrayHas | Self::Membership { .. } => {
                 DataType::Boolean
             }
@@ -443,6 +504,10 @@ impl Kernel {
             "__kql_{}",
             match self {
                 Self::IntoDynamic => "dynamic",
+                Self::PackAll { .. } => "pack_all",
+                Self::Unpack { .. } => "bag_unpack",
+                Self::TopValues { .. } => "mv_apply_top_values",
+                Self::TopReduce(_) => "mv_apply_top_reduce",
                 Self::ParseJson => "parse_json",
                 Self::ParseJsonStrict => "parse_json_strict",
                 Self::EncodeJson => "to_json",
@@ -460,6 +525,7 @@ impl Kernel {
                 Self::Convert(DataType::Boolean) => "dynamic_tobool",
                 Self::Convert(DataType::Timestamp(_, _)) => "dynamic_todatetime",
                 Self::Convert(DataType::Duration(_)) => "dynamic_totimespan",
+                Self::Convert(DataType::FixedSizeBinary(16)) => "dynamic_toguid",
                 Self::Convert(_) => "dynamic_cast",
                 Self::TypeOnly(_) => "dynamic_type_only",
                 Self::Expand { .. } => "mv_expand_values",
@@ -497,7 +563,11 @@ impl Kernel {
             return op.validate(len);
         }
         let valid = match self {
+            Self::PackAll { names, .. } => len == names.len(),
             Self::IntoDynamic
+            | Self::Unpack { .. }
+            | Self::TopValues { .. }
+            | Self::TopReduce(_)
             | Self::ParseJson
             | Self::ParseJsonStrict
             | Self::EncodeJson
@@ -566,7 +636,7 @@ pub(crate) fn call(kernel: Kernel, args: Vec<Expr>) -> Expr {
     }
     let name = kernel.name();
     let signature = if args.is_empty() {
-        Signature::any(0, Volatility::Immutable)
+        Signature::nullary(Volatility::Immutable)
     } else {
         Signature::variadic_any(Volatility::Immutable)
     };
@@ -629,7 +699,45 @@ impl ScalarUDFImpl for Function {
             .iter()
             .map(Input::new)
             .collect::<Result<Vec<_>>>()?;
-        let output = if self.kernel == Kernel::DecodeWindow {
+        let output = if self.kernel == Kernel::ParseJson {
+            let mut builder = Builder::new(count);
+            for row in 0..count {
+                let value = inputs[0].value(row)?;
+                if matches!(value, Value::Guid(_)) {
+                    builder.append(value)?;
+                } else {
+                    builder.append_json(&evaluate(&self.kernel, &[value])?)?;
+                }
+            }
+            builder.finish()?
+        } else if let Kernel::Unpack { keys } = &self.kernel {
+            let mut builders = keys.iter().map(|_| Builder::new(count)).collect::<Vec<_>>();
+            for row in 0..count {
+                let value = inputs[0].value(row)?.json()?;
+                for (key, builder) in keys.iter().zip(&mut builders) {
+                    builder.append_json(
+                        value
+                            .as_object()
+                            .and_then(|bag| bag.get(key))
+                            .unwrap_or(&Json::Null),
+                    )?;
+                }
+            }
+            if keys.is_empty() {
+                Arc::new(StructArray::new_empty_fields(count, None)) as ArrayRef
+            } else {
+                let fields = keys
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| Arc::new(Field::new(format!("field{i}"), data_type(), true)))
+                    .collect::<Vec<_>>();
+                let arrays = builders
+                    .into_iter()
+                    .map(Builder::finish)
+                    .collect::<Result<Vec<_>>>()?;
+                Arc::new(StructArray::try_new(fields.into(), arrays, None)?) as ArrayRef
+            }
+        } else if self.kernel == Kernel::DecodeWindow {
             let mut builder = Builder::new(count);
             for row in 0..count {
                 match inputs[0].value(row)? {
@@ -651,6 +759,15 @@ impl ScalarUDFImpl for Function {
                                     .as_i64()
                                     .ok_or_else(|| failure("invalid timespan window payload"))?,
                             ))?,
+                            Some("guid") => {
+                                let text = encoded[1]
+                                    .as_str()
+                                    .ok_or_else(|| failure("invalid guid window payload"))?;
+                                let (value, _) = crate::guid::parse_prefix(text)
+                                    .filter(|(_, end)| *end == text.len())
+                                    .ok_or_else(|| failure("invalid guid window payload"))?;
+                                builder.append(Value::Guid(value))?;
+                            }
                             Some(_) => builder.append_json(&encoded[1])?,
                             None => return Err(failure("invalid dynamic window type")),
                         }
@@ -727,12 +844,32 @@ fn convert(input: &Input, ty: &DataType, type_only: bool) -> Result<ArrayRef> {
         ..Default::default()
     };
     if !is_dynamic(input.array.data_type()) {
+        if *ty == crate::guid::data_type() {
+            return crate::guid::parse_array(&input.array);
+        }
+        if input.array.data_type() == &crate::guid::data_type()
+            && *ty == DataType::Utf8
+            && !type_only
+        {
+            return crate::guid::format_array(&input.array);
+        }
         return cast_with_options(&input.array, ty, &options).map_err(Into::into);
     }
     let union = downcast::<UnionArray>(&input.array)?;
     let mut casted = Vec::with_capacity(FIELDS.len());
-    for (id, _) in FIELDS.iter() {
+    let DataType::Union(fields, _) = input.array.data_type() else {
+        return Err(failure("invalid dynamic union"));
+    };
+    for (id, _) in fields.iter() {
         let source = union.child(id);
+        if *ty == DataType::Utf8 && id == GUID && !type_only {
+            casted.push(crate::guid::format_array(source)?);
+            continue;
+        }
+        if *ty == crate::guid::data_type() && id == STRING && !type_only {
+            casted.push(crate::guid::parse_array(source)?);
+            continue;
+        }
         if *ty == DataType::Duration(TimeUnit::Nanosecond)
             && !type_only
             && matches!(id, STRING | LONG | REAL)
@@ -770,6 +907,7 @@ fn convert(input: &Input, ty: &DataType, type_only: bool) -> Result<ArrayRef> {
             DataType::Utf8 => id == STRING,
             DataType::Timestamp(_, _) => id == DATETIME,
             DataType::Duration(_) => id == TIMESPAN,
+            DataType::FixedSizeBinary(16) => id == GUID,
             _ => false,
         };
         let array =
@@ -798,10 +936,15 @@ fn text(value: Value<'_>) -> Option<&str> {
     }
 }
 
-fn expanded(value: Value<'_>, array_mode: bool, limit: usize) -> Result<Vec<Json>> {
+fn expanded(
+    value: Value<'_>,
+    array_mode: bool,
+    arrays_only: bool,
+    limit: usize,
+) -> Result<Vec<Json>> {
     let mut items = match value.json()? {
         Json::Array(items) => items,
-        Json::Object(bag) => bag
+        Json::Object(bag) if !arrays_only => bag
             .into_iter()
             .map(|(key, value)| {
                 if array_mode {
@@ -821,6 +964,7 @@ fn expanded(value: Value<'_>, array_mode: bool, limit: usize) -> Result<Vec<Json
 fn expand(kernel: &Kernel, inputs: &[Input], count: usize) -> Result<ArrayRef> {
     let Kernel::Expand {
         array_mode,
+        arrays_only,
         limit,
         columns,
     } = kernel
@@ -834,16 +978,24 @@ fn expand(kernel: &Kernel, inputs: &[Input], count: usize) -> Result<ArrayRef> {
         .collect::<Vec<_>>();
     let mut indices = Int64Builder::new();
     for row in 0..count {
-        let collections = inputs
+        let roots = inputs
             .iter()
-            .map(|input| expanded(input.value(row)?, *array_mode, *limit))
+            .map(|input| input.value(row))
+            .collect::<Result<Vec<_>>>()?;
+        let collections = roots
+            .iter()
+            .map(|value| expanded(*value, *array_mode, *arrays_only, *limit))
             .collect::<Result<Vec<_>>>()?;
         let len = collections.iter().map(Vec::len).max().unwrap_or(0);
-        for (builder, values) in builders.iter_mut().zip(collections) {
+        for ((builder, values), root) in builders.iter_mut().zip(collections).zip(roots) {
             // Pad real dynamic nulls before Unnest. Arrow union take kernels
             // cannot represent the null indices used by zipped-list padding.
             for index in 0..len {
-                builder.append_json(values.get(index).unwrap_or(&Json::Null))?;
+                if index == 0 && !values.is_empty() && matches!(root, Value::Guid(_)) {
+                    builder.append(root)?;
+                } else {
+                    builder.append_json(values.get(index).unwrap_or(&Json::Null))?;
+                }
             }
         }
         indices.extend((0..len).map(|i| Some(i as i64)));
@@ -1353,7 +1505,82 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
             };
             Json::Array(result)
         }
+        K::PackAll {
+            names,
+            ignore_empty,
+        } => {
+            let mut bag = Map::new();
+            for (name, value) in names.iter().zip(values) {
+                let value = value.json()?;
+                if !*ignore_empty || !(value.is_null() || value.as_str() == Some("")) {
+                    bag.insert(name.clone(), value);
+                }
+            }
+            Json::Object(bag)
+        }
+        K::TopValues {
+            real,
+            descending,
+            nulls_first,
+            expanded_limit,
+            count,
+        } => {
+            let mut items = expanded(values[0], false, true, *expanded_limit)?;
+            for item in &mut items {
+                let valid = if *real {
+                    matches!(item,Json::Number(n) if n.is_f64())
+                } else {
+                    item.as_i64().is_some()
+                };
+                if !valid {
+                    *item = Json::Null;
+                }
+            }
+            let array: ArrayRef = if *real {
+                Arc::new(Float64Array::from_iter(items.iter().map(Json::as_f64)))
+            } else {
+                Arc::new(Int64Array::from_iter(items.iter().map(Json::as_i64)))
+            };
+            let indices = datafusion::arrow::compute::sort_to_indices(
+                array.as_ref(),
+                Some(datafusion::arrow::compute::SortOptions {
+                    descending: *descending,
+                    nulls_first: *nulls_first,
+                }),
+                Some(*count),
+            )?;
+            Json::Array(
+                indices
+                    .values()
+                    .iter()
+                    .map(|&i| items[i as usize].clone())
+                    .collect(),
+            )
+        }
+        K::TopReduce(reduction) => {
+            let Json::Array(items) = values[0].json()? else {
+                return Err(failure("invalid optimized mv-apply input"));
+            };
+            match reduction {
+                TopReduction::Sum => {
+                    let array = Int64Array::from_iter(items.iter().map(Json::as_i64));
+                    datafusion::arrow::compute::sum(&array).unwrap_or(0).into()
+                }
+                TopReduction::Count => (items.len() as i64).into(),
+                TopReduction::List {
+                    limit,
+                    include_nulls,
+                } => Json::Array(
+                    items
+                        .into_iter()
+                        .filter(|value| *include_nulls || !value.is_null())
+                        .take(*limit)
+                        .collect(),
+                ),
+            }
+        }
         K::IntoDynamic
+        | K::Unpack { .. }
         | K::Coalesce
         | K::Convert(_)
         | K::TypeOnly(_)

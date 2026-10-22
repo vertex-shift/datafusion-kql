@@ -38,15 +38,17 @@ pub(crate) fn prepare(
     };
     let mut operator = operator.clone();
     match &mut operator {
-        Operator::Where(expr) | Operator::Parse { input: expr, .. } => {
-            *expr = windows.rewrite(expr)?
+        Operator::Where(expr)
+        | Operator::Search {
+            predicate: expr, ..
         }
+        | Operator::Parse { input: expr, .. } => *expr = windows.rewrite(expr)?,
         Operator::Project(items) | Operator::Extend(items) | Operator::Serialize(items) => {
             for item in items {
                 item.expr = windows.rewrite(&item.expr)?;
             }
         }
-        Operator::MvExpand { columns, .. } => {
+        Operator::MvExpand { columns, .. } | Operator::MvApply { columns, .. } => {
             for column in columns {
                 column.value.expr = windows.rewrite(&column.value.expr)?;
             }

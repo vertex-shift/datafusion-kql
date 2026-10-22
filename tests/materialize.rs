@@ -252,6 +252,14 @@ async fn materialization_is_available_inside_tabular_functions() {
     assert_eq!(rows(frame).await, vec![vec!["20"]]);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn per_key_materializations_are_shared_across_fork_legs_after_rebinding() {
+    let (ctx, calls) = context(None, false);
+    let frame=ctx.kql("Events | extend k=x%2 | partition by k (extend y=observe(x) | as hint.materialized=true T | union T | summarize Total=sum(y)) | sort by Total asc").await.unwrap();
+    assert_eq!(rows(frame).await, vec![vec!["200"], vec!["220"]]);
+    assert_eq!(calls.load(Ordering::SeqCst), 20);
+}
+
 #[tokio::test]
 async fn materialize_rejects_scalar_and_invalid_arguments() {
     let (ctx, _) = context(None, false);

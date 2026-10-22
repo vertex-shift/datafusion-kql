@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.2 implements the typed tabular and dynamic subset below. Keywords, function
+0.5 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -15,7 +15,7 @@ syntax/functions return an error; there is no SQL fallback.
 | `let` | Scalar expressions, tabular plans, aliases, nested lexical scopes |
 | Parenthesized queries | Nested pipelines and scoped `let` statements |
 | `print` | One row of scalar expressions |
-| `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan`, `dynamic` columns |
+| `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan`, `guid`/`uuid`/`uniqueid`, `dynamic` columns |
 | `range` | Inclusive lazy native `generate_series`; integer, real, datetime, and timespan sequences, including descending ranges |
 | `union` | Source form and pipe form |
 | `materialize(...)` | Lazy shared Arrow snapshot, usable directly or in a tabular binding |
@@ -53,9 +53,44 @@ be row-independent constants. Scalar/table result contexts, missing/duplicate
 arguments, and recursion/forward references fail explicitly. Functions have at
 most 128 parameters; scalar expansion has depth/node budgets.
 
-Scalar functions containing tabular local statements or scalar subqueries,
-view declarations, and Kusto's static opaque-schema restrictions for `(*)`
+`let V=view (){ ... };` declares a parameterless tabular view. Views participate
+in wildcard source/union discovery, shadow providers with the same name, and
+retain lexical captures. Ordinary functions do not participate in wildcards.
+
+Scalar functions containing tabular local statements and scalar subqueries are
+planned in their captured lexical scope. Their arguments must be row-independent;
+passing a caller column into such a function fails rather than turning the
+subquery into a per-row scan. Nested helper functions and default/named arguments
+retain those rules. Kusto's static opaque-schema restrictions for `(*)`
 parameters remain compatibility work.
+
+## Scalar subqueries
+
+`toscalar(expression)` freezes a row-independent scalar expression or the first
+row/first column of a tabular query. Native scalar-subquery plans and lazy
+materialization keep query construction nonexecuting and share evaluated values
+across uses. Empty tabular inputs yield typed nulls (empty strings for strings).
+Nested subqueries, scalar bindings, registered functions, and request parameters
+are supported. Caller-row correlation is rejected, rather than being evaluated
+once per row with different semantics.
+
+Table-valued function calls and bare table bindings can be used as arguments.
+Scalar subqueries can supply tabular range bounds/steps. The range evaluates its
+scalar arguments at execution time, then streams the ordinary native
+`generate_series` provider; planning remains lazy, even for very large ranges
+followed by `take`. Null/zero/invalid runtime arguments fail explicitly.
+Other frontend-constant arguments, such as collection limits and format
+patterns, still require values that can be folded without executing a subquery.
+
+`in`, `!in`, `in~`, and `!in~` accept a tabular query, named table, or tabular
+function and compare against its first column. Native mark joins implement
+membership without row-by-row table scans. Null nonmatches are false for
+nonnull left values, while a null left value remains null for a nonempty set
+and false for an empty set; negation preserves those distinctions. Nullable
+left inputs share a memory-accounted RHS snapshot for the existence/emptiness
+checks. Case-insensitive variants fold ASCII only. Dynamic operands must first
+be cast to scalar values; nested dynamic flattening for tabular membership is
+not implemented.
 
 ## Tabular operators
 
@@ -69,6 +104,8 @@ parameters remain compatibility work.
 | `summarize` | Named aggregate calls and arbitrary scalar grouping expressions; group-only form |
 | `sort`, `order` | Default **descending/nulls last**; ascending defaults to nulls first; explicit null placement |
 | `top` | Constant integer expression for count, one sort expression; default descending |
+| `top-hitters` | Native exact count/sum top-k estimates; preserves KQL output names but not Count-Min-Sketch implementation |
+| `top-nested` | Hierarchical per-parent top selection, ancestor aggregates, optional counts, aliases, and others buckets |
 | `take`, `limit` | Constant integer expressions; no ordering guarantee without a sort |
 | `sample`, `sample-distinct` | Native random top-k sampling; distinct sampling returns unique projected values |
 | `as` | Lazy intermediate binding, or a shared snapshot with `hint.materialized=true` |
@@ -80,6 +117,11 @@ parameters remain compatibility work.
 | `lookup` | Default leftouter or explicit inner, preserves left duplicates, suppresses right lookup keys |
 | `union` | Name/type alignment, conflicting-type suffixes, inner intersection, wildcard legs, `withsource` |
 | `mv-expand`, `mvexpand` | Arrays and bags, zipped multiple columns, per-row limits, `with_itemindex`, cast-only `to typeof(...)` |
+| `mv-apply` | Per-input-row native subqueries over zipped arrays, indices, type-only casts, and limits |
+| `partition` | Implicit-source per-key transformations with legacy/native/shuffle strategies |
+| `search`, `find` | Cross-table/wildcard text predicates, source labels, smart packing, explicit find projection |
+| `evaluate` | Explicit-schema `bag_unpack` and `pivot`, without replacing the session registry |
+| `scan` | Typed declared state, step conditions/promotion, simultaneous assignments, match IDs, and all/last/none output |
 | `parse`, `parse-where` | Simple, regex, and relaxed patterns; typed captures, regex flags, and strict failure filtering |
 | `serialize` | Freezes row order and supports calculated columns and native window expressions |
 | `make-series` | Numeric/datetime/timespan axes, per-group bounds, defaults, nonempty results, and alternate range syntax |
@@ -131,11 +173,37 @@ host pool for production: the extension does not install Kusto's cluster-wide
 5 GB service cache limit or a separate allocator. Materialized buffers do not
 spill. Unbounded input plans are rejected.
 
+## Cross-table search and find
+
+`search [kind=...] [in (...)] predicate` discovers registered providers and
+lexical views, without scanning data while planning. Pipe-form search uses the
+current input. Plain string terms search all visible columns, `Column:"term"`
+restricts a term, and leading/trailing/internal asterisks implement suffix,
+prefix, substring, or bounded wildcard matching. Boolean combinations, explicit
+comparisons/regex predicates, source labels, and case modes are supported.
+Search always supplies `$table`; consecutive searches preserve that label.
+There is no inverted term index: these are native batch regex scans.
+
+`find [withsource=Name] [in (...)] [where] predicate` defaults its source label
+to `source_`. Smart projection retains explicit predicate columns and common
+columns, packing other fields into dynamic `pack_`. Explicit `project
+Column[:type], ... [, pack_all()]` fixes the output schema; its optional
+`column1` bag contains the original record, not post-cast values. Missing
+provider fields are handled explicitly, and conflicting projected types require
+a declared type. Unknown columns/providers and output-name conflicts error.
+
+Qualified DataFusion catalogs/schemas and provider wildcards are supported;
+Kusto-service `cluster()`/`database()` discovery syntax is not. Predicate
+coercion for a column with different input types follows each provider's native
+DataFusion analysis rather than promising complete Kusto cross-type inference.
+
 ## Expressions and functions
 
 - Literals: signed 64-bit integers, floating point, booleans, single/double quoted
   strings, backslash escapes, verbatim `@` strings, typed null constructors,
   `datetime(...)`, and `timespan(...)`.
+- GUID literals (`guid(...)`, `uuid(...)`, `uniqueid(...)`) and typed nulls;
+  nullable `toguid`, volatile `new_guid`, and canonical `tostring` formatting.
 - Timespans: `d`, `h`, `m`, `s`, `ms`, `us`, `ns`, `tick`/`ticks`,
   `microsecond(s)`, decimal quantities, and `[d.]hh:mm:ss[.fraction]`.
   Bare numbers inside `timespan(...)` represent days. Conversion uses integer
@@ -143,7 +211,7 @@ spill. Unbounded input plans are rejected.
 - Arithmetic `+ - * / %`, comparisons `== != < <= > >=`, `and`, `or`, unary
   `!`, `not()`, unary signs, and parentheses.
 - Inclusive `between`/`!between`, including a timespan upper offset for datetimes.
-- Scalar-constant-list `in`, `!in`, `in~`, `!in~`. Case-insensitive list membership
+- Scalar-constant-list and tabular-query `in`, `!in`, `in~`, `!in~`. Case-insensitive list membership
   folds ASCII characters only.
 - `contains`, `startswith`, `endswith` and negations are case-insensitive;
   `_cs` variants are case-sensitive. Substrings are literal, not SQL LIKE
@@ -159,6 +227,8 @@ spill. Unbounded input plans are rejected.
   sizes must be scalar constants.
 - `iff`/`iif`, `case`, `isnull`, `isnotnull`, `isempty`, `isnotempty`, `coalesce`.
   String coalesce skips empty strings.
+- Schema-aware `column_ifexists(name, fallback)` and `pack_all([ignore_null_empty])`;
+  internal helper columns are not packed, and unused fallbacks are not resolved.
 - `tostring`, `tolong`, `toint`, `toreal`/`todouble`, `tobool`, `todatetime`,
   scalar type constructors; failed conversions use Arrow `TRY_CAST` semantics.
 - `strcat`, `strlen`, `tolower`, `toupper`, `substring` (zero-based),
@@ -174,7 +244,7 @@ spill. Unbounded input plans are rejected.
 `dynamic(...)` supports nested arrays and property bags with single- or
 double-quoted strings, scalar literals, and nulls. Dynamic values are real
 Arrow **dense unions**, distinguishing null, bool, long, real, string, array,
-bag, datetime, and timespan. Arrays and bags use JSON-marked UTF-8 child buffers;
+bag, datetime, timespan, and guid. Arrays and bags use JSON-marked UTF-8 child buffers;
 they are not confused with ordinary string columns or normalized to empty
 strings. Nested non-JSON scalar types serialize as strings inside collections.
 
@@ -207,6 +277,149 @@ is zero-based. The default per-row limit is 2,147,483,647 (legacy `mvexpand`:
 `to typeof(...)` checks underlying dynamic types and does not parse strings into
 numbers. For example, `"2"` becomes null under `to typeof(long)`; use `tolong`
 after an untyped expansion to request conversion.
+
+## Native GUID values
+
+GUIDs use `FixedSizeBinary(16)` in canonical RFC-4122 byte order. Such Arrow
+fields are interpreted as KQL GUIDs; use `tostring` for lowercase hyphenated
+display rather than Arrow's generic binary formatter. Typed datatables,
+parameters/functions, equality/membership, joins/unions, distinct aggregates,
+schema inspection, regex/JSON extraction, and `parse` captures support GUIDs.
+Direct typed comparisons require GUID or null operands; strings must be
+converted explicitly, not compared to the GUID's raw 16-byte storage.
+
+`toguid` reads 32 hexadecimal digits, allowing optional nonrepeated hyphens
+after digit positions 8, 12, 16, and 20, and ignores any remaining suffix as
+documented by Kusto. Failed conversion yields a typed null. Literals require
+the entire literal to be valid. `new_guid` embeds DataFusion's volatile UUID-v4
+generator without overwriting or depending on a host registry override.
+`toscalar(new_guid())` freezes a generated value for the planned query.
+
+Dynamic GUID roots retain their own tag through conversion, null-padding-safe
+row offsets, and scalar expansion. The GUID tag is appended after existing tags;
+older dense-union input schemas remain readable and normalize during union.
+As with datetime/timespan, GUIDs nested inside JSON-backed arrays/bags currently
+serialize as strings, not fully rich nested Kusto scalar values.
+
+## Grouped tabular subqueries
+
+`mv-apply ... on (...)` expands each original row into an independent subtable,
+runs a native DataFusion transformation, and restores unexpanded source columns
+that the subquery did not return. Arrays zip with null padding. Original indices,
+per-row expansion limits, type-only casts, empty/null/scalar inputs, per-row
+top-k, aggregates, nested expansions, and independent serialized windows are
+supported. Property bags stay whole until an explicit inner `mv-expand`;
+`mv-apply` has no bag-expansion parameter.
+
+`partition [hint.strategy=...] by Key (...)` runs an implicit-source
+transformation for each key. Null keys form a group. Legacy mode (the default)
+enforces the 64-key limit globally; explicit native/shuffle modes use native
+hash repartitioning and spill-capable per-partition sorting, without that key
+limit. Native/shuffle forms reject explicit-source operators. Legacy explicit
+`{ query-with-source }` syntax and service-specific concurrency/spread hints are
+not implemented.
+
+Simple native/shuffle `top`, `count`, and `summarize` transformations compile to
+one vectorized partitioned-window/grouped-aggregate plan, without instantiating
+one plan per key. More general transformations compile their physical template
+once, bind each subtable's Arrow batches to its native input, and reset native
+operator state between groups. Groups stream independently across hash
+partitions; retaining one group's input is charged to the host memory pool.
+Large individual groups require enough memory; those retained batches do not
+spill even though the upstream native sort can.
+
+This general path does not reparse KQL or run a separate query interpreter, but
+native-plan initialization has overhead for very many tiny groups. Prefer
+ordinary `summarize`/windows or the vectorized partition fast paths where
+equivalent. Group-local materialization rebinds its input and cache per group;
+unrelated outer snapshots remain shared.
+
+Single-array typed-long/real `mv-apply (top ...)` uses a batch Arrow top-k
+kernel. Top-k followed by row counts, long sums, or ordered lists also stays in
+batch expressions, avoiding one physical-plan initialization per source row.
+Mixed scalar types, empty arrays, null placement, output limits, and exact
+large integers retain the general template's semantics. Item-index, multiple
+arrays, arbitrary predicates, and more complex aggregates use the general path.
+
+## Stateful scans
+
+`scan [with_match_id=...] [declare(...)] with (step ...; ...)` is a native
+streaming execution source. Conditions and assignments are compiled once using
+DataFusion's scalar expressions and type coercion; the scan owns the sequential
+state machine rather than interpreting KQL expressions per row.
+
+Each input row checks steps in reverse order. A successful promotion transfers
+and clears the previous step's sequence before the earlier steps are evaluated.
+Self-state updates retain the sequence's match ID; an inactive first step starts
+a new zero-based match ID. Assignments are simultaneous and can update source
+columns as well as declared columns. Unqualified names mean the current input
+row/default declarations; `Step.Column` accesses that step's captured state.
+Later-step references, duplicate declarations/steps/assignments, incompatible
+types, and nonboolean conditions error.
+
+`output=none` suppresses output without suppressing state changes.
+`output=last` retains a sequence's last matching row until promotion/replacement
+or end of input. Hidden ordinals restore source-row order, including multiple
+matches on one row and delayed output, before downstream row windows or final
+results. Missing input order is unspecified; sort explicitly when order matters.
+State resets independently inside each `partition`/`mv-apply` subtable.
+
+The operator retains bounded step history rather than every input row, with
+at most 128 steps, 128 declarations, and 128 assignments per step. Variable-size
+state and buffered outputs are charged to the host memory pool. State does not
+spill. A nonnullable-long, zero-initialized additive single-step scan uses native
+cumulative windows instead; nullable inputs use the state machine so null
+propagation is not accidentally changed into SQL SUM's null-skipping behavior.
+Compute row-window expressions in an earlier `extend`, not directly inside
+step conditions/assignments. Full cross-service scan conformance still requires
+real-Kusto differential fixtures.
+
+## Hierarchical top values
+
+`top-nested [N] of [Name=]Expression [with others=constant] by
+[Name=]Aggregate [asc|desc]` supports up to 32 levels. Each parent is selected
+using its full source-row aggregate before selecting its children, so pruning
+children does not shrink the displayed parent total. Omitted counts retain all
+groups; null and dynamic group keys are retained. Native grouped aggregation,
+per-parent windows, null-safe joins, and query-local snapshots implement the
+hierarchy without executing a separate subquery per key.
+
+Others buckets retain rejected source rows and recompute the aggregate, rather
+than incorrectly adding averages or percentile results. Nested others buckets
+can be refined by subsequent levels. Labels must convert to the key's type.
+Generated output names are `aggregated_<key>` unless explicitly named.
+Output rows can grow rapidly with depth and omitted limits; the ordinary
+expanded-plan budgets and host memory/spill configuration still apply.
+
+`top-hitters N of Value [by Weight]` currently computes exact native counts or
+sums and top-k selection. Its result is a valid exact estimate with KQL-style
+`approximate_count_*`/`approximate_sum_*` names, but it does not implement
+Kusto's bounded-memory Count-Min-Sketch or promise identical approximate results.
+Exact states can consume more memory for high-cardinality inputs.
+
+## Schema-aware evaluation plugins
+
+`evaluate bag_unpack(Column [,prefix] [,columnsConflict] [,ignoredProperties])
+: (OutputSchema)` supports declared scalar/dynamic fields, optional input `*`,
+prefixes, ignored-key arrays, and `error`/`keep_source`/`replace_source` conflict
+modes. Input bags are decoded once per batch row into a struct of requested
+slots, rather than reparsed separately for every output field. Extraction is
+cast-only: invalid slot types become typed nulls, not parsed numbers. Missing
+strings normalize to empty strings. The bag input is removed, rows are retained,
+and serialized order survives output projection.
+
+`evaluate pivot(Column [,Aggregate] [,GroupingColumns...]) : (OutputSchema)`
+lowers supported aggregates to native conditional grouped aggregation.
+Default grouping excludes the pivot and aggregate input columns. Complete
+schema declarations fix output order/types; unseen runtime bucket values and
+declared-type mismatches fail explicitly instead of being silently dropped.
+Supported aggregates are count, sum, min, max, avg, dcount, stdev, variance,
+take_any, and list/set/bag collection builders.
+
+Both plugins require an explicit output schema. Implicit data-dependent schema
+discovery would execute input during lazy query construction, so it is not
+silently enabled. Other Kusto plugins and service distribution hints remain
+unsupported and return errors.
 
 ## Parsing and extraction
 
@@ -394,12 +607,55 @@ representations and continue to ignore nulls.
   service. No string term index is installed: `has` scans Arrow batches using
   native regex kernels, rather than promising Kusto's indexed search complexity.
 - Only one final tabular result is supported. Management commands,
-  scalar subqueries, view declarations, `render`,
-  hints, additional window/scan operators, and `mv-apply` are future
-  work. See [the delivery plan](architecture.md).
+  `render`, additional hints, legacy explicit-source partition syntax, and
+  advanced signal-processing operators are future work.
+  Operators/functions not listed in this contract are not covered merely
+  because they exist in Kusto. Additional areas include other `evaluate`
+  plugins, implicit plugin schema discovery, graph operators,
+  external-data syntax, richer decimal literals, fully rich nested dynamic
+  scalar values, and full scalar-function
+  conformance. See [the delivery plan](architecture.md).
 - Default parsing limits: 1 MiB of query text, nesting/expression depth 64,
   and 128 operators per pipeline. `parse_with_options` permits changing these
   within the parser's supported nesting bounds. Expanded expression and plan
   budgets also reject pathological `let` expansion. Input datasets are not
   capped by these frontend limits; configure DataFusion runtime memory/spilling
   and application-level query timeouts separately.
+
+## Opt-in Kusto reference checks
+
+The conformance suite in `tests/conformance.rs` runs synthetic inline-data
+fixtures locally by default. It covers counts/nulls, expansion, per-row/per-key
+queries, scans, hierarchical tops, schema-declared plugins, scalar subqueries,
+ranges, GUIDs, parsing, and series shape. Local fixture checks are **not**
+evidence that those fixtures have passed against a Kusto engine.
+
+To compare the same fixtures against an explicitly configured reference:
+
+```bash
+# Existing local emulator: no bearer token is read or transmitted.
+export KUSTO_CLUSTER_URI=http://127.0.0.1:8080
+export KUSTO_DATABASE=TestDatabase
+cargo test --locked --test conformance live_kusto_conformance -- --ignored --nocapture
+```
+
+For an existing ADX test database, set `KUSTO_CLUSTER_URI` to its HTTPS cluster
+root and provide `KUSTO_DATABASE` and `KUSTO_BEARER_TOKEN` through the caller's
+environment. No database, cluster, or credential is provisioned automatically.
+Fixtures only issue read-only query requests. The test requires curl with
+`--fail-with-body` support and does not add an HTTP client to the library's
+runtime dependencies.
+
+The client requests non-progressive Kusto v2 frames, rejects failed/cancelled or
+incomplete datasets, and checks result column names/types before comparing row
+multisets. Explicit string projections avoid incidental Arrow-vs-JSON display
+differences. HTTPS credentials are kept out of process arguments in a temporary
+header file that is removed on drop. Curl configuration files are disabled and
+`KUSTO_BEARER_TOKEN` is removed from curl's environment. Plain HTTP is restricted
+to loopback.
+
+The separate `reference_transport_local_http` test uses a self-owned synthetic
+HTTP fixture and verifies serialized request properties, read-only headers, and
+the client parser. It does not emulate KQL or certify reference parity. CI runs
+this transport check explicitly; the actual live Kusto test remains ignored
+until a caller configures and requests it.
