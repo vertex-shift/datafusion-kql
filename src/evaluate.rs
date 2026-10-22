@@ -409,8 +409,16 @@ fn pivot(
     let mut buckets = Vec::new();
     for (name, ty) in &schema.columns {
         if !group_set.contains(name) {
-            let value = ScalarValue::try_from_string(name.clone(), &pivot_ty)
-                .map_err(|error| Error::Plan(format!("invalid pivot output '{name}': {error}")))?;
+            let value = if pivot_ty == crate::guid::data_type() {
+                let (bytes, _) = crate::guid::parse_prefix(name)
+                    .filter(|(_, end)| *end == name.len())
+                    .ok_or_else(|| Error::Plan(format!("invalid guid pivot output '{name}'")))?;
+                ScalarValue::FixedSizeBinary(16, Some(bytes.to_vec()))
+            } else {
+                ScalarValue::try_from_string(name.clone(), &pivot_ty).map_err(|error| {
+                    Error::Plan(format!("invalid pivot output '{name}': {error}"))
+                })?
+            };
             buckets.push((name.clone(), *ty, value));
         }
     }

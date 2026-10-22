@@ -817,6 +817,11 @@ impl<'s> Planner<'s> {
                     expr.span,
                 ));
             }
+            crate::guid::check_comparison(
+                &value.get_type(plan.schema())?,
+                right.schema().field(0).data_type(),
+                expr.span,
+            )?;
             let value = if *case_insensitive {
                 self.expressions().ascii_lower(value)?
             } else {
@@ -2138,7 +2143,20 @@ impl<'s> Planner<'s> {
                 .step_by(columns.len())
                 .map(|expr| {
                     let lowered = expressions.scalar(expr, &DFSchema::empty())?;
-                    let scalar = expressions.constant(lowered, expr.span)?.cast_to(&ty)?;
+                    let scalar = expressions.constant(lowered, expr.span)?;
+                    let scalar = if ty == crate::guid::data_type()
+                        && scalar.data_type() != ty
+                        && !scalar.is_null()
+                    {
+                        let guid = expressions
+                            .constant(crate::guid::call(lit(scalar), false), expr.span)?;
+                        if guid.is_null() {
+                            return Err(Error::syntax("invalid guid in datatable", expr.span));
+                        }
+                        guid
+                    } else {
+                        scalar.cast_to(&ty)?
+                    };
                     Ok(if is_string(&ty) && scalar.is_null() {
                         ScalarValue::Utf8(Some(String::new()))
                     } else {

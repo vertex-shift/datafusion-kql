@@ -15,6 +15,9 @@ use crate::ast::{self, UnionKind};
 use crate::{Error, Result, dynamic, ordering};
 
 pub(crate) fn canonical(ty: &DataType) -> DataType {
+    if dynamic::is_dynamic(ty) {
+        return dynamic::data_type();
+    }
     match ty {
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => DataType::Utf8,
         DataType::Int8 | DataType::Int16 => DataType::Int32,
@@ -36,6 +39,7 @@ pub(crate) fn type_names(ty: &DataType) -> (String, String) {
             ("datetime", "System.DateTime")
         }
         DataType::Duration(_) => ("timespan", "System.TimeSpan"),
+        DataType::FixedSizeBinary(16) => ("guid", "System.Guid"),
         DataType::Decimal128(_, _) | DataType::Decimal256(_, _) => ("decimal", "System.Decimal"),
         DataType::List(_)
         | DataType::LargeList(_)
@@ -130,10 +134,12 @@ pub(crate) fn union(
                 .index_of_column_by_name(None, original)
                 .filter(|index| canonical(plan.schema().field(*index).data_type()) == *ty);
             let expression = if let Some(index) = index {
-                cast(
-                    Expr::Column(Column::from(plan.schema().qualified_field(index))),
-                    ty.clone(),
-                )
+                let value = Expr::Column(Column::from(plan.schema().qualified_field(index)));
+                if dynamic::is_dynamic(ty) && plan.schema().field(index).data_type() != ty {
+                    dynamic::call(dynamic::Kernel::IntoDynamic, vec![value])
+                } else {
+                    cast(value, ty.clone())
+                }
             } else if crate::expressions::is_string(ty) {
                 cast(lit(""), ty.clone())
             } else {

@@ -184,7 +184,11 @@ pub(crate) fn plan(
                 let value =
                     if let Some(index) = filtered.schema().index_of_column_by_name(None, name) {
                         let column = field(&filtered, index);
-                        if dynamic::is_dynamic(filtered.schema().field(index).data_type())
+                        if filtered.schema().field(index).data_type() == &crate::guid::data_type()
+                            && ty == DataType::Utf8
+                        {
+                            crate::guid::call(column, true)
+                        } else if dynamic::is_dynamic(filtered.schema().field(index).data_type())
                             && ty == DataType::Utf8
                         {
                             dynamic::call(Kernel::Convert(ty.clone()), vec![column])
@@ -422,7 +426,9 @@ fn term(
         if column.is_some_and(|name| name != field.name()) {
             continue;
         }
-        let value = if dynamic::is_dynamic(field.data_type()) {
+        let value = if field.data_type() == &crate::guid::data_type() {
+            crate::guid::call(crate::search::field(input, index), true)
+        } else if dynamic::is_dynamic(field.data_type()) {
             dynamic::call(
                 Kernel::Convert(DataType::Utf8),
                 vec![crate::search::field(input, index)],

@@ -87,8 +87,10 @@ pub(crate) fn lex(query: &str) -> Result<Vec<Token<'_>>> {
             {
                 after += 1;
             }
-            if matches!(name, "datetime" | "date" | "timespan" | "time")
-                && query.as_bytes().get(after) == Some(&b'(')
+            if matches!(
+                name,
+                "datetime" | "date" | "timespan" | "time" | "guid" | "uuid" | "uniqueid"
+            ) && query.as_bytes().get(after) == Some(&b'(')
             {
                 let end = query[after + 1..].find(')').ok_or_else(|| {
                     Error::syntax("unterminated typed literal", Span::new(start, query.len()))

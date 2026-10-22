@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.4 implements the typed tabular and dynamic subset below. Keywords, function
+0.5 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -15,7 +15,7 @@ syntax/functions return an error; there is no SQL fallback.
 | `let` | Scalar expressions, tabular plans, aliases, nested lexical scopes |
 | Parenthesized queries | Nested pipelines and scoped `let` statements |
 | `print` | One row of scalar expressions |
-| `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan`, `dynamic` columns |
+| `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan`, `guid`/`uuid`/`uniqueid`, `dynamic` columns |
 | `range` | Inclusive lazy native `generate_series`; integer, real, datetime, and timespan sequences, including descending ranges |
 | `union` | Source form and pipe form |
 | `materialize(...)` | Lazy shared Arrow snapshot, usable directly or in a tabular binding |
@@ -202,6 +202,8 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
 - Literals: signed 64-bit integers, floating point, booleans, single/double quoted
   strings, backslash escapes, verbatim `@` strings, typed null constructors,
   `datetime(...)`, and `timespan(...)`.
+- GUID literals (`guid(...)`, `uuid(...)`, `uniqueid(...)`) and typed nulls;
+  nullable `toguid`, volatile `new_guid`, and canonical `tostring` formatting.
 - Timespans: `d`, `h`, `m`, `s`, `ms`, `us`, `ns`, `tick`/`ticks`,
   `microsecond(s)`, decimal quantities, and `[d.]hh:mm:ss[.fraction]`.
   Bare numbers inside `timespan(...)` represent days. Conversion uses integer
@@ -242,7 +244,7 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
 `dynamic(...)` supports nested arrays and property bags with single- or
 double-quoted strings, scalar literals, and nulls. Dynamic values are real
 Arrow **dense unions**, distinguishing null, bool, long, real, string, array,
-bag, datetime, and timespan. Arrays and bags use JSON-marked UTF-8 child buffers;
+bag, datetime, timespan, and guid. Arrays and bags use JSON-marked UTF-8 child buffers;
 they are not confused with ordinary string columns or normalized to empty
 strings. Nested non-JSON scalar types serialize as strings inside collections.
 
@@ -275,6 +277,29 @@ is zero-based. The default per-row limit is 2,147,483,647 (legacy `mvexpand`:
 `to typeof(...)` checks underlying dynamic types and does not parse strings into
 numbers. For example, `"2"` becomes null under `to typeof(long)`; use `tolong`
 after an untyped expansion to request conversion.
+
+## Native GUID values
+
+GUIDs use `FixedSizeBinary(16)` in canonical RFC-4122 byte order. Such Arrow
+fields are interpreted as KQL GUIDs; use `tostring` for lowercase hyphenated
+display rather than Arrow's generic binary formatter. Typed datatables,
+parameters/functions, equality/membership, joins/unions, distinct aggregates,
+schema inspection, regex/JSON extraction, and `parse` captures support GUIDs.
+Direct typed comparisons require GUID or null operands; strings must be
+converted explicitly, not compared to the GUID's raw 16-byte storage.
+
+`toguid` reads 32 hexadecimal digits, allowing optional nonrepeated hyphens
+after digit positions 8, 12, 16, and 20, and ignores any remaining suffix as
+documented by Kusto. Failed conversion yields a typed null. Literals require
+the entire literal to be valid. `new_guid` embeds DataFusion's volatile UUID-v4
+generator without overwriting or depending on a host registry override.
+`toscalar(new_guid())` freezes a generated value for the planned query.
+
+Dynamic GUID roots retain their own tag through conversion, null-padding-safe
+row offsets, and scalar expansion. The GUID tag is appended after existing tags;
+older dense-union input schemas remain readable and normalize during union.
+As with datetime/timespan, GUIDs nested inside JSON-backed arrays/bags currently
+serialize as strings, not fully rich nested Kusto scalar values.
 
 ## Grouped tabular subqueries
 
@@ -587,7 +612,8 @@ representations and continue to ignore nulls.
   Operators/functions not listed in this contract are not covered merely
   because they exist in Kusto. Additional areas include other `evaluate`
   plugins, implicit plugin schema discovery, graph operators,
-  external-data syntax, richer guid/decimal literals, and full scalar-function
+  external-data syntax, richer decimal literals, fully rich nested dynamic
+  scalar values, and full scalar-function
   conformance. See [the delivery plan](architecture.md).
 - Default parsing limits: 1 MiB of query text, nesting/expression depth 64,
   and 128 operators per pipeline. `parse_with_options` permits changing these

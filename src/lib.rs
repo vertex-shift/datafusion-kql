@@ -25,6 +25,7 @@ mod expressions;
 mod format_time;
 mod functions;
 mod grouped;
+mod guid;
 mod json_path;
 mod lexer;
 mod literals;

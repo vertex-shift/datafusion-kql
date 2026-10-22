@@ -260,6 +260,14 @@ impl Expressions<'_> {
                         args,
                     ));
                 }
+                let value_type = value.get_type(schema)?;
+                for item in &lowered {
+                    crate::guid::check_comparison(
+                        &value_type,
+                        &item.get_type(&DFSchema::empty())?,
+                        expr.span,
+                    )?;
+                }
                 let mut contains_null = false;
                 let mut list = Vec::with_capacity(values.len());
                 for item in lowered {
@@ -380,6 +388,23 @@ impl Expressions<'_> {
                 Kernel::Equal(op == B::NotEq),
                 vec![left, right],
             ));
+        }
+        if matches!(
+            op,
+            B::Eq
+                | B::NotEq
+                | B::EqInsensitive
+                | B::NotEqInsensitive
+                | B::Lt
+                | B::LtEq
+                | B::Gt
+                | B::GtEq
+        ) {
+            crate::guid::check_comparison(
+                &left.get_type(schema)?,
+                &right.get_type(schema)?,
+                right_span,
+            )?;
         }
         Ok(match op {
             B::And => left.and(right),
@@ -637,6 +662,8 @@ impl Expressions<'_> {
     pub(crate) fn string_value(&self, value: Expr, schema: &DFSchema) -> Result<Expr> {
         Ok(if dynamic::is_dynamic(&value.get_type(schema)?) {
             dynamic::call(Kernel::Convert(DataType::Utf8), vec![value])
+        } else if value.get_type(schema)? == crate::guid::data_type() {
+            crate::guid::call(value, true)
         } else {
             value
         })
@@ -748,6 +775,21 @@ impl Expressions<'_> {
             return Ok(dynamic::call(kernel, values));
         }
         Ok(match name {
+            "toguid" => {
+                arity(1)?;
+                if dynamic::is_dynamic(&values[0].get_type(schema)?) {
+                    dynamic::call(Kernel::Convert(crate::guid::data_type()), values)
+                } else {
+                    crate::guid::call(values[0].clone(), false)
+                }
+            }
+            "new_guid" => {
+                arity(0)?;
+                crate::guid::call(
+                    datafusion::functions::string::uuid().call(Vec::new()),
+                    false,
+                )
+            }
             "format_datetime" | "format_timespan" => {
                 arity(2)?;
                 let pattern = self.constant_string(values[1].clone(), args[1].span)?;
@@ -1150,6 +1192,9 @@ impl Expressions<'_> {
                 if dynamic::is_dynamic(&values[0].get_type(schema)?) {
                     return Ok(dynamic::call(Kernel::Convert(DataType::Utf8), values));
                 }
+                if values[0].get_type(schema)? == crate::guid::data_type() {
+                    return Ok(crate::guid::call(values[0].clone(), true));
+                }
                 self.function(
                     "coalesce",
                     vec![try_cast(values[0].clone(), DataType::Utf8), lit("")],
@@ -1179,6 +1224,9 @@ impl Expressions<'_> {
                 if dynamic::is_dynamic(&values[0].get_type(schema)?) {
                     return Ok(dynamic::call(Kernel::Convert(data_type(ty)), values));
                 }
+                if values[0].get_type(schema)? == crate::guid::data_type() {
+                    return Ok(lit(ScalarValue::try_from(&data_type(ty))?));
+                }
                 try_cast(values[0].clone(), data_type(ty))
             }
             "bool" | "boolean" | "int" | "long" | "real" | "double" | "string" => {
@@ -1188,6 +1236,9 @@ impl Expressions<'_> {
                     return Ok(dynamic::call(Kernel::Convert(ty), values));
                 }
                 if name == "string" {
+                    if values[0].get_type(schema)? == crate::guid::data_type() {
+                        return Ok(crate::guid::call(values[0].clone(), true));
+                    }
                     self.function("coalesce", vec![try_cast(values[0].clone(), ty), lit("")])?
                 } else {
                     try_cast(values[0].clone(), ty)
@@ -1245,7 +1296,13 @@ impl Expressions<'_> {
                 arity(1)?;
                 cast(self.function("character_length", values)?, DataType::Int64)
             }
-            "strcat" => self.function("concat", values)?,
+            "strcat" => self.function(
+                "concat",
+                values
+                    .into_iter()
+                    .map(|value| self.string_value(value, schema))
+                    .collect::<Result<Vec<_>>>()?,
+            )?,
             "tolower" => {
                 arity(1)?;
                 self.function("lower", values)?
@@ -1311,6 +1368,7 @@ impl Expressions<'_> {
             ScalarType::Timespan => {
                 crate::temporal::parse(crate::temporal::Target::Timespan, value)
             }
+            ScalarType::Guid => crate::guid::call(value, false),
             ScalarType::Dynamic => dynamic::call(Kernel::ParseJson, vec![value]),
             _ => try_cast(value, data_type(ty)),
         })

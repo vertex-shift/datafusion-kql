@@ -29,6 +29,8 @@ const PIVOT_QUERY: &str = "Events | evaluate pivot(Category):(Value:long,api:lon
 const FIELDS_QUERY: &str = "JsonEvents | extend P=parse_json(Raw) | project service=tostring(P.service),latencies=P.latencies | summarize Measurements=sum(array_length(latencies)) by service";
 const SEARCH_QUERY: &str = "Events | search Category:'api' and Value>42 | summarize N=count()";
 const HITTERS_QUERY: &str = "Events | top-hitters 2 of Category by Value";
+const GUID_QUERY: &str =
+    "GuidEvents | extend id=toguid(Text) | summarize Distinct=count_distinct(id)";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -80,6 +82,30 @@ fn json_context() -> SessionContext {
     ctx.register_table(
         TableReference::bare("JsonEvents"),
         Arc::new(MemTable::try_new(schema, partitions).unwrap()),
+    )
+    .unwrap();
+    ctx
+}
+
+fn guid_context() -> SessionContext {
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let values = [
+        "74be27de-1e4e-49d9-b579-fe0b331d3642",
+        "01234567-89ab-cdef-0123-456789abcdef",
+    ];
+    let batch = RecordBatch::try_from_iter(vec![(
+        "Text",
+        Arc::new(StringArray::from_iter_values(
+            (0..JSON_ROWS).map(|i| values[i % 2]),
+        )) as _,
+    )])
+    .unwrap();
+    let partitions = (0..4)
+        .map(|i| vec![batch.slice(i * JSON_ROWS / 4, JSON_ROWS / 4)])
+        .collect();
+    ctx.register_table(
+        TableReference::bare("GuidEvents"),
+        Arc::new(MemTable::try_new(batch.schema(), partitions).unwrap()),
     )
     .unwrap();
     ctx
@@ -147,6 +173,7 @@ fn benchmarks(c: &mut Criterion) {
     execution.finish();
 
     let json = json_context();
+    let guids = guid_context();
     let mut workloads = c.benchmark_group("workloads");
     for (name, query, context, rows, expected_rows) in [
         ("json_expand", JSON_QUERY, &json, JSON_ROWS, 2),
@@ -160,6 +187,7 @@ fn benchmarks(c: &mut Criterion) {
         ("json_fields", FIELDS_QUERY, &json, JSON_ROWS, 2),
         ("search", SEARCH_QUERY, &ctx, ROWS, 1),
         ("top_hitters", HITTERS_QUERY, &ctx, ROWS, 2),
+        ("guid_parse", GUID_QUERY, &guids, JSON_ROWS, 1),
     ] {
         let plan = runtime.block_on(async {
             context
@@ -211,6 +239,12 @@ fn benchmarks(c: &mut Criterion) {
             assert_eq!(
                 datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
                 datafusion::common::ScalarValue::Int64(Some(expected))
+            );
+        }
+        if name == "guid_parse" {
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(2))
             );
         }
         if matches!(name, "bag_unpack" | "json_fields") {

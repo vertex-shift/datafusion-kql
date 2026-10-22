@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.4 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.5 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -162,6 +162,10 @@ Cross-table `search`/`find`, smart record packing, exact heavy-hitter estimates,
 and hierarchical `top-nested` selection are supported. Schema-declared
 `evaluate bag_unpack` and `evaluate pivot` keep JSON extraction and conditional
 aggregation lazy and native.
+GUID/UUID values use native 128-bit Arrow storage, with literals, nullable
+conversion, generation, canonical formatting, typed parameters, and root dynamic
+GUID tags. Existing dynamic tag numbers and previous input schemas remain
+compatible.
 
 Advanced signal processing, management commands, additional hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.

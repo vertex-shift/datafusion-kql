@@ -45,6 +45,7 @@ capacity estimates.
 | `workloads/pivot` | Validate four pivot values and conditionally aggregate 1,000,000 rows, then check total row count |
 | `workloads/search` | Column-restricted regex term search and a numeric filter over 1,000,000 rows |
 | `workloads/top_hitters` | Exact native weighted heavy hitters over 1,000,000 rows |
+| `workloads/guid_parse` | Parse 100,000 canonical GUID strings to native 128-bit values and verify two distinct IDs |
 
 The fixture uses two non-null columns, four in-memory partitions, a filter,
 grouped sum, and top-k. Source data and physical planning are outside the
