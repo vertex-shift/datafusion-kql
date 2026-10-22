@@ -14,7 +14,7 @@ use datafusion::prelude::lit;
 use crate::ast::{self, UnionKind};
 use crate::{Error, Result, dynamic, ordering};
 
-fn canonical(ty: &DataType) -> DataType {
+pub(crate) fn canonical(ty: &DataType) -> DataType {
     match ty {
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => DataType::Utf8,
         DataType::Int8 | DataType::Int16 => DataType::Int32,
@@ -304,5 +304,6 @@ pub(crate) fn source_name(source: &ast::Source) -> String {
         ast::Source::Datatable { .. } => "datatable".into(),
         ast::Source::Range { .. } => "range".into(),
         ast::Source::Union { .. } => "union".into(),
+        ast::Source::Search { find, .. } => if find.is_some() { "find" } else { "search" }.into(),
     }
 }

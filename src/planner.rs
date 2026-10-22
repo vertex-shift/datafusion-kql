@@ -443,6 +443,31 @@ impl<'s> Planner<'s> {
                     let (labels, plans): (Vec<_>, Vec<_>) = legs.into_iter().unzip();
                     self.union(plans, *kind, withsource.as_deref(), &labels)
                 }
+                Source::Search {
+                    inputs,
+                    predicate,
+                    case_sensitive,
+                    find,
+                } => {
+                    let mut legs = Vec::new();
+                    for input in inputs {
+                        legs.extend(self.legs(input).await?);
+                    }
+                    let mut prepared = Vec::new();
+                    for (label, plan) in legs {
+                        let expr = self.expand_expression(predicate, plan.schema())?;
+                        let expr = self.resolve_expression(&expr).await?;
+                        let (plan, expr) = self.membership(plan, &expr).await?;
+                        prepared.push((label, plan, expr));
+                    }
+                    crate::search::plan(
+                        &self.expressions(),
+                        prepared,
+                        predicate,
+                        *case_sensitive,
+                        find.as_ref(),
+                    )
+                }
             }
         })
     }
@@ -1194,6 +1219,37 @@ impl<'s> Planner<'s> {
                 Operator::Where(predicate) => {
                     let expression = self.expressions().predicate(predicate, plan.schema())?;
                     LogicalPlanBuilder::from(plan).filter(expression)?.build()?
+                }
+                Operator::Search {
+                    predicate,
+                    case_sensitive,
+                } => {
+                    if plan
+                        .schema()
+                        .index_of_column_by_name(None, "$table")
+                        .is_some()
+                    {
+                        let expression = crate::search::filter(
+                            &self.expressions(),
+                            &plan,
+                            predicate,
+                            *case_sensitive,
+                            &HashMap::new(),
+                        )?;
+                        crate::expressions::check_expression(&expression)?;
+                        LogicalPlanBuilder::from(ordering::visible(plan)?)
+                            .filter(expression)?
+                            .build()?
+                    } else {
+                        let label = crate::tabular::source_name(&pipeline.source);
+                        crate::search::plan(
+                            &self.expressions(),
+                            vec![(label, plan, predicate.clone())],
+                            predicate,
+                            *case_sensitive,
+                            None,
+                        )?
+                    }
                 }
                 Operator::Invoke { name, args } => {
                     self.invoke_function(name, args, Some(plan), operator.span)

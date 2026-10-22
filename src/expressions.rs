@@ -127,6 +127,12 @@ impl Expressions<'_> {
     fn lower(&self, expr: &ast::Expr, schema: &DFSchema, filter: bool) -> Result<Expr> {
         Ok(match &expr.kind {
             ExprKind::Literal(value) => lit(literal_value(value, expr.span)?),
+            ExprKind::SearchTerm { .. } => {
+                return Err(Error::unsupported(
+                    "column:term syntax outside search/find",
+                    expr.span,
+                ));
+            }
             ExprKind::ToScalar(_) | ExprKind::DeferredCall { .. } | ExprKind::InTabular { .. } => {
                 return Err(Error::Plan(
                     "scalar subquery was not prepared by the planner".into(),
@@ -637,6 +643,63 @@ impl Expressions<'_> {
     }
 
     fn call(&self, name: &str, args: &[ast::Expr], span: Span, schema: &DFSchema) -> Result<Expr> {
+        if name == "column_ifexists" {
+            if args.len() != 2 {
+                return Err(Error::syntax(
+                    "column_ifexists expects name and fallback",
+                    span,
+                ));
+            }
+            let name = self.constant_string(
+                self.lower(&args[0], &DFSchema::empty(), false)?,
+                args[0].span,
+            )?;
+            return if let Some(index) = schema.index_of_column_by_name(None, &name) {
+                Ok(Expr::Column(Column::from(schema.qualified_field(index))))
+            } else {
+                self.lower(&args[1], schema, false)
+            };
+        }
+        if name == "pack_all" {
+            if args.len() > 1 {
+                return Err(Error::syntax(
+                    "pack_all expects an optional ignore-null/empty flag",
+                    span,
+                ));
+            }
+            let ignore_empty = if let Some(arg) = args.first() {
+                match self.constant(self.lower(arg, &DFSchema::empty(), false)?, arg.span)? {
+                    ScalarValue::Boolean(Some(value)) => value,
+                    _ => {
+                        return Err(Error::syntax(
+                            "pack_all expects a constant boolean",
+                            arg.span,
+                        ));
+                    }
+                }
+            } else {
+                false
+            };
+            let fields = schema
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| !crate::ordering::hidden(field))
+                .collect::<Vec<_>>();
+            return Ok(dynamic::call(
+                Kernel::PackAll {
+                    names: fields
+                        .iter()
+                        .map(|(_, field)| field.name().clone())
+                        .collect(),
+                    ignore_empty,
+                },
+                fields
+                    .iter()
+                    .map(|(i, _)| Expr::Column(Column::from(schema.qualified_field(*i))))
+                    .collect(),
+            ));
+        }
         let values = args
             .iter()
             .map(|arg| self.lower(arg, schema, false))

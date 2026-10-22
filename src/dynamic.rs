@@ -369,6 +369,10 @@ fn failure(message: impl Into<String>) -> DataFusionError {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Kernel {
     IntoDynamic,
+    PackAll {
+        names: Vec<String>,
+        ignore_empty: bool,
+    },
     TopValues {
         real: bool,
         descending: bool,
@@ -461,6 +465,7 @@ impl Kernel {
             "__kql_{}",
             match self {
                 Self::IntoDynamic => "dynamic",
+                Self::PackAll { .. } => "pack_all",
                 Self::TopValues { .. } => "mv_apply_top_values",
                 Self::TopReduce(_) => "mv_apply_top_reduce",
                 Self::ParseJson => "parse_json",
@@ -517,6 +522,7 @@ impl Kernel {
             return op.validate(len);
         }
         let valid = match self {
+            Self::PackAll { names, .. } => len == names.len(),
             Self::IntoDynamic
             | Self::TopValues { .. }
             | Self::TopReduce(_)
@@ -588,7 +594,7 @@ pub(crate) fn call(kernel: Kernel, args: Vec<Expr>) -> Expr {
     }
     let name = kernel.name();
     let signature = if args.is_empty() {
-        Signature::any(0, Volatility::Immutable)
+        Signature::nullary(Volatility::Immutable)
     } else {
         Signature::variadic_any(Volatility::Immutable)
     };
@@ -1380,6 +1386,19 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
                     .collect()
             };
             Json::Array(result)
+        }
+        K::PackAll {
+            names,
+            ignore_empty,
+        } => {
+            let mut bag = Map::new();
+            for (name, value) in names.iter().zip(values) {
+                let value = value.json()?;
+                if !*ignore_empty || !(value.is_null() || value.as_str() == Some("")) {
+                    bag.insert(name.clone(), value);
+                }
+            }
+            Json::Object(bag)
         }
         K::TopValues {
             real,

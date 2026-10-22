@@ -117,6 +117,7 @@ not implemented.
 | `mv-expand`, `mvexpand` | Arrays and bags, zipped multiple columns, per-row limits, `with_itemindex`, cast-only `to typeof(...)` |
 | `mv-apply` | Per-input-row native subqueries over zipped arrays, indices, type-only casts, and limits |
 | `partition` | Implicit-source per-key transformations with legacy/native/shuffle strategies |
+| `search`, `find` | Cross-table/wildcard text predicates, source labels, smart packing, explicit find projection |
 | `scan` | Typed declared state, step conditions/promotion, simultaneous assignments, match IDs, and all/last/none output |
 | `parse`, `parse-where` | Simple, regex, and relaxed patterns; typed captures, regex flags, and strict failure filtering |
 | `serialize` | Freezes row order and supports calculated columns and native window expressions |
@@ -169,6 +170,30 @@ host pool for production: the extension does not install Kusto's cluster-wide
 5 GB service cache limit or a separate allocator. Materialized buffers do not
 spill. Unbounded input plans are rejected.
 
+## Cross-table search and find
+
+`search [kind=...] [in (...)] predicate` discovers registered providers and
+lexical views, without scanning data while planning. Pipe-form search uses the
+current input. Plain string terms search all visible columns, `Column:"term"`
+restricts a term, and leading/trailing/internal asterisks implement suffix,
+prefix, substring, or bounded wildcard matching. Boolean combinations, explicit
+comparisons/regex predicates, source labels, and case modes are supported.
+Search always supplies `$table`; consecutive searches preserve that label.
+There is no inverted term index: these are native batch regex scans.
+
+`find [withsource=Name] [in (...)] [where] predicate` defaults its source label
+to `source_`. Smart projection retains explicit predicate columns and common
+columns, packing other fields into dynamic `pack_`. Explicit `project
+Column[:type], ... [, pack_all()]` fixes the output schema; its optional
+`column1` bag contains the original record, not post-cast values. Missing
+provider fields are handled explicitly, and conflicting projected types require
+a declared type. Unknown columns/providers and output-name conflicts error.
+
+Qualified DataFusion catalogs/schemas and provider wildcards are supported;
+Kusto-service `cluster()`/`database()` discovery syntax is not. Predicate
+coercion for a column with different input types follows each provider's native
+DataFusion analysis rather than promising complete Kusto cross-type inference.
+
 ## Expressions and functions
 
 - Literals: signed 64-bit integers, floating point, booleans, single/double quoted
@@ -197,6 +222,8 @@ spill. Unbounded input plans are rejected.
   sizes must be scalar constants.
 - `iff`/`iif`, `case`, `isnull`, `isnotnull`, `isempty`, `isnotempty`, `coalesce`.
   String coalesce skips empty strings.
+- Schema-aware `column_ifexists(name, fallback)` and `pack_all([ignore_null_empty])`;
+  internal helper columns are not packed, and unused fallbacks are not resolved.
 - `tostring`, `tolong`, `toint`, `toreal`/`todouble`, `tobool`, `todatetime`,
   scalar type constructors; failed conversions use Arrow `TRY_CAST` semantics.
 - `strcat`, `strlen`, `tolower`, `toupper`, `substring` (zero-based),

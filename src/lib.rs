@@ -37,6 +37,7 @@ mod range_source;
 mod ranges;
 mod regex_extract;
 mod scan;
+mod search;
 mod series_functions;
 mod tabular;
 mod temporal;

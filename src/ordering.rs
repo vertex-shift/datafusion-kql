@@ -194,7 +194,11 @@ fn any_expression(expression: &ast::Expr, predicate: fn(&str) -> bool) -> bool {
 
 pub(crate) fn expressions(operator: &Operator) -> Vec<&ast::Expr> {
     match operator {
-        Operator::Where(expr) | Operator::Parse { input: expr, .. } => vec![expr],
+        Operator::Where(expr)
+        | Operator::Search {
+            predicate: expr, ..
+        }
+        | Operator::Parse { input: expr, .. } => vec![expr],
         Operator::Project(items) | Operator::Extend(items) | Operator::Serialize(items) => {
             items.iter().map(|i| &i.expr).collect()
         }
@@ -248,6 +252,7 @@ pub(crate) fn needed(query: &ast::Query) -> bool {
         match value {
             Source::Subquery(query) => needed(query),
             Source::Union { inputs, .. } => inputs.iter().any(source),
+            Source::Search { inputs, .. } => inputs.iter().any(source),
             Source::Print(items) => items.iter().any(|i| any_expression(&i.expr, interesting)),
             Source::Call { args, .. } => args.iter().any(|arg| match &arg.value {
                 ast::ArgumentValue::Scalar(expr) => any_expression(expr, interesting),

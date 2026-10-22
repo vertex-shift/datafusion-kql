@@ -374,7 +374,16 @@ impl<'a> Parser<'a, '_> {
         }
         if matches!(
             self.tokens[at].kind,
-            Kind::Ident("print" | "datatable" | "union" | "let" | "declare" | "materialize")
+            Kind::Ident(
+                "print"
+                    | "datatable"
+                    | "union"
+                    | "let"
+                    | "declare"
+                    | "materialize"
+                    | "search"
+                    | "find"
+            )
         ) {
             return true;
         }
@@ -443,6 +452,75 @@ impl<'a> Parser<'a, '_> {
                 kind,
                 withsource,
                 inputs,
+            }
+        } else if self.keyword("search") || self.keyword("find") {
+            let find = self.eat_keyword("find");
+            if !find {
+                self.expect_keyword("search")?;
+            }
+            let sensitive = if !find { self.search_kind()? } else { false };
+            let source = if find && self.eat_keyword("withsource") {
+                self.expect(Kind::Assign)?;
+                self.identifier()?
+            } else {
+                "source_".into()
+            };
+            let inputs = if self.eat_keyword("in") {
+                self.expect(Kind::LParen)?;
+                let mut inputs = vec![self.source()?];
+                while self.eat(Kind::Comma) {
+                    inputs.push(self.source()?);
+                }
+                self.expect(Kind::RParen)?;
+                inputs
+            } else {
+                vec![Source::Pattern {
+                    prefix: Vec::new(),
+                    pattern: "*".into(),
+                    span: self.current().span,
+                }]
+            };
+            if find {
+                self.eat_keyword("where");
+            }
+            let predicate = Box::new(self.expr(0)?);
+            let mut project = None;
+            let mut pack_all = false;
+            if find && self.eat_keyword("project") {
+                if self.eat(Kind::Minus) {
+                    self.expect_keyword("smart")?;
+                } else {
+                    let mut columns = Vec::new();
+                    loop {
+                        if self.eat_keyword("pack_all") {
+                            self.expect(Kind::LParen)?;
+                            self.expect(Kind::RParen)?;
+                            pack_all = true;
+                            break;
+                        }
+                        let name = self.identifier()?;
+                        let ty = if self.eat(Kind::Colon) {
+                            Some(self.scalar_type()?)
+                        } else {
+                            None
+                        };
+                        columns.push((name, ty));
+                        if !self.eat(Kind::Comma) {
+                            break;
+                        }
+                    }
+                    project = Some(columns);
+                }
+            }
+            Source::Search {
+                inputs,
+                predicate,
+                case_sensitive: sensitive,
+                find: find.then_some(Find {
+                    source,
+                    project,
+                    pack_all,
+                }),
             }
         } else {
             let start = self.current().span.start;
@@ -611,6 +689,13 @@ impl<'a> Parser<'a, '_> {
         }
         let kind = match name.as_str() {
             "where" | "filter" => Operator::Where(self.expr(0)?),
+            "search" => {
+                let case_sensitive = self.search_kind()?;
+                Operator::Search {
+                    predicate: self.expr(0)?,
+                    case_sensitive,
+                }
+            }
             "take" | "limit" => Operator::Take(self.row_count_expression()?),
             "project" => Operator::Project(self.named_list()?),
             "extend" => Operator::Extend(self.named_list()?),
@@ -1335,6 +1420,29 @@ impl<'a> Parser<'a, '_> {
         self.enter()?;
         let mut left = self.prefix()?;
         loop {
+            if minimum <= 3 && self.eat(Kind::Colon) {
+                let column = match &left.kind {
+                    ExprKind::Identifier(parts) if parts.len() == 1 => Some(parts[0].clone()),
+                    ExprKind::Wildcard => None,
+                    _ => return Err(self.expected("a search column name before ':'")),
+                };
+                let token = self.advance();
+                let Kind::String(term) = token.kind else {
+                    return Err(Error::syntax(
+                        "search terms after ':' must be strings",
+                        token.span,
+                    ));
+                };
+                left = self.node(
+                    ExprKind::SearchTerm {
+                        column,
+                        term: term.into_owned(),
+                    },
+                    Span::new(left.span.start, token.span.end),
+                    1,
+                )?;
+                continue;
+            }
             if self.eat(Kind::LBracket) {
                 let index = self.expr(0)?;
                 self.expect(Kind::RBracket)?;
@@ -1466,6 +1574,18 @@ impl<'a> Parser<'a, '_> {
         }
         self.nesting -= 1;
         Ok(left)
+    }
+
+    fn search_kind(&mut self) -> Result<bool> {
+        if !self.eat_keyword("kind") {
+            return Ok(false);
+        }
+        self.expect(Kind::Assign)?;
+        match self.identifier()?.as_str() {
+            "case_sensitive" => Ok(true),
+            "case_insensitive" | "default" => Ok(false),
+            _ => Err(self.expected("default, case_sensitive, or case_insensitive")),
+        }
     }
 
     fn transformation(&mut self) -> Result<Vec<SpannedOperator>> {

@@ -122,6 +122,19 @@ pub enum Source {
         withsource: Option<String>,
         inputs: Vec<Source>,
     },
+    Search {
+        inputs: Vec<Source>,
+        predicate: Box<Expr>,
+        case_sensitive: bool,
+        find: Option<Find>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Find {
+    pub source: String,
+    pub project: Option<Vec<(String, Option<ScalarType>)>>,
+    pub pack_all: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +174,10 @@ pub struct SpannedOperator {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operator {
     Where(Expr),
+    Search {
+        predicate: Expr,
+        case_sensitive: bool,
+    },
     Take(Expr),
     Project(Vec<NamedExpr>),
     Extend(Vec<NamedExpr>),
@@ -367,6 +384,10 @@ pub enum ExprKind {
     #[doc(hidden)]
     BindingReference(String),
     Literal(Literal),
+    SearchTerm {
+        column: Option<String>,
+        term: String,
+    },
     ToScalar(Box<ArgumentValue>),
     #[doc(hidden)]
     DeferredCall {
@@ -624,7 +645,12 @@ impl Expr {
 impl Operator {
     pub(crate) fn expression_refs(&self) -> Vec<&Expr> {
         match self {
-            Self::Where(expr) | Self::Take(expr) | Self::Parse { input: expr, .. } => vec![expr],
+            Self::Where(expr)
+            | Self::Search {
+                predicate: expr, ..
+            }
+            | Self::Take(expr)
+            | Self::Parse { input: expr, .. } => vec![expr],
             Self::Project(items) | Self::Extend(items) | Self::Serialize(items) => {
                 items.iter().map(|i| &i.expr).collect()
             }
@@ -667,7 +693,12 @@ impl Operator {
     ) -> crate::Result<Self> {
         let mut operator = self.clone();
         match &mut operator {
-            Self::Where(expr) | Self::Take(expr) | Self::Parse { input: expr, .. } => {
+            Self::Where(expr)
+            | Self::Search {
+                predicate: expr, ..
+            }
+            | Self::Take(expr)
+            | Self::Parse { input: expr, .. } => {
                 *expr = map(expr)?;
             }
             Self::Project(items) | Self::Extend(items) | Self::Serialize(items) => {
