@@ -64,6 +64,40 @@ operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
 
+## Measured 0.4 operator workloads
+
+The new operators at commit `bef5a54` were measured on 2026-10-22 on the same
+Apple M4/arm64 host, Rust 1.95.0, DataFusion 55.2.0, optimized bench profile,
+and four target partitions:
+
+```bash
+cargo bench --locked --bench kql -- \
+  'workloads/(bag_unpack|json_fields|pivot|search|top_hitters)' \
+  --warm-up-time 1 --measurement-time 3 --sample-size 30
+```
+
+| Benchmark | Criterion estimate | 95% confidence interval |
+| --- | --- | --- |
+| Declared bag unpack, 100,000 JSON payloads | 39.67 ms | 38.14-41.10 ms |
+| Equivalent ordinary property extraction | 45.57 ms | 44.87-46.29 ms |
+| Strict-schema pivot, 1,000,000 rows | 5.97 ms | 5.91-6.03 ms |
+| Column-restricted search, 1,000,000 rows | 27.26 ms | 26.83-27.72 ms |
+| Exact weighted heavy hitters, 1,000,000 rows | 2.15 ms | 2.12-2.19 ms |
+
+The JSON fixture has two requested fields and verifies identical measurement
+totals for unpacking and ordinary extraction. It is not a general guarantee
+about JSON inputs with different widths/types. The pivot fixture validates all
+four allowed string buckets, groups by numeric value, and asserts a final
+one-million-row total. The search fixture combines a literal term regex with a
+numeric filter. Heavy hitters uses exact native aggregation, not a Kusto sketch.
+These measurements correspond to approximately 2.52 million unpacked payloads,
+167.5 million pivot input rows, 36.7 million search input rows, and 464.9 million
+heavy-hitter input rows per second for these memory-resident fixtures only.
+
+No result is a claim of an execution advantage over an equivalent native
+DataFusion plan or of performance for every KQL operator. Shared-host timing
+variance and all earlier comparison limits still apply.
+
 ## Measured 0.3 baseline
 
 Version 0.3.0 at commit `81f01d7` was measured on 2026-10-22 on the same Apple
