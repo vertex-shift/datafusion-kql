@@ -482,7 +482,7 @@ impl Expressions<'_> {
                     ));
                 }
                 let mut builder = when(values[0].clone(), values[1].clone());
-                for pair in values[2..values.len() - 1].chunks_exact(2) {
+                for pair in values[2..values.len() - 1].as_chunks::<2>().0 {
                     builder = builder.when(pair[0].clone(), pair[1].clone());
                 }
                 builder.otherwise(values.last().expect("case has a default").clone())?
