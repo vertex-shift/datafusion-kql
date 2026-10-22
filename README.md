@@ -210,6 +210,12 @@ optimizer behavior, Arrow integration, and Parquet. SQL is enabled only by the
 development dependency for comparison; the frontend does not require
 DataFusion's SQL feature at runtime.
 
+`tests/conformance.rs` also provides an opt-in reference suite for a configured
+Kusto emulator or ADX test database. Default tests validate its synthetic
+fixtures/protocol locally; CI exercises its curl transport against a self-owned
+loopback fixture, **not a Kusto reference engine**. See the compatibility
+contract for explicit live-test setup and remaining conformance boundaries.
+
 ## License
 
 [Apache-2.0](LICENSE).

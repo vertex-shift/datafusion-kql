@@ -621,3 +621,41 @@ representations and continue to ignore nulls.
   budgets also reject pathological `let` expansion. Input datasets are not
   capped by these frontend limits; configure DataFusion runtime memory/spilling
   and application-level query timeouts separately.
+
+## Opt-in Kusto reference checks
+
+The conformance suite in `tests/conformance.rs` runs synthetic inline-data
+fixtures locally by default. It covers counts/nulls, expansion, per-row/per-key
+queries, scans, hierarchical tops, schema-declared plugins, scalar subqueries,
+ranges, GUIDs, parsing, and series shape. Local fixture checks are **not**
+evidence that those fixtures have passed against a Kusto engine.
+
+To compare the same fixtures against an explicitly configured reference:
+
+```bash
+# Existing local emulator: no bearer token is read or transmitted.
+export KUSTO_CLUSTER_URI=http://127.0.0.1:8080
+export KUSTO_DATABASE=TestDatabase
+cargo test --locked --test conformance live_kusto_conformance -- --ignored --nocapture
+```
+
+For an existing ADX test database, set `KUSTO_CLUSTER_URI` to its HTTPS cluster
+root and provide `KUSTO_DATABASE` and `KUSTO_BEARER_TOKEN` through the caller's
+environment. No database, cluster, or credential is provisioned automatically.
+Fixtures only issue read-only query requests. The test requires curl with
+`--fail-with-body` support and does not add an HTTP client to the library's
+runtime dependencies.
+
+The client requests non-progressive Kusto v2 frames, rejects failed/cancelled or
+incomplete datasets, and checks result column names/types before comparing row
+multisets. Explicit string projections avoid incidental Arrow-vs-JSON display
+differences. HTTPS credentials are kept out of process arguments in a temporary
+header file that is removed on drop. Curl configuration files are disabled and
+`KUSTO_BEARER_TOKEN` is removed from curl's environment. Plain HTTP is restricted
+to loopback.
+
+The separate `reference_transport_local_http` test uses a self-owned synthetic
+HTTP fixture and verifies serialized request properties, read-only headers, and
+the client parser. It does not emulate KQL or certify reference parity. CI runs
+this transport check explicitly; the actual live Kusto test remains ignored
+until a caller configures and requests it.
