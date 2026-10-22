@@ -4,6 +4,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::TableReference;
 use datafusion::datasource::MemTable;
+use datafusion::physical_plan::execution_plan::reset_plan_states;
 use datafusion::physical_plan::{collect, displayable};
 use datafusion::prelude::*;
 use datafusion_kql::{SessionContextKqlExt, parse};
@@ -94,12 +95,16 @@ fn benchmarks(c: &mut Criterion) {
     let mut execution = c.benchmark_group("execution");
     execution.throughput(Throughput::Elements(ROWS as u64));
     execution.bench_function("kql", |b| {
-        b.to_async(&runtime)
-            .iter(|| async { collect(Arc::clone(&kql), ctx.task_ctx()).await.unwrap() })
+        b.to_async(&runtime).iter(|| async {
+            let plan = reset_plan_states(Arc::clone(&kql)).unwrap();
+            collect(plan, ctx.task_ctx()).await.unwrap()
+        })
     });
     execution.bench_function("sql", |b| {
-        b.to_async(&runtime)
-            .iter(|| async { collect(Arc::clone(&sql), ctx.task_ctx()).await.unwrap() })
+        b.to_async(&runtime).iter(|| async {
+            let plan = reset_plan_states(Arc::clone(&sql)).unwrap();
+            collect(plan, ctx.task_ctx()).await.unwrap()
+        })
     });
     execution.finish();
 }

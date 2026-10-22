@@ -206,3 +206,32 @@ async fn csv_source_works_without_a_new_storage_layer() {
         .unwrap();
     assert_eq!(count.value(0), 2);
 }
+
+#[tokio::test]
+async fn cached_physical_benchmarks_reset_state_between_executions() {
+    use datafusion::arrow::util::pretty::pretty_format_batches;
+    use datafusion::physical_plan::collect;
+    use datafusion::physical_plan::execution_plan::reset_plan_states;
+
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    ctx.register_batch(TableReference::bare("Events"), batch())
+        .unwrap();
+    let plan = ctx
+        .kql("Events | where Value>20 | summarize Total=sum(Value) by Category | top 10 by Total")
+        .await
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    let mut previous = None;
+    for _ in 0..3 {
+        let fresh = reset_plan_states(Arc::clone(&plan)).unwrap();
+        let batches = collect(fresh, ctx.task_ctx()).await.unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        let result = pretty_format_batches(&batches).unwrap().to_string();
+        if let Some(previous) = &previous {
+            assert_eq!(&result, previous);
+        }
+        previous = Some(result);
+    }
+}

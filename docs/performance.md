@@ -42,6 +42,38 @@ result, not a million-row output. Execution numbers therefore measure a
 particular memory-resident analytic workload, not Parquet I/O, joins, string
 search, remote catalogs, or all of KQL.
 
+Each execution iteration uses DataFusion's `reset_plan_states` to create fresh
+operator state from the cached physical plan. This reset is included in the
+timing for both languages. Stateful repartition operators must not be executed
+repeatedly by simply cloning their `Arc`.
+
+## Measured local baseline
+
+Measured on 2026-10-22 with an Apple M4 (arm64), Rust 1.95.0, DataFusion 55.2.0,
+the default optimized bench profile, and four target partitions:
+
+```bash
+cargo bench --locked --bench kql -- --warm-up-time 1 --measurement-time 3 --sample-size 30
+```
+
+| Benchmark | Criterion estimate | 95% confidence interval |
+| --- | --- | --- |
+| Parse KQL | 2.43 us | 2.36-2.50 us |
+| Plan KQL, including parsing | 46.48 us | 45.49-47.38 us |
+| Plan a previously parsed AST | 41.47 us | 40.57-42.56 us |
+| Plan equivalent SQL | 137.92 us | 133.07-141.64 us |
+| Execute KQL over 1,000,000 rows | 7.93 ms | 6.85-8.97 ms |
+| Execute equivalent SQL over 1,000,000 rows | 6.85 ms | 6.39-7.49 ms |
+
+The benchmark asserts identical displayed native physical plans before measuring
+execution, including the sum's empty-input default and top-k ordering. The KQL
+execution estimate corresponds to approximately 126 million input rows/second
+for this fixture. The frontend has lower measured planning cost than SQL here;
+there is **no demonstrated execution-speed advantage over SQL**. Execution
+intervals overlap, and the shared host showed substantial scheduling variance
+across runs. These are a reproducible local baseline, not universal performance
+claims or a stable regression budget.
+
 ## Correctness gates
 
 Performance is not a substitute for semantic verification:
