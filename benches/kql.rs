@@ -167,6 +167,12 @@ fn benchmarks(c: &mut Criterion) {
                 "partition benchmark must use the vectorized fast path"
             );
         }
+        if name == "mv_apply_top" {
+            assert!(
+                !native.contains("KqlApplyExec"),
+                "array-top benchmark must use batch kernels"
+            );
+        }
         if name == "scan_cumulative" {
             assert!(
                 native.contains("WindowAggExec") && !native.contains("KqlScanExec"),

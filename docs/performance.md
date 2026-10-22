@@ -59,6 +59,52 @@ operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
 
+## Measured 0.3 baseline
+
+Version 0.3.0 at commit `81f01d7` was measured on 2026-10-22 on the same Apple
+M4/arm64 host, Rust 1.95.0, DataFusion 55.2.0, optimized bench profile, and four
+target partitions, using the 1-second warm-up/3-second target/30-sample command
+below. Criterion extended collection for workloads needing more time to collect
+30 samples.
+
+| Benchmark | Criterion estimate | 95% confidence interval |
+| --- | --- | --- |
+| Parse KQL | 1.30 us | 1.28-1.31 us |
+| Plan KQL, including parsing | 25.32 us | 24.76-26.10 us |
+| Plan a previously parsed AST | 24.36 us | 23.93-24.92 us |
+| Plan equivalent SQL | 58.44 us | 57.63-59.42 us |
+| Execute KQL over 1,000,000 rows | 4.54 ms | 4.33-4.84 ms |
+| Execute equivalent SQL over 1,000,000 rows | 4.10 ms | 4.05-4.15 ms |
+| JSON parse/expand/aggregate, 100,000 payloads | 95.37 ms | 92.71-98.05 ms |
+| Make-series and FIR, 1,000,000 rows | 13.78 ms | 13.57-14.01 ms |
+| Partition top-three, 1,000,000 rows | 52.91 ms | 52.31-53.58 ms |
+| Cumulative scan, 1,000,000 rows | 116.21 ms | 114.51-118.04 ms |
+| Conditional stateful scan, 10,000 rows | 273.47 ms | 267.67-280.60 ms |
+| Per-array top/aggregate, 1,000 payloads | 1.44 ms | 1.42-1.47 ms |
+
+The numeric execution fixture processes about 220 million input rows/second;
+the vectorized array-top fixture processes about 695,000 payloads/second. The
+benchmark asserts native cumulative-window/partition fast paths and identical
+SQL/KQL numeric physical plans. SQL's execution estimate was faster in this run;
+the choice of frontend itself does not accelerate an identical physical plan.
+
+The first 0.3 array-top implementation at `76e30e5` measured 144.73 ms
+(141.72-147.89 ms) for the same 1,000-payload workload because it initialized a
+native subquery template per input row. The batch Arrow specialization removes
+that setup cost. Differential cases cover empty/null/mixed-type arrays,
+integer precision, native overflow behavior, ordering, and limits.
+
+**General state machines are not a high-throughput substitute for native
+aggregates/windows.** The conditional scan fixture remains about 36,600 input
+rows/second here. Prefer `row_cumsum`, native aggregates, or the exact
+cumulative-scan fast path when equivalent. More general `mv-apply` subqueries
+also retain native-template initialization overhead; their performance should
+not be inferred from the specialized array-top fixture.
+
+The shared host showed material timing variation, including in unchanged SQL
+code. Cross-run changes are not statistically controlled code-only comparisons.
+These are workload-specific local measurements, not universal guarantees.
+
 ## Measured 0.2 baseline
 
 The expanded 0.2.0 library at commit `fcf7b55` was measured on 2026-10-22 with

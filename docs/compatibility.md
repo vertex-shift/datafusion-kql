@@ -506,8 +506,12 @@ representations and continue to ignore nulls.
   native regex kernels, rather than promising Kusto's indexed search complexity.
 - Only one final tabular result is supported. Management commands,
   `render`, additional hints, legacy explicit-source partition syntax, and
-  advanced signal-processing operators are future
-  work. See [the delivery plan](architecture.md).
+  advanced signal-processing operators are future work.
+  Operators/functions not listed in this contract are not covered merely
+  because they exist in Kusto. Additional areas include `search`/`find`,
+  `top-nested`/`top-hitters`, plugin-oriented `evaluate`, graph operators,
+  external-data syntax, richer guid/decimal literals, and full scalar-function
+  conformance. See [the delivery plan](architecture.md).
 - Default parsing limits: 1 MiB of query text, nesting/expression depth 64,
   and 128 operators per pipeline. `parse_with_options` permits changing these
   within the parser's supported nesting bounds. Expanded expression and plan
