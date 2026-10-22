@@ -96,7 +96,13 @@ errors rather than silently execute with different semantics.
   range and richer dynamic scalar types remain compatibility milestones.
 - Lookup, schema introspection, projection reordering, sampling, wildcard table
   discovery, source-labelled unions and conflicting-type schema splitting are
-  implemented. Continue with Kusto-specific approximate algorithms and hints.
+  implemented. Cross-table search/find, smart row packing, hierarchical
+  top-nested (including reaggregated others), and exact heavy-hitter estimates
+  are implemented. Continue with Kusto-specific approximate algorithms and hints.
+- Explicit-schema bag_unpack and pivot compile to batch struct extraction and
+  native conditional aggregation. Runtime pivot schema mismatches are explicit
+  errors; implicit data-dependent schema discovery and additional service
+  plugins remain compatibility milestones.
 - Typed request parameters and lexically captured scalar/tabular functions with
   `invoke` are implemented through native expression/plan expansion. Continue
   with wider constant-argument contexts. Lazy scalar subqueries, lexical

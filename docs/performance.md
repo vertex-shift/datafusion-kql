@@ -40,6 +40,11 @@ capacity estimates.
 | `workloads/scan_cumulative` | Native cumulative-window scan over 1,000,000 nonnullable longs, followed by a maximum |
 | `workloads/scan_stateful` | Conditional state-machine scan over 10,000 rows, followed by a maximum |
 | `workloads/mv_apply_top` | Parse 1,000 payloads and run native per-row top-two/aggregation subqueries |
+| `workloads/bag_unpack` | Parse/unpack 100,000 JSON payloads with a declared schema and aggregate array lengths by service |
+| `workloads/json_fields` | Equivalent service/latency extraction through ordinary property access over the same payloads |
+| `workloads/pivot` | Validate four pivot values and conditionally aggregate 1,000,000 rows, then check total row count |
+| `workloads/search` | Column-restricted regex term search and a numeric filter over 1,000,000 rows |
+| `workloads/top_hitters` | Exact native weighted heavy hitters over 1,000,000 rows |
 
 The fixture uses two non-null columns, four in-memory partitions, a filter,
 grouped sum, and top-k. Source data and physical planning are outside the

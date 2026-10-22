@@ -373,6 +373,9 @@ pub(crate) enum Kernel {
         names: Vec<String>,
         ignore_empty: bool,
     },
+    Unpack {
+        keys: Vec<String>,
+    },
     TopValues {
         real: bool,
         descending: bool,
@@ -440,6 +443,12 @@ pub(crate) enum TopReduction {
 impl Kernel {
     fn output_type(&self) -> DataType {
         match self {
+            Self::Unpack { keys } => DataType::Struct(
+                keys.iter()
+                    .enumerate()
+                    .map(|(i, _)| Arc::new(Field::new(format!("field{i}"), data_type(), true)))
+                    .collect(),
+            ),
             Self::GetType | Self::StrcatArray | Self::EncodeJson | Self::EncodeWindow => {
                 DataType::Utf8
             }
@@ -466,6 +475,7 @@ impl Kernel {
             match self {
                 Self::IntoDynamic => "dynamic",
                 Self::PackAll { .. } => "pack_all",
+                Self::Unpack { .. } => "bag_unpack",
                 Self::TopValues { .. } => "mv_apply_top_values",
                 Self::TopReduce(_) => "mv_apply_top_reduce",
                 Self::ParseJson => "parse_json",
@@ -524,6 +534,7 @@ impl Kernel {
         let valid = match self {
             Self::PackAll { names, .. } => len == names.len(),
             Self::IntoDynamic
+            | Self::Unpack { .. }
             | Self::TopValues { .. }
             | Self::TopReduce(_)
             | Self::ParseJson
@@ -657,7 +668,34 @@ impl ScalarUDFImpl for Function {
             .iter()
             .map(Input::new)
             .collect::<Result<Vec<_>>>()?;
-        let output = if self.kernel == Kernel::DecodeWindow {
+        let output = if let Kernel::Unpack { keys } = &self.kernel {
+            let mut builders = keys.iter().map(|_| Builder::new(count)).collect::<Vec<_>>();
+            for row in 0..count {
+                let value = inputs[0].value(row)?.json()?;
+                for (key, builder) in keys.iter().zip(&mut builders) {
+                    builder.append_json(
+                        value
+                            .as_object()
+                            .and_then(|bag| bag.get(key))
+                            .unwrap_or(&Json::Null),
+                    )?;
+                }
+            }
+            if keys.is_empty() {
+                Arc::new(StructArray::new_empty_fields(count, None)) as ArrayRef
+            } else {
+                let fields = keys
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| Arc::new(Field::new(format!("field{i}"), data_type(), true)))
+                    .collect::<Vec<_>>();
+                let arrays = builders
+                    .into_iter()
+                    .map(Builder::finish)
+                    .collect::<Result<Vec<_>>>()?;
+                Arc::new(StructArray::try_new(fields.into(), arrays, None)?) as ArrayRef
+            }
+        } else if self.kernel == Kernel::DecodeWindow {
             let mut builder = Builder::new(count);
             for row in 0..count {
                 match inputs[0].value(row)? {
@@ -1462,6 +1500,7 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
             }
         }
         K::IntoDynamic
+        | K::Unpack { .. }
         | K::Coalesce
         | K::Convert(_)
         | K::TypeOnly(_)

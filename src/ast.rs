@@ -178,6 +178,11 @@ pub enum Operator {
         predicate: Expr,
         case_sensitive: bool,
     },
+    Evaluate {
+        name: String,
+        args: Vec<Expr>,
+        schema: Option<OutputSchema>,
+    },
     Take(Expr),
     Project(Vec<NamedExpr>),
     Extend(Vec<NamedExpr>),
@@ -262,6 +267,12 @@ pub enum Operator {
 pub struct NamedExpr {
     pub name: Option<String>,
     pub expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputSchema {
+    pub include_input: bool,
+    pub columns: Vec<(String, ScalarType)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -705,6 +716,7 @@ impl Operator {
                         .chain(std::iter::once(&level.aggregate.expr))
                 })
                 .collect(),
+            Self::Evaluate { args, .. } => args.iter().collect(),
             Self::Sample { count, distinct } => {
                 std::iter::once(count).chain(distinct.iter()).collect()
             }
@@ -756,6 +768,11 @@ impl Operator {
                     for (_, value) in &mut step.assignments {
                         *value = map(value)?;
                     }
+                }
+            }
+            Self::Evaluate { args, .. } => {
+                for arg in args {
+                    *arg = map(arg)?;
                 }
             }
             Self::Summarize { aggregates, by } => {

@@ -24,6 +24,11 @@ const PARTITION_QUERY: &str =
 const SCAN_QUERY: &str = "Events | scan declare(Total:long=0) with(step s:true=>Total=s.Total+Value;) | summarize Peak=max(Total)";
 const STATE_SCAN_QUERY: &str = "Events | take 10000 | scan declare(Total:long=0) with(step s:true=>Total=iff(s.Total>10000,Value,s.Total+Value);) | summarize Peak=max(Total)";
 const APPLY_QUERY: &str = "JsonEvents | take 1000 | extend P=parse_json(Raw) | mv-apply v=P.latencies to typeof(long) on (top 2 by v | summarize Total=sum(v)) | summarize Total=sum(Total)";
+const UNPACK_QUERY: &str = "JsonEvents | extend P=parse_json(Raw) | evaluate bag_unpack(P):(service:string,latencies:dynamic) | summarize Measurements=sum(array_length(latencies)) by service";
+const PIVOT_QUERY: &str = "Events | evaluate pivot(Category):(Value:long,api:long,worker:long,frontend:long,scheduler:long) | summarize Total=sum(api)+sum(worker)+sum(frontend)+sum(scheduler)";
+const FIELDS_QUERY: &str = "JsonEvents | extend P=parse_json(Raw) | project service=tostring(P.service),latencies=P.latencies | summarize Measurements=sum(array_length(latencies)) by service";
+const SEARCH_QUERY: &str = "Events | search Category:'api' and Value>42 | summarize N=count()";
+const HITTERS_QUERY: &str = "Events | top-hitters 2 of Category by Value";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -150,6 +155,11 @@ fn benchmarks(c: &mut Criterion) {
         ("scan_cumulative", SCAN_QUERY, &ctx, ROWS, 1),
         ("scan_stateful", STATE_SCAN_QUERY, &ctx, 10_000, 1),
         ("mv_apply_top", APPLY_QUERY, &json, 1_000, 1),
+        ("bag_unpack", UNPACK_QUERY, &json, JSON_ROWS, 2),
+        ("pivot", PIVOT_QUERY, &ctx, ROWS, 1),
+        ("json_fields", FIELDS_QUERY, &json, JSON_ROWS, 2),
+        ("search", SEARCH_QUERY, &ctx, ROWS, 1),
+        ("top_hitters", HITTERS_QUERY, &ctx, ROWS, 2),
     ] {
         let plan = runtime.block_on(async {
             context
@@ -192,6 +202,28 @@ fn benchmarks(c: &mut Criterion) {
             expected_rows,
             "unexpected result cardinality for {name}",
         );
+        if matches!(name, "pivot" | "search") {
+            let expected = if name == "pivot" {
+                ROWS as i64
+            } else {
+                140_000
+            };
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(expected))
+            );
+        }
+        if matches!(name, "bag_unpack" | "json_fields") {
+            for batch in &result {
+                for row in 0..batch.num_rows() {
+                    assert_eq!(
+                        datafusion::common::ScalarValue::try_from_array(batch.column(1), row)
+                            .unwrap(),
+                        datafusion::common::ScalarValue::Int64(Some(150_000))
+                    );
+                }
+            }
+        }
         workloads.throughput(Throughput::Elements(rows as u64));
         workloads.bench_function(name, |b| {
             b.to_async(&runtime).iter(|| async {

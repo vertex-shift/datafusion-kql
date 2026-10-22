@@ -1256,6 +1256,18 @@ impl<'s> Planner<'s> {
                     value,
                     weight,
                 } => crate::top::hitters(&self.expressions(), plan, count, value, weight.as_ref())?,
+                Operator::Evaluate { name, args, schema } => {
+                    let temporary = self.temporary_name(&plan);
+                    crate::evaluate::plan(
+                        &self.expressions(),
+                        plan,
+                        name,
+                        args,
+                        schema.as_ref(),
+                        temporary,
+                        operator.span,
+                    )?
+                }
                 Operator::TopNested(levels) => {
                     let name = self.temporary_name(&plan);
                     crate::top::nested(&self.expressions(), plan, levels, name)?

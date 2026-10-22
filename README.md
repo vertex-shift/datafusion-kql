@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.3 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.4 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -19,6 +19,7 @@ cargo run --example telemetry_json
 cargo run --example time_series
 cargo run --example functions
 cargo run --example grouped_scan
+cargo run --example schema_plugins
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -157,6 +158,10 @@ supports per-key transformations, with vectorized fast paths for common
 aggregate/top-k workloads and reusable native templates for general subqueries.
 `scan` adds typed state machines, step promotion, match IDs, simultaneous
 assignments, output modes, and native cumulative-window fast paths.
+Cross-table `search`/`find`, smart record packing, exact heavy-hitter estimates,
+and hierarchical `top-nested` selection are supported. Schema-declared
+`evaluate bag_unpack` and `evaluate pivot` keep JSON extraction and conditional
+aggregation lazy and native.
 
 Advanced signal processing, management commands, additional hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.

@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.3 implements the typed tabular and dynamic subset below. Keywords, function
+0.4 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -120,6 +120,7 @@ not implemented.
 | `mv-apply` | Per-input-row native subqueries over zipped arrays, indices, type-only casts, and limits |
 | `partition` | Implicit-source per-key transformations with legacy/native/shuffle strategies |
 | `search`, `find` | Cross-table/wildcard text predicates, source labels, smart packing, explicit find projection |
+| `evaluate` | Explicit-schema `bag_unpack` and `pivot`, without replacing the session registry |
 | `scan` | Typed declared state, step conditions/promotion, simultaneous assignments, match IDs, and all/last/none output |
 | `parse`, `parse-where` | Simple, regex, and relaxed patterns; typed captures, regex flags, and strict failure filtering |
 | `serialize` | Freezes row order and supports calculated columns and native window expressions |
@@ -371,6 +372,30 @@ sums and top-k selection. Its result is a valid exact estimate with KQL-style
 Kusto's bounded-memory Count-Min-Sketch or promise identical approximate results.
 Exact states can consume more memory for high-cardinality inputs.
 
+## Schema-aware evaluation plugins
+
+`evaluate bag_unpack(Column [,prefix] [,columnsConflict] [,ignoredProperties])
+: (OutputSchema)` supports declared scalar/dynamic fields, optional input `*`,
+prefixes, ignored-key arrays, and `error`/`keep_source`/`replace_source` conflict
+modes. Input bags are decoded once per batch row into a struct of requested
+slots, rather than reparsed separately for every output field. Extraction is
+cast-only: invalid slot types become typed nulls, not parsed numbers. Missing
+strings normalize to empty strings. The bag input is removed, rows are retained,
+and serialized order survives output projection.
+
+`evaluate pivot(Column [,Aggregate] [,GroupingColumns...]) : (OutputSchema)`
+lowers supported aggregates to native conditional grouped aggregation.
+Default grouping excludes the pivot and aggregate input columns. Complete
+schema declarations fix output order/types; unseen runtime bucket values and
+declared-type mismatches fail explicitly instead of being silently dropped.
+Supported aggregates are count, sum, min, max, avg, dcount, stdev, variance,
+take_any, and list/set/bag collection builders.
+
+Both plugins require an explicit output schema. Implicit data-dependent schema
+discovery would execute input during lazy query construction, so it is not
+silently enabled. Other Kusto plugins and service distribution hints remain
+unsupported and return errors.
+
 ## Parsing and extraction
 
 `extract(regex, group, source [, typeof(type)])` uses native regex and array
@@ -560,8 +585,8 @@ representations and continue to ignore nulls.
   `render`, additional hints, legacy explicit-source partition syntax, and
   advanced signal-processing operators are future work.
   Operators/functions not listed in this contract are not covered merely
-  because they exist in Kusto. Additional areas include `search`/`find`,
-  `top-nested`/`top-hitters`, plugin-oriented `evaluate`, graph operators,
+  because they exist in Kusto. Additional areas include other `evaluate`
+  plugins, implicit plugin schema discovery, graph operators,
   external-data syntax, richer guid/decimal literals, and full scalar-function
   conformance. See [the delivery plan](architecture.md).
 - Default parsing limits: 1 MiB of query text, nesting/expression depth 64,

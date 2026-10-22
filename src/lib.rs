@@ -20,6 +20,7 @@ pub mod ast;
 mod calendar;
 mod dynamic;
 mod error;
+mod evaluate;
 mod expressions;
 mod format_time;
 mod functions;

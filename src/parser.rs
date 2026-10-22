@@ -711,6 +711,45 @@ impl<'a> Parser<'a, '_> {
                     weight,
                 }
             }
+            "evaluate" => {
+                let call = self.prefix()?;
+                let ExprKind::Call { name, args } = call.kind else {
+                    return Err(Error::syntax("evaluate expects a plugin call", call.span));
+                };
+                let schema = if self.eat(Kind::Colon) {
+                    self.expect(Kind::LParen)?;
+                    let include_input = self.eat(Kind::Star);
+                    let mut columns = Vec::new();
+                    let mut names = std::collections::HashSet::new();
+                    if include_input && !self.at(&Kind::RParen) {
+                        self.expect(Kind::Comma)?;
+                    }
+                    if !self.at(&Kind::RParen) {
+                        loop {
+                            let name = self.identifier()?;
+                            if !names.insert(name.clone()) {
+                                return Err(self.expected("unique output schema column names"));
+                            }
+                            self.expect(Kind::Colon)?;
+                            columns.push((name, self.scalar_type()?));
+                            if columns.len() > 1024 {
+                                return Err(self.expected("at most 1024 plugin output columns"));
+                            }
+                            if !self.eat(Kind::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(Kind::RParen)?;
+                    Some(OutputSchema {
+                        include_input,
+                        columns,
+                    })
+                } else {
+                    None
+                };
+                Operator::Evaluate { name, args, schema }
+            }
             "top-nested" => {
                 let mut levels = Vec::new();
                 loop {
