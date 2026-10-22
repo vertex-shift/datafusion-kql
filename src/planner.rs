@@ -1251,6 +1251,15 @@ impl<'s> Planner<'s> {
                         )?
                     }
                 }
+                Operator::TopHitters {
+                    count,
+                    value,
+                    weight,
+                } => crate::top::hitters(&self.expressions(), plan, count, value, weight.as_ref())?,
+                Operator::TopNested(levels) => {
+                    let name = self.temporary_name(&plan);
+                    crate::top::nested(&self.expressions(), plan, levels, name)?
+                }
                 Operator::Invoke { name, args } => {
                     self.invoke_function(name, args, Some(plan), operator.span)
                         .await?

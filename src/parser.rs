@@ -696,6 +696,63 @@ impl<'a> Parser<'a, '_> {
                     case_sensitive,
                 }
             }
+            "top-hitters" => {
+                let count = self.expr(0)?;
+                self.expect_keyword("of")?;
+                let value = self.expr(0)?;
+                let weight = if self.eat_keyword("by") {
+                    Some(self.expr(0)?)
+                } else {
+                    None
+                };
+                Operator::TopHitters {
+                    count,
+                    value,
+                    weight,
+                }
+            }
+            "top-nested" => {
+                let mut levels = Vec::new();
+                loop {
+                    let count = if self.keyword("of") {
+                        None
+                    } else {
+                        Some(self.expr(0)?)
+                    };
+                    self.expect_keyword("of")?;
+                    let value = self.named_expr()?;
+                    let others = if self.eat_keyword("with") {
+                        self.expect_keyword("others")?;
+                        self.expect(Kind::Assign)?;
+                        Some(self.expr(0)?)
+                    } else {
+                        None
+                    };
+                    self.expect_keyword("by")?;
+                    let aggregate = self.named_expr()?;
+                    let ascending = self.eat_keyword("asc");
+                    if !ascending {
+                        self.eat_keyword("desc");
+                    }
+                    levels.push(NestedTop {
+                        count,
+                        value,
+                        others,
+                        aggregate,
+                        ascending,
+                    });
+                    if levels.len() > 32 {
+                        return Err(self.expected("at most 32 top-nested levels"));
+                    }
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                    self.expect_keyword("top")?;
+                    self.expect(Kind::Minus)?;
+                    self.expect_keyword("nested")?;
+                }
+                Operator::TopNested(levels)
+            }
             "take" | "limit" => Operator::Take(self.row_count_expression()?),
             "project" => Operator::Project(self.named_list()?),
             "extend" => Operator::Extend(self.named_list()?),

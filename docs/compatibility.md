@@ -104,6 +104,8 @@ not implemented.
 | `summarize` | Named aggregate calls and arbitrary scalar grouping expressions; group-only form |
 | `sort`, `order` | Default **descending/nulls last**; ascending defaults to nulls first; explicit null placement |
 | `top` | Constant integer expression for count, one sort expression; default descending |
+| `top-hitters` | Native exact count/sum top-k estimates; preserves KQL output names but not Count-Min-Sketch implementation |
+| `top-nested` | Hierarchical per-parent top selection, ancestor aggregates, optional counts, aliases, and others buckets |
 | `take`, `limit` | Constant integer expressions; no ordering guarantee without a sort |
 | `sample`, `sample-distinct` | Native random top-k sampling; distinct sampling returns unique projected values |
 | `as` | Lazy intermediate binding, or a shared snapshot with `hint.materialized=true` |
@@ -345,6 +347,29 @@ propagation is not accidentally changed into SQL SUM's null-skipping behavior.
 Compute row-window expressions in an earlier `extend`, not directly inside
 step conditions/assignments. Full cross-service scan conformance still requires
 real-Kusto differential fixtures.
+
+## Hierarchical top values
+
+`top-nested [N] of [Name=]Expression [with others=constant] by
+[Name=]Aggregate [asc|desc]` supports up to 32 levels. Each parent is selected
+using its full source-row aggregate before selecting its children, so pruning
+children does not shrink the displayed parent total. Omitted counts retain all
+groups; null and dynamic group keys are retained. Native grouped aggregation,
+per-parent windows, null-safe joins, and query-local snapshots implement the
+hierarchy without executing a separate subquery per key.
+
+Others buckets retain rejected source rows and recompute the aggregate, rather
+than incorrectly adding averages or percentile results. Nested others buckets
+can be refined by subsequent levels. Labels must convert to the key's type.
+Generated output names are `aggregated_<key>` unless explicitly named.
+Output rows can grow rapidly with depth and omitted limits; the ordinary
+expanded-plan budgets and host memory/spill configuration still apply.
+
+`top-hitters N of Value [by Weight]` currently computes exact native counts or
+sums and top-k selection. Its result is a valid exact estimate with KQL-style
+`approximate_count_*`/`approximate_sum_*` names, but it does not implement
+Kusto's bounded-memory Count-Min-Sketch or promise identical approximate results.
+Exact states can consume more memory for high-cardinality inputs.
 
 ## Parsing and extraction
 

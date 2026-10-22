@@ -233,6 +233,12 @@ pub enum Operator {
         count: Expr,
         key: SortKey,
     },
+    TopHitters {
+        count: Expr,
+        value: Expr,
+        weight: Option<Expr>,
+    },
+    TopNested(Vec<NestedTop>),
     Distinct(Vec<Expr>),
     Count,
     Join {
@@ -256,6 +262,15 @@ pub enum Operator {
 pub struct NamedExpr {
     pub name: Option<String>,
     pub expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NestedTop {
+    pub count: Option<Expr>,
+    pub value: NamedExpr,
+    pub others: Option<Expr>,
+    pub aggregate: NamedExpr,
+    pub ascending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -671,6 +686,25 @@ impl Operator {
                 .collect(),
             Self::Sort(keys) => keys.iter().map(|k| &k.expr).collect(),
             Self::Top { count, key } => vec![count, &key.expr],
+            Self::TopHitters {
+                count,
+                value,
+                weight,
+            } => std::iter::once(count)
+                .chain(std::iter::once(value))
+                .chain(weight.iter())
+                .collect(),
+            Self::TopNested(levels) => levels
+                .iter()
+                .flat_map(|level| {
+                    level
+                        .count
+                        .iter()
+                        .chain(std::iter::once(&level.value.expr))
+                        .chain(level.others.iter())
+                        .chain(std::iter::once(&level.aggregate.expr))
+                })
+                .collect(),
             Self::Sample { count, distinct } => {
                 std::iter::once(count).chain(distinct.iter()).collect()
             }
@@ -756,6 +790,29 @@ impl Operator {
             Self::Top { count, key } => {
                 *count = map(count)?;
                 key.expr = map(&key.expr)?;
+            }
+            Self::TopHitters {
+                count,
+                value,
+                weight,
+            } => {
+                *count = map(count)?;
+                *value = map(value)?;
+                if let Some(weight) = weight {
+                    *weight = map(weight)?;
+                }
+            }
+            Self::TopNested(levels) => {
+                for level in levels {
+                    if let Some(count) = &mut level.count {
+                        *count = map(count)?;
+                    }
+                    level.value.expr = map(&level.value.expr)?;
+                    if let Some(others) = &mut level.others {
+                        *others = map(others)?;
+                    }
+                    level.aggregate.expr = map(&level.aggregate.expr)?;
+                }
             }
             Self::Sample { count, distinct } => {
                 *count = map(count)?;

@@ -125,6 +125,11 @@ pub(crate) fn bind_input(
     }))
 }
 
+pub(crate) fn cache_id(plan: &Arc<dyn ExecutionPlan>) -> Option<usize> {
+    plan.downcast_ref::<MaterializeExec>()
+        .map(|plan| Arc::as_ptr(&plan.cache) as usize)
+}
+
 impl DisplayAs for MaterializeExec {
     fn fmt_as(&self, _format: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "KqlMaterializeExec")

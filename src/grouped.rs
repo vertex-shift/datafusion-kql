@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -368,13 +369,14 @@ fn bind(
     slot: u64,
     batches: &[RecordBatch],
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    Ok(bind_changes(plan, slot, batches)?.data)
+    Ok(bind_changes(plan, slot, batches, &mut HashMap::new())?.data)
 }
 
 fn bind_changes(
     plan: Arc<dyn ExecutionPlan>,
     slot: u64,
     batches: &[RecordBatch],
+    caches: &mut HashMap<usize, Arc<dyn ExecutionPlan>>,
 ) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
     plan.transform_up(|plan| {
         if let Some(input) = plan.downcast_ref::<GroupInputExec>()
@@ -388,8 +390,8 @@ fn bind_changes(
             return Ok(Transformed::yes(source as Arc<dyn ExecutionPlan>));
         }
         if let Some(apply) = plan.downcast_ref::<ApplyExec>() {
-            let input = bind_changes(Arc::clone(&apply.input), slot, batches)?;
-            let template = bind_changes(Arc::clone(&apply.template), slot, batches)?;
+            let input = bind_changes(Arc::clone(&apply.input), slot, batches, caches)?;
+            let template = bind_changes(Arc::clone(&apply.template), slot, batches, caches)?;
             if !input.transformed && !template.transformed {
                 return Ok(Transformed::no(plan));
             }
@@ -402,13 +404,21 @@ fn bind_changes(
                 properties: Arc::clone(&apply.properties),
             }) as Arc<dyn ExecutionPlan>));
         }
-        if let Some(bound) =
-            crate::materialize::bind_input(&plan, |input| bind_changes(input, slot, batches))?
-        {
-            return Ok(bound);
+        if let Some(id) = crate::materialize::cache_id(&plan) {
+            if let Some(cached) = caches.get(&id) {
+                return Ok(Transformed::yes(Arc::clone(cached)));
+            }
+            if let Some(bound) = crate::materialize::bind_input(&plan, |input| {
+                bind_changes(input, slot, batches, caches)
+            })? {
+                if bound.transformed {
+                    caches.insert(id, Arc::clone(&bound.data));
+                }
+                return Ok(bound);
+            }
         }
         if let Some(bound) =
-            crate::scan::bind_input(&plan, |input| bind_changes(input, slot, batches))?
+            crate::scan::bind_input(&plan, |input| bind_changes(input, slot, batches, caches))?
         {
             return Ok(bound);
         }

@@ -41,6 +41,7 @@ mod search;
 mod series_functions;
 mod tabular;
 mod temporal;
+mod top;
 mod windows;
 
 pub use error::{Error, Result};
