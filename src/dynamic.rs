@@ -373,6 +373,8 @@ pub(crate) enum Kernel {
     DecodeList {
         limit: usize,
     },
+    EncodeWindow,
+    DecodeWindow,
     Get,
     GetType,
     Convert(DataType),
@@ -414,7 +416,9 @@ pub(crate) enum Kernel {
 impl Kernel {
     fn output_type(&self) -> DataType {
         match self {
-            Self::GetType | Self::StrcatArray | Self::EncodeJson => DataType::Utf8,
+            Self::GetType | Self::StrcatArray | Self::EncodeJson | Self::EncodeWindow => {
+                DataType::Utf8
+            }
             Self::ArrayLength | Self::ArrayIndexOf => DataType::Int64,
             Self::Equal(_) | Self::BagHasKey | Self::ArrayHas | Self::Membership { .. } => {
                 DataType::Boolean
@@ -440,6 +444,8 @@ impl Kernel {
                 Self::EncodeJson => "to_json",
                 Self::Coalesce => "dynamic_coalesce",
                 Self::DecodeList { .. } => "decode_ordered_list",
+                Self::EncodeWindow => "window_encode",
+                Self::DecodeWindow => "window_decode",
                 Self::Get => "dynamic_get",
                 Self::GetType => "gettype",
                 Self::Convert(DataType::Utf8) => "dynamic_tostring",
@@ -488,6 +494,8 @@ impl Kernel {
             | Self::ParseJsonStrict
             | Self::EncodeJson
             | Self::DecodeList { .. }
+            | Self::EncodeWindow
+            | Self::DecodeWindow
             | Self::GetType
             | Self::Convert(_)
             | Self::TypeOnly(_)
@@ -612,7 +620,37 @@ impl ScalarUDFImpl for Function {
             .iter()
             .map(Input::new)
             .collect::<Result<Vec<_>>>()?;
-        let output = if let Kernel::Convert(ty) | Kernel::TypeOnly(ty) = &self.kernel {
+        let output = if self.kernel == Kernel::DecodeWindow {
+            let mut builder = Builder::new(count);
+            for row in 0..count {
+                match inputs[0].value(row)? {
+                    Value::Null => builder.append(Value::Null)?,
+                    Value::String(text) => {
+                        let encoded: Vec<Json> =
+                            serde_json::from_str(text).map_err(|e| failure(e.to_string()))?;
+                        if encoded.len() != 2 {
+                            return Err(failure("invalid dynamic window envelope"));
+                        }
+                        match encoded[0].as_str() {
+                            Some("datetime") => builder.append(Value::Datetime(
+                                encoded[1]
+                                    .as_i64()
+                                    .ok_or_else(|| failure("invalid datetime window payload"))?,
+                            ))?,
+                            Some("timespan") => builder.append(Value::Timespan(
+                                encoded[1]
+                                    .as_i64()
+                                    .ok_or_else(|| failure("invalid timespan window payload"))?,
+                            ))?,
+                            Some(_) => builder.append_json(&encoded[1])?,
+                            None => return Err(failure("invalid dynamic window type")),
+                        }
+                    }
+                    _ => return Err(failure("dynamic window decoder expects UTF-8")),
+                }
+            }
+            builder.finish()?
+        } else if let Kernel::Convert(ty) | Kernel::TypeOnly(ty) = &self.kernel {
             convert(&inputs[0], ty, matches!(self.kernel, Kernel::TypeOnly(_)))?
         } else if matches!(self.kernel, Kernel::Expand { .. }) {
             expand(&self.kernel, &inputs, count)?
@@ -841,6 +879,15 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
             value => value.json()?,
         },
         K::EncodeJson => values[0].json()?.to_string().into(),
+        K::EncodeWindow => {
+            let payload = match values[0] {
+                Value::Datetime(value) | Value::Timespan(value) => Json::from(value),
+                value => value.json()?,
+            };
+            Json::Array(vec![values[0].type_name().into(), payload])
+                .to_string()
+                .into()
+        }
         K::Get => {
             let value = values[0].json()?;
             match (value, values[1]) {
@@ -871,7 +918,16 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
             if left_null && right_null {
                 Json::Null
             } else {
-                let equal = values[0].json()? == values[1].json()?;
+                let equal = match (values[0], values[1]) {
+                    (Value::Bool(a), Value::Bool(b)) => a == b,
+                    (Value::Long(a), Value::Long(b)) => a == b,
+                    (Value::Real(a), Value::Real(b)) => a == b,
+                    (Value::String(a), Value::String(b)) => a == b,
+                    (Value::Datetime(a), Value::Datetime(b))
+                    | (Value::Timespan(a), Value::Timespan(b)) => a == b,
+                    (a, b) if a.type_name() == b.type_name() => a.json()? == b.json()?,
+                    _ => false,
+                };
                 Json::Bool(if *negated { !equal } else { equal })
             }
         }
@@ -1212,7 +1268,8 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
         | K::Convert(_)
         | K::TypeOnly(_)
         | K::Expand { .. }
-        | K::DecodeList { .. } => {
+        | K::DecodeList { .. }
+        | K::DecodeWindow => {
             return Err(failure("invalid dynamic kernel dispatch"));
         }
     })

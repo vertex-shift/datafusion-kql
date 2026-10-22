@@ -108,6 +108,7 @@ pub enum Operator {
     Take(usize),
     Project(Vec<NamedExpr>),
     Extend(Vec<NamedExpr>),
+    Serialize(Vec<NamedExpr>),
     ProjectAway(Vec<String>),
     ProjectKeep(Vec<String>),
     ProjectRename(Vec<(String, String)>),

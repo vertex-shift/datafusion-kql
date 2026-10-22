@@ -114,6 +114,11 @@ Typed `parse`/`parse-where`, regex/JSON extraction, collection and percentile
 aggregations, correlated `arg_min`/`arg_max`, and scalar expressions over
 aggregates are also supported.
 
+Serialized row sets support `prev`, `next`, restart-aware row numbers,
+cumulative sums and ranks, and bounded session windows. Hidden order tracking
+preserves semantics through projections, filters, and expansion without adding
+window overhead to ordinary analytic queries.
+
 `mv-apply`, `make-series`, management commands, hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.
 

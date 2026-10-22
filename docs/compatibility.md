@@ -41,6 +41,7 @@ column; assignments in a single `extend` resolve against its input.
 | `union` | Default outer; inner intersection; align by name and preserve duplicate rows |
 | `mv-expand`, `mvexpand` | Arrays and bags, zipped multiple columns, per-row limits, `with_itemindex`, cast-only `to typeof(...)` |
 | `parse`, `parse-where` | Simple, regex, and relaxed patterns; typed captures, regex flags, and strict failure filtering |
+| `serialize` | Freezes row order and supports calculated columns and native window expressions |
 
 Joins accept a table or parenthesized query on the right. Keys can be `on Key`
 or `$left.Key == $right.OtherKey`, with comma/`and` conjunctions. The default
@@ -161,6 +162,34 @@ Timespan conversion accepts the same unit/day-clock formats as literals.
 Regex execution uses Rust regex syntax, not unsupported .NET backreferences or
 look-around.
 
+## Serialized rows and windows
+
+`serialize`, `sort`, and `top` establish serialized row sets. `prev`, `next`,
+`row_number`, `row_cumsum`, `row_rank_dense`, `row_rank_min`, and
+`row_window_session` require serialized input and lower to native DataFusion
+window plans. Offset defaults, explicit fallback values, custom starting row
+numbers, restart predicates, and nested calls such as `g != prev(g)` are
+supported. Ranks count consecutive runs in the serialized stream, rather than
+silently using SQL's global dense-rank semantics.
+
+Internal ordinality survives projections (including dropped sort keys), filters,
+renaming, parsing, limits, nested tabular bindings, and collection expansion.
+Helpers never appear in wildcard output or the public result schema.
+Expansion establishes distinct ordinals for child records. Unordered operators
+such as joins, unions, distinct and summarize clear serialization; explicitly
+sort or serialize again before using row functions.
+
+`row_window_session` uses a causal, bounded-memory native partition evaluator.
+Its first/neighbor distance limits can vary by row, equality with a limit starts
+a new session, restart predicates split sessions, and null timestamps reset the
+state. Dynamic offsets preserve primitive type tags and use a lossless internal
+wire representation to avoid Arrow union null-padding limitations.
+
+Order tracking is enabled only for queries that need serialized row behavior or
+ordered collections. Ordinary filter/aggregate/top-k queries retain native-plan
+parity with SQL. Serialization can limit parallelism, and restart-aware windows
+may require additional repartitioning/sorting.
+
 ## Aggregations
 
 `count`, `countif`, `sum`, `sumif`, `avg`, `avgif`, `min`, `minif`, `max`,
@@ -236,7 +265,7 @@ representations and continue to ignore nulls.
   native regex kernels, rather than promising Kusto's indexed search complexity.
 - Only one final tabular result is supported. Management commands,
   parameter declarations, user-defined KQL functions, `materialize`, `render`,
-  hints, `make-series`, window/serialization operators, and `mv-apply` are future
+  hints, `make-series`, additional window/scan operators, and `mv-apply` are future
   work. See [the delivery plan](architecture.md).
 - Default parsing limits: 1 MiB of query text, nesting/expression depth 64,
   and 128 operators per pipeline. `parse_with_options` permits changing these

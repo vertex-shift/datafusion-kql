@@ -56,11 +56,11 @@ pub(crate) fn plan(
     let mut used = HashSet::new();
     let mut groups = Vec::new();
     for (index, item) in by.iter().enumerate() {
-        groups.push(
-            expressions
-                .scalar(&item.expr, input.schema())?
-                .alias(crate::planner::output_name(item, index, &mut used)?),
-        );
+        groups.push(crate::ordering::user_alias(
+            expressions.scalar(&item.expr, input.schema())?,
+            crate::planner::output_name(item, index, &mut used)?,
+            input.schema(),
+        )?);
     }
     let group_names = used.clone();
     let mut reserved = input
@@ -196,11 +196,11 @@ pub(crate) fn plan(
         .map(|i| Expr::Column(Column::from(result.schema().qualified_field(i))))
         .collect::<Vec<_>>();
     for (name, expression) in outputs {
-        projected.push(
-            expressions
-                .scalar(&expression, result.schema())?
-                .alias(name),
-        );
+        projected.push(crate::ordering::user_alias(
+            expressions.scalar(&expression, result.schema())?,
+            name,
+            result.schema(),
+        )?);
     }
     Ok(LogicalPlanBuilder::from(result)
         .project(projected)?
@@ -587,6 +587,9 @@ impl Collector<'_> {
         for value in &args[first..] {
             if matches!(value.kind, ExprKind::Wildcard) {
                 for field in self.schema.fields() {
+                    if crate::ordering::hidden(field) {
+                        continue;
+                    }
                     if returned.iter().any(|expr| matches!(&expr.kind, ExprKind::Identifier(parts) if parts == &[field.name().clone()])) { continue; }
                     returned.push(ast::Expr {
                         kind: ExprKind::Identifier(vec![field.name().clone()]),
@@ -639,6 +642,9 @@ impl Collector<'_> {
 }
 
 fn input_ordering(input: &LogicalPlan) -> Vec<datafusion::logical_expr::expr::Sort> {
+    if let Some(order) = crate::ordering::ordinal(input.schema()) {
+        return vec![order.sort(true, false)];
+    }
     match input {
         LogicalPlan::Sort(sort) => sort.expr.clone(),
         LogicalPlan::Projection(projection) => input_ordering(&projection.input),

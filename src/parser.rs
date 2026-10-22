@@ -337,6 +337,16 @@ impl<'a> Parser<'a, '_> {
             "take" | "limit" => Operator::Take(self.row_count()?),
             "project" => Operator::Project(self.named_list()?),
             "extend" => Operator::Extend(self.named_list()?),
+            "serialize" => Operator::Serialize(
+                if matches!(
+                    self.current().kind,
+                    Kind::Pipe | Kind::Semi | Kind::RParen | Kind::Eof
+                ) {
+                    Vec::new()
+                } else {
+                    self.named_list()?
+                },
+            ),
             "parse" | "parse-where" => {
                 let kind = if self.eat_keyword("kind") {
                     self.expect(Kind::Assign)?;

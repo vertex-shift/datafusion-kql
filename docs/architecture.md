@@ -81,8 +81,9 @@ errors rather than silently execute with different semantics.
   percentiles, correlated row-selection aggregates, and aggregate arithmetic.
   Typed `parse`/`parse-where`, regex extraction and JSONPath extraction are also
   implemented. Continue with `mv-apply` and broader specialized parsing.
-- Time-series operators (`make-series`, series functions), window/serialization
-  semantics, `scan`, and `partition`.
+- Serialization, offsets, row numbering, restart-aware cumulative sums/ranks,
+  and bounded session windows are implemented. Continue with time-series
+  operators (`make-series`, series functions), `scan`, and `partition`.
 - Broader aggregate coverage, Kusto-specific approximate algorithms, schema
   splitting for unions with conflicting column types, and additional hints.
 - Functions, query parameters, management commands, remote Kusto connectors,

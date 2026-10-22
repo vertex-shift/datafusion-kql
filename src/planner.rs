@@ -23,6 +23,7 @@ use crate::dynamic::{self, Kernel};
 use crate::error::{Error, Result};
 use crate::expressions::{Expressions, is_string};
 use crate::literals::data_type;
+use crate::ordering;
 
 type PlanFuture<'a> = Pin<Box<dyn Future<Output = Result<LogicalPlan>> + Send + 'a>>;
 
@@ -30,12 +31,20 @@ type PlanFuture<'a> = Pin<Box<dyn Future<Output = Result<LogicalPlan>> + Send + 
 /// No input batches are read or collected.
 pub async fn logical_plan(ctx: &SessionContext, query: &ast::Query) -> Result<LogicalPlan> {
     let state = ctx.state();
-    Planner::new(&state)?.query(query).await
+    ordering::finalize(
+        Planner::new(&state, ordering::needed(query))?
+            .query(query)
+            .await?,
+    )
 }
 
 pub(crate) async fn dataframe(ctx: &SessionContext, query: &ast::Query) -> Result<DataFrame> {
     let state = ctx.state();
-    let plan = Planner::new(&state)?.query(query).await?;
+    let plan = ordering::finalize(
+        Planner::new(&state, ordering::needed(query))?
+            .query(query)
+            .await?,
+    )?;
     Ok(DataFrame::new(state, plan))
 }
 
@@ -45,10 +54,11 @@ struct Planner<'a> {
     tables: HashMap<String, LogicalPlan>,
     now: i64,
     next_alias: usize,
+    track_order: bool,
 }
 
 impl<'s> Planner<'s> {
-    fn new(state: &'s SessionState) -> Result<Self> {
+    fn new(state: &'s SessionState, track_order: bool) -> Result<Self> {
         let now = state
             .execution_props()
             .query_execution_start_time
@@ -61,6 +71,7 @@ impl<'s> Planner<'s> {
             tables: HashMap::new(),
             now,
             next_alias: 0,
+            track_order,
         })
     }
 
@@ -225,7 +236,33 @@ impl<'s> Planner<'s> {
     async fn pipeline(&mut self, pipeline: &ast::Pipeline) -> Result<LogicalPlan> {
         let mut plan = self.source(&pipeline.source).await?;
         check_plan(&plan)?;
-        for operator in &pipeline.operators {
+        for original in &pipeline.operators {
+            if matches!(original.kind, Operator::Serialize(_))
+                && ordering::ordinal(plan.schema()).is_none()
+            {
+                plan = ordering::sequence(self.state, &self.scalars, plan, Vec::new())?;
+            }
+            let (rewritten, saved) = if self.track_order && ordering::uses_windows(&original.kind) {
+                let (updated, kind, bindings) = crate::windows::prepare(
+                    self.state,
+                    &self.scalars,
+                    self.now,
+                    plan,
+                    &original.kind,
+                )?;
+                plan = updated;
+                let saved = std::mem::replace(&mut self.scalars, bindings);
+                (
+                    Some(ast::SpannedOperator {
+                        kind,
+                        span: original.span,
+                    }),
+                    Some(saved),
+                )
+            } else {
+                (None, None)
+            };
+            let operator = rewritten.as_ref().unwrap_or(original);
             plan = match &operator.kind {
                 Operator::Where(predicate) => {
                     let expression = self.expressions().predicate(predicate, plan.schema())?;
@@ -235,12 +272,15 @@ impl<'s> Planner<'s> {
                     .limit(0, Some(*count))?
                     .build()?,
                 Operator::Project(items) => {
-                    let expressions = self.named_expressions(items, plan.schema())?;
+                    let mut expressions = self.named_expressions(items, plan.schema())?;
+                    if let Some(order) = ordering::ordinal(plan.schema()) {
+                        expressions.push(order);
+                    }
                     LogicalPlanBuilder::from(plan)
                         .project(expressions)?
                         .build()?
                 }
-                Operator::Extend(items) => {
+                Operator::Extend(items) | Operator::Serialize(items) => {
                     let added = self.named_expressions(items, plan.schema())?;
                     let names = added
                         .iter()
@@ -267,6 +307,9 @@ impl<'s> Planner<'s> {
                         .iter()
                         .enumerate()
                         .filter(|(_, f)| {
+                            if ordering::hidden(f) {
+                                return true;
+                            }
                             let matches = patterns.iter().any(|p| pattern_matches(p, f.name()));
                             matches == keep
                         })
@@ -330,17 +373,29 @@ impl<'s> Planner<'s> {
                                 .sort(key.ascending, key.nulls_first))
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    LogicalPlanBuilder::from(plan).sort(sorts)?.build()?
+                    let sorted = LogicalPlanBuilder::from(plan)
+                        .sort(sorts.clone())?
+                        .build()?;
+                    if self.track_order {
+                        ordering::sequence(self.state, &self.scalars, sorted, sorts)?
+                    } else {
+                        sorted
+                    }
                 }
                 Operator::Top { count, key } => {
                     let sort = self
                         .expressions()
                         .scalar(&key.expr, plan.schema())?
                         .sort(key.ascending, key.nulls_first);
-                    LogicalPlanBuilder::from(plan)
-                        .sort(vec![sort])?
+                    let sorted = LogicalPlanBuilder::from(plan)
+                        .sort(vec![sort.clone()])?
                         .limit(0, Some(*count))?
-                        .build()?
+                        .build()?;
+                    if self.track_order {
+                        ordering::sequence(self.state, &self.scalars, sorted, vec![sort])?
+                    } else {
+                        sorted
+                    }
                 }
                 Operator::Distinct(items) => {
                     let named = items
@@ -376,6 +431,10 @@ impl<'s> Planner<'s> {
                     self.union(plans, *kind, operator.span)?
                 }
             };
+            if let Some(saved) = saved {
+                self.scalars = saved;
+            }
+            plan = ordering::cleanup(plan)?;
             check_plan(&plan)?;
         }
         Ok(plan)
@@ -433,6 +492,20 @@ impl<'s> Planner<'s> {
             .project(projection)?
             .unnest_column(Column::from_name(&temporary))?
             .build()?;
+        let expanded = if let Some(order) = ordering::ordinal(plan.schema()) {
+            let index = self.expressions().function(
+                "get_field",
+                vec![Expr::Column(Column::from_name(&temporary)), lit("index")],
+            )?;
+            ordering::sequence(
+                self.state,
+                &self.scalars,
+                expanded,
+                vec![order.sort(true, false), index.sort(true, false)],
+            )?
+        } else {
+            expanded
+        };
         let expanded_column = |index: usize, ty: Option<ast::ScalarType>| -> Result<Expr> {
             let column = self.expressions().function(
                 "get_field",
@@ -454,6 +527,7 @@ impl<'s> Planner<'s> {
             .fields()
             .iter()
             .enumerate()
+            .filter(|(_, field)| !ordering::hidden(field))
             .map(|(i, field)| {
                 if let Some((name, index, ty)) =
                     targets.iter().find(|(name, _, _)| name == field.name())
@@ -464,6 +538,9 @@ impl<'s> Planner<'s> {
                 }
             })
             .collect::<Result<Vec<_>>>()?;
+        if let Some(order) = ordering::ordinal(expanded.schema()) {
+            projection.push(order);
+        }
         for (name, index, ty) in &targets {
             if plan.schema().index_of_column_by_name(None, name).is_none() {
                 projection.push(expanded_column(*index, *ty)?.alias(name));
@@ -557,6 +634,9 @@ impl<'s> Planner<'s> {
         for (index, item) in items.iter().enumerate() {
             if matches!(item.expr.kind, ExprKind::Wildcard) && item.name.is_none() {
                 for (i, field) in schema.fields().iter().enumerate() {
+                    if ordering::hidden(field) {
+                        continue;
+                    }
                     if !used.insert(field.name().clone()) {
                         return Err(Error::Plan(format!(
                             "duplicate output column '{}'",
@@ -567,7 +647,11 @@ impl<'s> Planner<'s> {
                 }
             } else {
                 let name = output_name(item, index, &mut used)?;
-                result.push(self.expressions().scalar(&item.expr, schema)?.alias(name));
+                result.push(ordering::user_alias(
+                    self.expressions().scalar(&item.expr, schema)?,
+                    name,
+                    schema,
+                )?);
             }
         }
         Ok(result)
@@ -631,11 +715,13 @@ impl<'s> Planner<'s> {
 
     fn join(
         &mut self,
-        mut left: LogicalPlan,
+        left: LogicalPlan,
         right: LogicalPlan,
         kind: JoinKind,
         keys: &[ast::JoinKey],
     ) -> Result<LogicalPlan> {
+        let mut left = ordering::visible(left)?;
+        let right = ordering::visible(right)?;
         if kind == JoinKind::InnerUnique {
             let on = keys
                 .iter()
@@ -720,6 +806,10 @@ impl<'s> Planner<'s> {
     }
 
     fn union(&self, plans: Vec<LogicalPlan>, kind: UnionKind, span: Span) -> Result<LogicalPlan> {
+        let plans = plans
+            .into_iter()
+            .map(ordering::visible)
+            .collect::<Result<Vec<_>>>()?;
         let mut fields: Vec<(String, DataType)> = Vec::new();
         for plan in &plans {
             for field in plan.schema().fields() {
