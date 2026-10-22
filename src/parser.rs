@@ -199,7 +199,14 @@ impl<'a> Parser<'a, '_> {
             self.expect_keyword("let")?;
             let name = self.identifier()?;
             self.expect(Kind::Assign)?;
-            let value = if self.looks_function() {
+            let value = if self.eat_keyword("view") {
+                let mut function = self.function()?;
+                if !function.parameters.is_empty() {
+                    return Err(self.expected("a parameterless view"));
+                }
+                function.view = true;
+                BindingValue::Function(Box::new(function))
+            } else if self.looks_function() {
                 BindingValue::Function(Box::new(self.function()?))
             } else if self.looks_tabular() {
                 BindingValue::Tabular(self.pipeline()?)
@@ -353,6 +360,7 @@ impl<'a> Parser<'a, '_> {
         self.expect(Kind::RBrace)?;
         self.nesting -= 1;
         Ok(Function {
+            view: false,
             parameters,
             bindings,
             body,
@@ -376,9 +384,9 @@ impl<'a> Parser<'a, '_> {
             return true;
         }
         let mut depth = 0;
-        for token in &self.tokens[self.pos..] {
+        for token in &self.tokens[at..] {
             match token.kind {
-                Kind::Pipe => return true,
+                Kind::Pipe if depth == 0 => return true,
                 Kind::LParen | Kind::LBracket | Kind::LBrace => depth += 1,
                 Kind::RParen | Kind::RBracket | Kind::RBrace if depth == 0 => break,
                 Kind::RParen | Kind::RBracket | Kind::RBrace => depth -= 1,
@@ -1360,6 +1368,18 @@ impl<'a> Parser<'a, '_> {
                     .ok_or_else(|| Error::unsupported(format!("scalar type '{name}'"), token))?;
                 self.expect(Kind::RParen)?;
                 ExprKind::Type(ty)
+            }
+            Kind::Ident("toscalar") => {
+                let mut args = self.source_arguments()?;
+                if args.len() != 1 || args[0].name.is_some() {
+                    return Err(Error::syntax("toscalar expects one unnamed argument", span));
+                }
+                let value = args.remove(0).value;
+                return self.node(
+                    ExprKind::ToScalar(Box::new(value)),
+                    Span::new(span.start, self.tokens[self.pos - 1].span.end),
+                    1,
+                );
             }
             Kind::Ident("dynamic") => {
                 self.expect(Kind::LParen)?;

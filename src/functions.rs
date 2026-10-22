@@ -256,6 +256,15 @@ impl<'a> Expander<'a> {
                 return self.call(Arc::clone(function), args, scope, expr.span, depth + 1);
             }
         }
+        if matches!(expr.kind, ExprKind::ToScalar(_)) {
+            if scope.is_some() {
+                return Err(Error::unsupported(
+                    "scalar subqueries in scalar functions require a row-independent closure",
+                    expr.span,
+                ));
+            }
+            return Ok(expr.clone());
+        }
         expr.map_children(|child| self.expand(child, scope, depth + 1))
     }
 

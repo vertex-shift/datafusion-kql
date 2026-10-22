@@ -53,9 +53,28 @@ be row-independent constants. Scalar/table result contexts, missing/duplicate
 arguments, and recursion/forward references fail explicitly. Functions have at
 most 128 parameters; scalar expansion has depth/node budgets.
 
-Scalar functions containing tabular local statements or scalar subqueries,
-view declarations, and Kusto's static opaque-schema restrictions for `(*)`
-parameters remain compatibility work.
+`let V=view (){ ... };` declares a parameterless tabular view. Views participate
+in wildcard source/union discovery, shadow providers with the same name, and
+retain lexical captures. Ordinary functions do not participate in wildcards.
+
+Scalar functions containing tabular local statements or scalar subqueries and
+Kusto's static opaque-schema restrictions for `(*)` parameters remain
+compatibility work.
+
+## Scalar subqueries
+
+`toscalar(expression)` freezes a row-independent scalar expression or the first
+row/first column of a tabular query. Native scalar-subquery plans and lazy
+materialization keep query construction nonexecuting and share evaluated values
+across uses. Empty tabular inputs yield typed nulls (empty strings for strings).
+Nested subqueries, scalar bindings, registered functions, and request parameters
+are supported. Caller-row correlation is rejected, rather than being evaluated
+once per row with different semantics.
+
+Table-valued function calls and bare table bindings can be used as arguments.
+Scalar subqueries cannot yet supply arguments that require frontend constant
+evaluation, such as tabular range bounds, collection limits, or format patterns.
+Scalar functions containing their own `toscalar` remain a future extension.
 
 ## Tabular operators
 
@@ -394,7 +413,7 @@ representations and continue to ignore nulls.
   service. No string term index is installed: `has` scans Arrow batches using
   native regex kernels, rather than promising Kusto's indexed search complexity.
 - Only one final tabular result is supported. Management commands,
-  scalar subqueries, view declarations, `render`,
+  scalar-subquery functions, `render`,
   hints, additional window/scan operators, and `mv-apply` are future
   work. See [the delivery plan](architecture.md).
 - Default parsing limits: 1 MiB of query text, nesting/expression depth 64,

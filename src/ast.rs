@@ -45,6 +45,7 @@ pub enum BindingValue {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
+    pub view: bool,
     pub parameters: Vec<FunctionParameter>,
     pub bindings: Vec<Binding>,
     pub body: FunctionBody,
@@ -317,6 +318,7 @@ pub enum ExprKind {
     #[doc(hidden)]
     BindingReference(String),
     Literal(Literal),
+    ToScalar(Box<ArgumentValue>),
     Cast {
         expr: Box<Expr>,
         ty: ScalarType,
@@ -429,6 +431,10 @@ impl Expr {
                 name: name.clone(),
                 value: Box::new(map(value)?),
             },
+            ExprKind::ToScalar(value) => ExprKind::ToScalar(Box::new(match value.as_ref() {
+                ArgumentValue::Scalar(expr) => ArgumentValue::Scalar(map(expr)?),
+                ArgumentValue::Tabular(query) => ArgumentValue::Tabular(query.clone()),
+            })),
             ExprKind::Call { name, args } => ExprKind::Call {
                 name: name.clone(),
                 args: args.iter().map(&mut map).collect::<crate::Result<_>>()?,

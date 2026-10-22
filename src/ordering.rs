@@ -166,6 +166,10 @@ fn any_expression(expression: &ast::Expr, predicate: fn(&str) -> bool) -> bool {
             any_expression(expr, predicate)
         }
         ExprKind::NamedArgument { value, .. } => any_expression(value, predicate),
+        ExprKind::ToScalar(value) => match value.as_ref() {
+            ast::ArgumentValue::Scalar(expr) => any_expression(expr, predicate),
+            ast::ArgumentValue::Tabular(query) => needed(query),
+        },
         ExprKind::Binary { left, right, .. } => {
             any_expression(left, predicate) || any_expression(right, predicate)
         }

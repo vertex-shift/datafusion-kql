@@ -138,6 +138,8 @@ Query parameters use typed request values rather than source interpolation:
 typed/default/named arguments, lexical captures, nested scalar definitions,
 tabular schemas, and `invoke`. Functions expand into ordinary native
 expressions/plans, without installing anything in the session registry.
+Parameterless `view` functions participate in wildcard discovery, and lazy
+`toscalar` supports staged scalar calculations from tabular subqueries.
 
 `materialize(...)` and `as hint.materialized=true` create lazy shared Arrow
 snapshots for repeated subqueries. Input partitions execute in parallel once,

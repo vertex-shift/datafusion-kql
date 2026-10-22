@@ -127,6 +127,11 @@ impl Expressions<'_> {
     fn lower(&self, expr: &ast::Expr, schema: &DFSchema, filter: bool) -> Result<Expr> {
         Ok(match &expr.kind {
             ExprKind::Literal(value) => lit(literal_value(value, expr.span)?),
+            ExprKind::ToScalar(_) => {
+                return Err(Error::Plan(
+                    "scalar subquery was not prepared by the planner".into(),
+                ));
+            }
             ExprKind::BindingReference(name) => self
                 .scalars
                 .get(name)
