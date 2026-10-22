@@ -18,9 +18,11 @@ syntax/functions return an error; there is no SQL fallback.
 | `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan`, `dynamic` columns |
 | `range` | Inclusive lazy native `generate_series`; integer, real, datetime, and timespan sequences, including descending ranges |
 | `union` | Source form and pipe form |
+| `materialize(...)` | Lazy shared Arrow snapshot, usable directly or in a tabular binding |
 
-Tabular bindings are inlined plans, **not materialized results**. Reusing one can
-rescan its inputs. Scalar bindings retain expressions, matching KQL's binding
+Ordinary tabular bindings are inlined plans, **not materialized results**.
+Reusing one can rescan its inputs; use explicit `materialize` when needed.
+Scalar bindings retain expressions, matching KQL's binding
 rather than assignment model. Use a new pipe to reference a newly extended
 column; assignments in a single `extend` resolve against its input.
 
@@ -69,7 +71,7 @@ parameters remain compatibility work.
 | `top` | Constant integer expression for count, one sort expression; default descending |
 | `take`, `limit` | Constant integer expressions; no ordering guarantee without a sort |
 | `sample`, `sample-distinct` | Native random top-k sampling; distinct sampling returns unique projected values |
-| `as` | Lazy intermediate table binding within the query |
+| `as` | Lazy intermediate binding, or a shared snapshot with `hint.materialized=true` |
 | `invoke` | Apply a query-defined tabular function with the input as its first argument |
 | `getschema` | KQL schema rows, excluding hidden helpers; does not execute the input |
 | `distinct` | Scalar expressions or `*` |
@@ -103,6 +105,31 @@ has no warning-result channel; missing providers are never silently ignored.
 
 Lookup uses DataFusion's join selection rather than forcing Kusto's broadcast
 strategy or its service-specific right-side size limit.
+
+## Materialized snapshots
+
+`materialize(T | ...)` and `as hint.materialized=true Name` create an opaque,
+lazy native source boundary. Logical and physical planning do not collect input
+rows. The first consumer executes the native input partitions in parallel;
+other consumers await and reuse the same Arrow buffers. Consumer filters and
+projections remain outside the snapshot, so different fork legs cannot cache
+incompatible subsets. Put common reducing operators inside `materialize`.
+Ordinary `let` and `as hint.materialized=false` remain nonmaterialized.
+
+A snapshot belongs to the **planned query/DataFrame**, not the session or
+process. Cloning the DataFrame, creating another physical plan from it, or
+collecting it again reuses that snapshot. Call `kql`/`kql_ast` again to obtain a
+fresh snapshot, just as a new planning call obtains a fresh `now()` instant.
+This explicitly defines repeated-DataFrame execution, an API concept without
+a direct Kusto request equivalent.
+
+Retained buffers and batch bookkeeping use a native DataFusion
+`MemoryConsumer`. Exhausting the host memory pool fails the query; input errors
+are retained and surfaced to all consumers rather than converted to empty data.
+Dropping the snapshot releases its memory reservation. Configure a bounded
+host pool for production: the extension does not install Kusto's cluster-wide
+5 GB service cache limit or a separate allocator. Materialized buffers do not
+spill. Unbounded input plans are rejected.
 
 ## Expressions and functions
 
@@ -367,7 +394,7 @@ representations and continue to ignore nulls.
   service. No string term index is installed: `has` scans Arrow batches using
   native regex kernels, rather than promising Kusto's indexed search complexity.
 - Only one final tabular result is supported. Management commands,
-  scalar subqueries, view declarations, `materialize`, `render`,
+  scalar subqueries, view declarations, `render`,
   hints, additional window/scan operators, and `mv-apply` are future
   work. See [the delivery plan](architecture.md).
 - Default parsing limits: 1 MiB of query text, nesting/expression depth 64,

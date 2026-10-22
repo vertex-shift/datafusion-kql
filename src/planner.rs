@@ -190,13 +190,18 @@ impl<'s> Planner<'s> {
                 span,
                 ..
             }) = &binding.value
-                && self
+                && (self
                     .functions
                     .get(name)
                     .is_some_and(|function| function.tabular())
+                    || name == "materialize" && !self.functions.contains_key(name))
             {
                 let plan = self
-                    .invoke_function(name, &scalar_arguments(args), None, *span)
+                    .source(&Source::Call {
+                        name: name.clone(),
+                        args: scalar_arguments(args),
+                        span: *span,
+                    })
                     .await?;
                 check_plan(&plan)?;
                 self.scalars.remove(&binding.name);
@@ -338,7 +343,11 @@ impl<'s> Planner<'s> {
                     }
                 }
                 Source::Call { name, args, span } => {
-                    self.invoke_function(name, args, None, *span).await
+                    if name == "materialize" && !self.functions.contains_key(name) {
+                        self.materialize(args, *span).await
+                    } else {
+                        self.invoke_function(name, args, None, *span).await
+                    }
                 }
                 Source::Subquery(query) => self.query(query).await,
                 Source::Print(items) => {
@@ -385,6 +394,55 @@ impl<'s> Planner<'s> {
                 }
             }
         })
+    }
+
+    async fn materialize(&mut self, args: &[ast::CallArgument], span: Span) -> Result<LogicalPlan> {
+        let [argument] = args else {
+            return Err(Error::syntax(
+                "materialize expects one tabular argument",
+                span,
+            ));
+        };
+        if argument.name.is_some() {
+            return Err(Error::syntax(
+                "materialize does not accept named arguments",
+                span,
+            ));
+        }
+        let input = match &argument.value {
+            ast::ArgumentValue::Tabular(query) => self.query(query).await?,
+            ast::ArgumentValue::Scalar(ast::Expr {
+                kind: ExprKind::Identifier(name),
+                span,
+                ..
+            }) => {
+                self.source(&Source::Table {
+                    name: name.clone(),
+                    span: *span,
+                })
+                .await?
+            }
+            ast::ArgumentValue::Scalar(ast::Expr {
+                kind: ExprKind::Call { name, args },
+                span,
+                ..
+            }) => {
+                self.source(&Source::Call {
+                    name: name.clone(),
+                    args: scalar_arguments(args),
+                    span: *span,
+                })
+                .await?
+            }
+            _ => {
+                return Err(Error::syntax(
+                    "materialize requires a tabular expression",
+                    span,
+                ));
+            }
+        };
+        let name = self.temporary_name(&input);
+        crate::materialize::plan(input, name)
     }
 
     async fn invoke_function(
@@ -693,12 +751,21 @@ impl<'s> Planner<'s> {
                         result
                     }
                 }
-                Operator::As(name) => {
-                    if self.tables.contains_key(name) || self.scalars.contains_key(name) {
+                Operator::As(name) | Operator::AsMaterialized(name) => {
+                    if self.tables.contains_key(name)
+                        || self.scalars.contains_key(name)
+                        || self.functions.contains_key(name)
+                    {
                         return Err(Error::Plan(format!(
                             "query binding '{name}' already exists"
                         )));
                     }
+                    let plan = if matches!(operator.kind, Operator::AsMaterialized(_)) {
+                        let alias = self.temporary_name(&plan);
+                        crate::materialize::plan(plan, alias)?
+                    } else {
+                        plan
+                    };
                     self.tables.insert(name.clone(), plan.clone());
                     plan
                 }

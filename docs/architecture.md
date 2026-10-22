@@ -94,7 +94,11 @@ errors rather than silently execute with different semantics.
   implemented. Continue with Kusto-specific approximate algorithms and hints.
 - Typed request parameters and lexically captured scalar/tabular functions with
   `invoke` are implemented through native expression/plan expansion. Continue
-  with scalar subqueries, materialization, and view/wildcard function discovery.
+  with scalar subqueries and view/wildcard function discovery.
+- Explicit materialization uses a lazy native table source and a shared Arrow
+  cache boundary. It preserves parallel input execution, reports retained
+  memory to the host pool, and does not change the host's planner or registry.
+  Snapshots are scoped to planned queries, including DataFrame clones.
 - Management commands, remote Kusto connectors, visualization metadata,
   CLI/Python bindings, and language tooling.
 - Conformance fixtures against a real Kusto cluster and production workload

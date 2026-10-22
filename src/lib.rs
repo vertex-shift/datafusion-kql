@@ -27,6 +27,7 @@ mod json_path;
 mod lexer;
 mod literals;
 mod make_series;
+mod materialize;
 mod ordering;
 mod parser;
 mod parsing;

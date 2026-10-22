@@ -170,6 +170,7 @@ pub enum Operator {
     ProjectReorder(Vec<ReorderColumn>),
     GetSchema,
     As(String),
+    AsMaterialized(String),
     Invoke {
         name: String,
         args: Vec<CallArgument>,

@@ -813,7 +813,27 @@ impl<'a> Parser<'a, '_> {
                 Operator::ProjectReorder(columns)
             }
             "getschema" => Operator::GetSchema,
-            "as" => Operator::As(self.identifier()?),
+            "as" => {
+                let materialized = if self.eat_keyword("hint") {
+                    self.expect(Kind::Dot)?;
+                    self.expect_keyword("materialized")?;
+                    self.expect(Kind::Assign)?;
+                    if self.eat_keyword("true") {
+                        true
+                    } else {
+                        self.expect_keyword("false")?;
+                        false
+                    }
+                } else {
+                    false
+                };
+                let name = self.identifier()?;
+                if materialized {
+                    Operator::AsMaterialized(name)
+                } else {
+                    Operator::As(name)
+                }
+            }
             "sample" => Operator::Sample {
                 count: self.row_count_expression()?,
                 distinct: None,

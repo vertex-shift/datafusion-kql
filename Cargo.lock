@@ -1090,6 +1090,7 @@ dependencies = [
  "chrono",
  "criterion",
  "datafusion",
+ "futures",
  "regex",
  "serde_json",
  "tempfile",

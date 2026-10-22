@@ -143,6 +143,13 @@ and application-level timeouts on the embedding DataFusion runtime. Keep
 filters/projections early, inspect `into_optimized_plan()`/physical plans, and
 benchmark representative data rather than optimizing solely for inline examples.
 
+Use `materialize` only when reusing a sufficiently expensive common subquery.
+It buffers the full selected result and adds a cache boundary. Reduce rows and
+columns inside it, and configure a bounded memory pool. A planned query and its
+clones reuse the snapshot, so a benchmark of cold materialization must create a
+fresh query per iteration; resetting physical operator state alone deliberately
+does not invalidate that query's snapshot.
+
 The crate does not change process-wide compiler flags, allocate an unbounded plan
 cache, force materialization, replace the host allocator, or override session
 optimizer settings. Host applications remain in control of those decisions.

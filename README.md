@@ -139,6 +139,13 @@ typed/default/named arguments, lexical captures, nested scalar definitions,
 tabular schemas, and `invoke`. Functions expand into ordinary native
 expressions/plans, without installing anything in the session registry.
 
+`materialize(...)` and `as hint.materialized=true` create lazy shared Arrow
+snapshots for repeated subqueries. Input partitions execute in parallel once,
+and cached buffers are charged to the host's DataFusion memory pool. Snapshots
+belong to the planned query/DataFrame, including its clones; plan a new query
+for a fresh snapshot. See the compatibility contract for lifetime and memory
+boundaries.
+
 `mv-apply`, advanced signal processing, management commands, hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.
 

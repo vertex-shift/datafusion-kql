@@ -404,7 +404,9 @@ fn infer_tabular(definition: &ast::Function, outer: &HashMap<String, bool>) -> b
     fn expression(expr: &ast::Expr, symbols: &HashMap<String, bool>) -> bool {
         match &expr.kind {
             ExprKind::Identifier(parts) => symbols.get(&parts[0]).copied().unwrap_or(true),
-            ExprKind::Call { name, .. } => symbols.get(name).copied().unwrap_or(false),
+            ExprKind::Call { name, .. } => {
+                symbols.get(name).copied().unwrap_or(name == "materialize")
+            }
             _ => false,
         }
     }
