@@ -385,6 +385,7 @@ pub(crate) enum Kernel {
     TypeOnly(DataType),
     Expand {
         array_mode: bool,
+        arrays_only: bool,
         limit: usize,
         columns: usize,
     },
@@ -798,10 +799,15 @@ fn text(value: Value<'_>) -> Option<&str> {
     }
 }
 
-fn expanded(value: Value<'_>, array_mode: bool, limit: usize) -> Result<Vec<Json>> {
+fn expanded(
+    value: Value<'_>,
+    array_mode: bool,
+    arrays_only: bool,
+    limit: usize,
+) -> Result<Vec<Json>> {
     let mut items = match value.json()? {
         Json::Array(items) => items,
-        Json::Object(bag) => bag
+        Json::Object(bag) if !arrays_only => bag
             .into_iter()
             .map(|(key, value)| {
                 if array_mode {
@@ -821,6 +827,7 @@ fn expanded(value: Value<'_>, array_mode: bool, limit: usize) -> Result<Vec<Json
 fn expand(kernel: &Kernel, inputs: &[Input], count: usize) -> Result<ArrayRef> {
     let Kernel::Expand {
         array_mode,
+        arrays_only,
         limit,
         columns,
     } = kernel
@@ -836,7 +843,7 @@ fn expand(kernel: &Kernel, inputs: &[Input], count: usize) -> Result<ArrayRef> {
     for row in 0..count {
         let collections = inputs
             .iter()
-            .map(|input| expanded(input.value(row)?, *array_mode, *limit))
+            .map(|input| expanded(input.value(row)?, *array_mode, *arrays_only, *limit))
             .collect::<Result<Vec<_>>>()?;
         let len = collections.iter().map(Vec::len).max().unwrap_or(0);
         for (builder, values) in builders.iter_mut().zip(collections) {

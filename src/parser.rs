@@ -374,7 +374,7 @@ impl<'a> Parser<'a, '_> {
         }
         if matches!(
             self.tokens[at].kind,
-            Kind::Ident("print" | "datatable" | "union" | "let" | "declare")
+            Kind::Ident("print" | "datatable" | "union" | "let" | "declare" | "materialize")
         ) {
             return true;
         }
@@ -720,7 +720,29 @@ impl<'a> Parser<'a, '_> {
                     filter: name == "parse-where",
                 }
             }
-            "mv-expand" | "mvexpand" => {
+            "partition" => {
+                let mut strategy = PartitionStrategy::Legacy;
+                if self.eat_keyword("hint") {
+                    self.expect(Kind::Dot)?;
+                    self.expect_keyword("strategy")?;
+                    self.expect(Kind::Assign)?;
+                    strategy = match self.identifier()?.as_str() {
+                        "legacy" => PartitionStrategy::Legacy,
+                        "native" => PartitionStrategy::Native,
+                        "shuffle" => PartitionStrategy::Shuffle,
+                        _ => return Err(self.expected("legacy, native, or shuffle")),
+                    };
+                }
+                self.expect_keyword("by")?;
+                let key = self.identifier()?;
+                let operators = self.transformation()?;
+                Operator::Partition {
+                    key,
+                    strategy,
+                    operators,
+                }
+            }
+            "mv-expand" | "mvexpand" | "mv-apply" => {
                 let mut array_mode = false;
                 let mut index = None;
                 while self.keyword("kind")
@@ -728,6 +750,11 @@ impl<'a> Parser<'a, '_> {
                     || self.keyword("with_itemindex")
                 {
                     let parameter = self.identifier()?;
+                    if name == "mv-apply" && parameter != "with_itemindex" {
+                        return Err(
+                            self.expected("with_itemindex; mv-apply has no bag expansion mode")
+                        );
+                    }
                     self.expect(Kind::Assign)?;
                     if parameter == "with_itemindex" {
                         if index.is_some() {
@@ -782,11 +809,22 @@ impl<'a> Parser<'a, '_> {
                 } else {
                     2_147_483_647
                 };
-                Operator::MvExpand {
-                    array_mode,
-                    index,
-                    columns,
-                    limit,
+                if name == "mv-apply" {
+                    self.expect_keyword("on")?;
+                    Operator::MvApply {
+                        index,
+                        columns,
+                        limit,
+                        operators: self.transformation()?,
+                    }
+                } else {
+                    Operator::MvExpand {
+                        array_mode,
+                        arrays_only: false,
+                        index,
+                        columns,
+                        limit,
+                    }
                 }
             }
             "project-away" => Operator::ProjectAway(self.pattern_list()?),
@@ -1329,6 +1367,21 @@ impl<'a> Parser<'a, '_> {
         }
         self.nesting -= 1;
         Ok(left)
+    }
+
+    fn transformation(&mut self) -> Result<Vec<SpannedOperator>> {
+        self.enter()?;
+        self.expect(Kind::LParen)?;
+        let mut operators = vec![self.operator()?];
+        while self.eat(Kind::Pipe) {
+            if operators.len() >= self.options.max_pipeline_operators {
+                return Err(self.expected("fewer subquery operators"));
+            }
+            operators.push(self.operator()?);
+        }
+        self.expect(Kind::RParen)?;
+        self.nesting -= 1;
+        Ok(operators)
     }
 
     fn prefix(&mut self) -> Result<Expr> {

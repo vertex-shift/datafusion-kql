@@ -196,7 +196,9 @@ pub(crate) fn expressions(operator: &Operator) -> Vec<&ast::Expr> {
         Operator::Project(items) | Operator::Extend(items) | Operator::Serialize(items) => {
             items.iter().map(|i| &i.expr).collect()
         }
-        Operator::MvExpand { columns, .. } => columns.iter().map(|c| &c.value.expr).collect(),
+        Operator::MvExpand { columns, .. } | Operator::MvApply { columns, .. } => {
+            columns.iter().map(|c| &c.value.expr).collect()
+        }
         Operator::Summarize { aggregates, by } => {
             aggregates.iter().chain(by).map(|i| &i.expr).collect()
         }
@@ -256,6 +258,19 @@ pub(crate) fn needed(query: &ast::Query) -> bool {
                             needed(input)
                         }
                         Operator::Union { inputs, .. } => inputs.iter().any(source),
+                        Operator::MvApply { operators, .. }
+                        | Operator::Partition { operators, .. } => {
+                            operators.iter().any(|operator| {
+                                matches!(operator.kind, Operator::Serialize(_))
+                                    || expressions(&operator.kind)
+                                        .iter()
+                                        .any(|expr| any_expression(expr, interesting))
+                                    || matches!(
+                                        &operator.kind,
+                                        Operator::MvApply { .. } | Operator::Partition { .. }
+                                    )
+                            })
+                        }
                         _ => false,
                     }
             })

@@ -183,9 +183,21 @@ pub enum Operator {
     MakeSeries(Box<MakeSeries>),
     MvExpand {
         array_mode: bool,
+        arrays_only: bool,
         index: Option<String>,
         columns: Vec<ExpandColumn>,
         limit: usize,
+    },
+    MvApply {
+        index: Option<String>,
+        columns: Vec<ExpandColumn>,
+        limit: usize,
+        operators: Vec<SpannedOperator>,
+    },
+    Partition {
+        key: String,
+        strategy: PartitionStrategy,
+        operators: Vec<SpannedOperator>,
     },
     Parse {
         input: Expr,
@@ -232,6 +244,13 @@ pub struct NamedExpr {
 pub struct ExpandColumn {
     pub value: NamedExpr,
     pub ty: Option<ScalarType>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartitionStrategy {
+    Legacy,
+    Native,
+    Shuffle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -509,7 +528,7 @@ impl Operator {
                     item.expr = map(&item.expr)?;
                 }
             }
-            Self::MvExpand { columns, .. } => {
+            Self::MvExpand { columns, .. } | Self::MvApply { columns, .. } => {
                 for column in columns {
                     column.value.expr = map(&column.value.expr)?;
                 }

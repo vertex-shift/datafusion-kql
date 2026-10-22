@@ -46,7 +46,7 @@ pub(crate) fn prepare(
                 item.expr = windows.rewrite(&item.expr)?;
             }
         }
-        Operator::MvExpand { columns, .. } => {
+        Operator::MvExpand { columns, .. } | Operator::MvApply { columns, .. } => {
             for column in columns {
                 column.value.expr = windows.rewrite(&column.value.expr)?;
             }

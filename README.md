@@ -148,7 +148,11 @@ belong to the planned query/DataFrame, including its clones; plan a new query
 for a fresh snapshot. See the compatibility contract for lifetime and memory
 boundaries.
 
-`mv-apply`, advanced signal processing, management commands, hints, and complete
+`mv-apply` runs native per-row subqueries over zipped dynamic arrays. `partition`
+supports per-key transformations, with vectorized fast paths for common
+aggregate/top-k workloads and reusable native templates for general subqueries.
+
+Advanced signal processing, management commands, additional hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.
 
 ## Architecture and performance

@@ -8,6 +8,7 @@ use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::{Session, TableProvider};
+use datafusion::common::tree_node::Transformed;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::datasource::provider_as_source;
@@ -103,6 +104,25 @@ struct MaterializeExec {
     input: Arc<dyn ExecutionPlan>,
     cache: Cache,
     properties: Arc<PlanProperties>,
+}
+
+pub(crate) fn bind_input(
+    plan: &Arc<dyn ExecutionPlan>,
+    bind: impl FnOnce(Arc<dyn ExecutionPlan>) -> Result<Transformed<Arc<dyn ExecutionPlan>>>,
+) -> Result<Option<Transformed<Arc<dyn ExecutionPlan>>>> {
+    let Some(materialized) = plan.downcast_ref::<MaterializeExec>() else {
+        return Ok(None);
+    };
+    let input = bind(Arc::clone(&materialized.input))?;
+    Ok(Some(if input.transformed {
+        Transformed::yes(Arc::new(MaterializeExec {
+            input: input.data,
+            cache: Arc::new(OnceCell::new()),
+            properties: Arc::clone(&materialized.properties),
+        }) as Arc<dyn ExecutionPlan>)
+    } else {
+        Transformed::no(Arc::clone(plan))
+    }))
 }
 
 impl DisplayAs for MaterializeExec {

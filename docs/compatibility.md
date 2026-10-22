@@ -99,6 +99,8 @@ Scalar functions containing their own `toscalar` remain a future extension.
 | `lookup` | Default leftouter or explicit inner, preserves left duplicates, suppresses right lookup keys |
 | `union` | Name/type alignment, conflicting-type suffixes, inner intersection, wildcard legs, `withsource` |
 | `mv-expand`, `mvexpand` | Arrays and bags, zipped multiple columns, per-row limits, `with_itemindex`, cast-only `to typeof(...)` |
+| `mv-apply` | Per-input-row native subqueries over zipped arrays, indices, type-only casts, and limits |
+| `partition` | Implicit-source per-key transformations with legacy/native/shuffle strategies |
 | `parse`, `parse-where` | Simple, regex, and relaxed patterns; typed captures, regex flags, and strict failure filtering |
 | `serialize` | Freezes row order and supports calculated columns and native window expressions |
 | `make-series` | Numeric/datetime/timespan axes, per-group bounds, defaults, nonempty results, and alternate range syntax |
@@ -226,6 +228,39 @@ is zero-based. The default per-row limit is 2,147,483,647 (legacy `mvexpand`:
 `to typeof(...)` checks underlying dynamic types and does not parse strings into
 numbers. For example, `"2"` becomes null under `to typeof(long)`; use `tolong`
 after an untyped expansion to request conversion.
+
+## Grouped tabular subqueries
+
+`mv-apply ... on (...)` expands each original row into an independent subtable,
+runs a native DataFusion transformation, and restores unexpanded source columns
+that the subquery did not return. Arrays zip with null padding. Original indices,
+per-row expansion limits, type-only casts, empty/null/scalar inputs, per-row
+top-k, aggregates, nested expansions, and independent serialized windows are
+supported. Property bags stay whole until an explicit inner `mv-expand`;
+`mv-apply` has no bag-expansion parameter.
+
+`partition [hint.strategy=...] by Key (...)` runs an implicit-source
+transformation for each key. Null keys form a group. Legacy mode (the default)
+enforces the 64-key limit globally; explicit native/shuffle modes use native
+hash repartitioning and spill-capable per-partition sorting, without that key
+limit. Native/shuffle forms reject explicit-source operators. Legacy explicit
+`{ query-with-source }` syntax and service-specific concurrency/spread hints are
+not implemented.
+
+Simple native/shuffle `top`, `count`, and `summarize` transformations compile to
+one vectorized partitioned-window/grouped-aggregate plan, without instantiating
+one plan per key. More general transformations compile their physical template
+once, bind each subtable's Arrow batches to its native input, and reset native
+operator state between groups. Groups stream independently across hash
+partitions; retaining one group's input is charged to the host memory pool.
+Large individual groups require enough memory; those retained batches do not
+spill even though the upstream native sort can.
+
+This general path does not reparse KQL or run a separate query interpreter, but
+native-plan initialization has overhead for very many tiny groups. Prefer
+ordinary `summarize`/windows or the vectorized partition fast paths where
+equivalent. Group-local materialization rebinds its input and cache per group;
+unrelated outer snapshots remain shared.
 
 ## Parsing and extraction
 

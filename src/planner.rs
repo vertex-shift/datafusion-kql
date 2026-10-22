@@ -806,6 +806,67 @@ impl<'s> Planner<'s> {
                     self.invoke_function(name, args, Some(plan), operator.span)
                         .await?
                 }
+                Operator::MvApply {
+                    index,
+                    columns,
+                    limit,
+                    operators,
+                } => {
+                    self.apply_grouped(
+                        plan,
+                        None,
+                        Some((index.as_deref(), columns, *limit)),
+                        operators,
+                    )
+                    .await?
+                }
+                Operator::Partition {
+                    key,
+                    strategy,
+                    operators,
+                } => {
+                    let index = plan
+                        .schema()
+                        .index_of_column_by_name(None, key)
+                        .ok_or_else(|| {
+                            Error::syntax(format!("unknown partition key '{key}'"), operator.span)
+                        })?;
+                    let ty = plan.schema().field(index).data_type();
+                    if dynamic::is_dynamic(ty) || ty.is_nested() {
+                        return Err(Error::unsupported(
+                            "partition keys must be scalar, not dynamic or nested",
+                            operator.span,
+                        ));
+                    }
+                    if *strategy != ast::PartitionStrategy::Legacy
+                        && operators.iter().any(|operator| {
+                            matches!(
+                                operator.kind,
+                                Operator::Join { .. }
+                                    | Operator::Lookup { .. }
+                                    | Operator::Union { .. }
+                                    | Operator::As(_)
+                                    | Operator::AsMaterialized(_)
+                                    | Operator::Invoke { .. }
+                                    | Operator::GetSchema
+                            )
+                        })
+                    {
+                        return Err(Error::unsupported(
+                            "native/shuffle partition subqueries require implicit-source transformations",
+                            operator.span,
+                        ));
+                    }
+                    if *strategy != ast::PartitionStrategy::Legacy
+                        && let Some(native) =
+                            self.native_partition(plan.clone(), key, operators).await?
+                    {
+                        native
+                    } else {
+                        self.apply_grouped(plan, Some((key, *strategy)), None, operators)
+                            .await?
+                    }
+                }
                 Operator::Take(count) => {
                     let count = self.row_limit(count)?;
                     LogicalPlanBuilder::from(plan)
@@ -965,10 +1026,17 @@ impl<'s> Planner<'s> {
                 }
                 Operator::MvExpand {
                     array_mode,
+                    arrays_only,
                     index,
                     columns,
                     limit,
-                } => self.mv_expand(plan, *array_mode, index.as_deref(), columns, *limit)?,
+                } => self.mv_expand(
+                    plan,
+                    (*array_mode, *arrays_only),
+                    index.as_deref(),
+                    columns,
+                    *limit,
+                )?,
                 Operator::Parse { .. } => {
                     let temporary = self.temporary_name(&plan);
                     crate::parsing::plan(&self.expressions(), plan, operator, temporary)?
@@ -1089,10 +1157,193 @@ impl<'s> Planner<'s> {
         Ok(plan)
     }
 
+    async fn native_partition(
+        &mut self,
+        input: LogicalPlan,
+        key: &str,
+        operators: &[ast::SpannedOperator],
+    ) -> Result<Option<LogicalPlan>> {
+        let [operator] = operators else {
+            return Ok(None);
+        };
+        let expanded = if self.functions.is_empty() {
+            operator.kind.clone()
+        } else {
+            self.expander(input.schema()).operator(&operator.kind)?
+        };
+        let operator = self.resolve_operator(&expanded).await?;
+        let key = field_expr(
+            &input,
+            input
+                .schema()
+                .index_of_column_by_name(None, key)
+                .ok_or_else(|| Error::Plan("unknown partition key".into()))?,
+        );
+        let temporary = self.temporary_name(&input);
+        let result = match &operator {
+            Operator::Top { count, key: sort } => {
+                use datafusion::logical_expr::expr_fn::ExprFunctionExt;
+                let count = self.row_limit(count)?;
+                let sort = self
+                    .expressions()
+                    .scalar(&sort.expr, input.schema())?
+                    .sort(sort.ascending, sort.nulls_first);
+                let rank = self
+                    .state
+                    .udwf("row_number")?
+                    .call(Vec::new())
+                    .partition_by(vec![key])
+                    .order_by(vec![sort])
+                    .build()?
+                    .alias(&temporary);
+                let columns = (0..input.schema().fields().len())
+                    .map(|i| field_expr(&input, i))
+                    .collect::<Vec<_>>();
+                LogicalPlanBuilder::from(input)
+                    .window(vec![rank])?
+                    .filter(Expr::Column(Column::from_name(&temporary)).lt_eq(lit(count as u64)))?
+                    .project(columns)?
+                    .build()?
+            }
+            Operator::Summarize { aggregates, by } => {
+                let mut columns = (0..input.schema().fields().len())
+                    .map(|i| field_expr(&input, i))
+                    .collect::<Vec<_>>();
+                columns.push(key.alias(&temporary));
+                let input = LogicalPlanBuilder::from(input).project(columns)?.build()?;
+                let mut by = by.clone();
+                by.push(NamedExpr {
+                    name: Some(temporary.clone()),
+                    expr: ast::Expr {
+                        kind: ExprKind::Identifier(vec![temporary.clone()]),
+                        span: ast::Span::default(),
+                        depth: 1,
+                    },
+                });
+                let result = self.summarize(input, aggregates, &by)?;
+                let columns = result
+                    .schema()
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| field.name() != &temporary)
+                    .map(|(i, _)| field_expr(&result, i))
+                    .collect::<Vec<_>>();
+                LogicalPlanBuilder::from(result).project(columns)?.build()?
+            }
+            Operator::Count => {
+                let aggregate = self
+                    .state
+                    .udaf("count")?
+                    .call(vec![lit(1_i64)])
+                    .alias("Count");
+                let result = LogicalPlanBuilder::from(input)
+                    .aggregate(vec![key.alias(&temporary)], vec![aggregate])?
+                    .build()?;
+                let count = field_expr(&result, 1);
+                LogicalPlanBuilder::from(result)
+                    .project(vec![count])?
+                    .build()?
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(ordering::visible(result)?))
+    }
+
+    async fn apply_grouped(
+        &mut self,
+        input: LogicalPlan,
+        partition: Option<(&str, ast::PartitionStrategy)>,
+        expansion: Option<(Option<&str>, &[ast::ExpandColumn], usize)>,
+        operators: &[ast::SpannedOperator],
+    ) -> Result<LogicalPlan> {
+        let input = ordering::finalize(input)?;
+        let mode = if let Some((key, strategy)) = partition {
+            crate::grouped::Mode::Key {
+                index: input
+                    .schema()
+                    .index_of_column_by_name(None, key)
+                    .ok_or_else(|| Error::Plan(format!("unknown partition key '{key}'")))?,
+                strategy,
+            }
+        } else {
+            crate::grouped::Mode::Row
+        };
+        let (slot, name, placeholder) = crate::grouped::input(Arc::clone(input.schema().inner()))?;
+        let mut child = Self::new(self.state, self.track_order, &self.parameters)?;
+        child.now = self.now;
+        child.scalars = self.scalars.clone();
+        child.tables = self.tables.clone();
+        child.functions = self.functions.clone();
+        child.tables.insert(name.clone(), placeholder);
+        let mut body = Vec::new();
+        let mut expanded_names = HashSet::new();
+        if let Some((index, columns, limit)) = expansion {
+            child.track_order = true;
+            body.push(ast::SpannedOperator {
+                kind: Operator::Serialize(Vec::new()),
+                span: Span::default(),
+            });
+            for (i, column) in columns.iter().enumerate() {
+                expanded_names.insert(output_name(&column.value, i, &mut HashSet::new())?);
+            }
+            if let Some(index) = index {
+                expanded_names.insert(index.to_owned());
+            }
+            body.push(ast::SpannedOperator {
+                kind: Operator::MvExpand {
+                    array_mode: false,
+                    arrays_only: true,
+                    index: index.map(str::to_owned),
+                    columns: columns.to_vec(),
+                    limit,
+                },
+                span: Span::default(),
+            });
+        }
+        body.extend_from_slice(operators);
+        let query = ast::Query {
+            bindings: Vec::new(),
+            pipeline: ast::Pipeline {
+                source: Source::Table {
+                    name: vec![name],
+                    span: Span::default(),
+                },
+                operators: body,
+            },
+        };
+        let template = ordering::finalize(child.query(&query).await?)?;
+        let restore = if expansion.is_some() {
+            input
+                .schema()
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| {
+                    !expanded_names.contains(field.name())
+                        && template
+                            .schema()
+                            .index_of_column_by_name(None, field.name())
+                            .is_none()
+                })
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let name = self.temporary_name(&input);
+        let result = crate::grouped::plan(input, template, slot, mode, restore, name)?;
+        if expansion.is_some() && self.track_order {
+            ordering::sequence(self.state, &self.scalars, result, Vec::new())
+        } else {
+            Ok(result)
+        }
+    }
+
     fn mv_expand(
         &mut self,
         plan: LogicalPlan,
-        array_mode: bool,
+        modes: (bool, bool),
         index: Option<&str>,
         columns: &[ast::ExpandColumn],
         limit: usize,
@@ -1129,7 +1380,8 @@ impl<'s> Planner<'s> {
         projection.push(
             dynamic::call(
                 Kernel::Expand {
-                    array_mode,
+                    array_mode: modes.0,
+                    arrays_only: modes.1,
                     limit,
                     columns: columns.len(),
                 },
