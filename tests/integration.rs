@@ -483,13 +483,13 @@ async fn unsupported_features_and_invalid_names_do_not_silently_fall_back() {
     for query in [
         "Events | project value",
         "events | take 1",
-        "Events | summarize percentile(Value,95)",
+        "Events | summarize unknown_aggregate(Value)",
         "Events | summarize dcount(Value,4)",
-        "Events | summarize x=sum(Value)/count()",
+        "Events | summarize x=Value",
         "Events | where Category has Value",
         "let x=1; let x=2; print y=x",
         "print x=1 | extend a=x+1,b=a+1",
-        "datatable(x:long)[1] | union (datatable(x:string)['a'])",
+        "datatable(x:long)[1] | union isfuzzy=true missing",
         "Events | project x=Value,x=Category",
         "Events | project-rename X=missing",
     ] {

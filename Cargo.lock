@@ -1084,13 +1084,15 @@ dependencies = [
 
 [[package]]
 name = "datafusion-kql"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
  "criterion",
  "datafusion",
+ "futures",
  "regex",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

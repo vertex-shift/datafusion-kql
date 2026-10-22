@@ -175,11 +175,11 @@ fn malformed_queries_are_errors_not_panics() {
 #[test]
 fn unsupported_operators_and_types_are_explicit() {
     assert!(matches!(
-        parse("T | mv-expand x"),
+        parse("T | unsupported-operator x"),
         Err(Error::Unsupported { .. })
     ));
     assert!(matches!(
-        parse("datatable(x:dynamic)[]"),
+        parse("datatable(x:unsupported_type)[]"),
         Err(Error::Unsupported { .. })
     ));
 }

@@ -36,6 +36,50 @@ pub struct Binding {
 pub enum BindingValue {
     Scalar(Expr),
     Tabular(Pipeline),
+    Parameter {
+        ty: ScalarType,
+        default: Option<Expr>,
+    },
+    Function(Box<Function>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Function {
+    pub parameters: Vec<FunctionParameter>,
+    pub bindings: Vec<Binding>,
+    pub body: FunctionBody,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionParameter {
+    pub name: String,
+    pub ty: ParameterType,
+    pub default: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParameterType {
+    Scalar(ScalarType),
+    Tabular(Option<Vec<(String, ScalarType)>>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FunctionBody {
+    Scalar(Expr),
+    Tabular(Pipeline),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallArgument {
+    pub name: Option<String>,
+    pub value: ArgumentValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArgumentValue {
+    Scalar(Expr),
+    Tabular(Box<Query>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,7 +94,17 @@ pub enum Source {
         name: Vec<String>,
         span: Span,
     },
+    Pattern {
+        prefix: Vec<String>,
+        pattern: String,
+        span: Span,
+    },
     Subquery(Box<Query>),
+    Call {
+        name: String,
+        args: Vec<CallArgument>,
+        span: Span,
+    },
     Print(Vec<NamedExpr>),
     Datatable {
         columns: Vec<(String, ScalarType)>,
@@ -64,6 +118,7 @@ pub enum Source {
     },
     Union {
         kind: UnionKind,
+        withsource: Option<String>,
         inputs: Vec<Source>,
     },
 }
@@ -77,6 +132,7 @@ pub enum ScalarType {
     String,
     Datetime,
     Timespan,
+    Dynamic,
 }
 
 impl ScalarType {
@@ -89,6 +145,7 @@ impl ScalarType {
             "string" => Self::String,
             "datetime" | "date" => Self::Datetime,
             "timespan" | "time" => Self::Timespan,
+            "dynamic" => Self::Dynamic,
             _ => return None,
         })
     }
@@ -103,19 +160,46 @@ pub struct SpannedOperator {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operator {
     Where(Expr),
-    Take(usize),
+    Take(Expr),
     Project(Vec<NamedExpr>),
     Extend(Vec<NamedExpr>),
+    Serialize(Vec<NamedExpr>),
     ProjectAway(Vec<String>),
     ProjectKeep(Vec<String>),
     ProjectRename(Vec<(String, String)>),
+    ProjectReorder(Vec<ReorderColumn>),
+    GetSchema,
+    As(String),
+    AsMaterialized(String),
+    Invoke {
+        name: String,
+        args: Vec<CallArgument>,
+    },
+    Sample {
+        count: Expr,
+        distinct: Option<Expr>,
+    },
+    MakeSeries(Box<MakeSeries>),
+    MvExpand {
+        array_mode: bool,
+        index: Option<String>,
+        columns: Vec<ExpandColumn>,
+        limit: usize,
+    },
+    Parse {
+        input: Expr,
+        kind: ParseKind,
+        flags: String,
+        pattern: Vec<ParsePart>,
+        filter: bool,
+    },
     Summarize {
         aggregates: Vec<NamedExpr>,
         by: Vec<NamedExpr>,
     },
     Sort(Vec<SortKey>),
     Top {
-        count: usize,
+        count: Expr,
         key: SortKey,
     },
     Distinct(Vec<Expr>),
@@ -125,8 +209,14 @@ pub enum Operator {
         input: Box<Query>,
         keys: Vec<JoinKey>,
     },
+    Lookup {
+        kind: JoinKind,
+        input: Box<Query>,
+        keys: Vec<JoinKey>,
+    },
     Union {
         kind: UnionKind,
+        withsource: Option<String>,
         inputs: Vec<Source>,
     },
 }
@@ -135,6 +225,51 @@ pub enum Operator {
 pub struct NamedExpr {
     pub name: Option<String>,
     pub expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpandColumn {
+    pub value: NamedExpr,
+    pub ty: Option<ScalarType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReorderColumn {
+    pub pattern: String,
+    pub order: Option<(bool, bool)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeriesAggregation {
+    pub value: NamedExpr,
+    pub default: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MakeSeries {
+    pub aggregates: Vec<SeriesAggregation>,
+    pub axis: Expr,
+    pub from: Option<Expr>,
+    pub to: Option<Expr>,
+    pub step: Expr,
+    pub by: Vec<NamedExpr>,
+    pub nonempty: bool,
+    pub inclusive: bool,
+    pub align_to_start: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseKind {
+    Simple,
+    Regex,
+    Relaxed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParsePart {
+    Literal(String),
+    Capture { name: String, ty: ScalarType },
+    Wildcard,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -179,11 +314,29 @@ pub struct Expr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Identifier(Vec<String>),
+    #[doc(hidden)]
+    BindingReference(String),
     Literal(Literal),
+    Cast {
+        expr: Box<Expr>,
+        ty: ScalarType,
+    },
+    NamedArgument {
+        name: String,
+        value: Box<Expr>,
+    },
     Call {
         name: String,
         args: Vec<Expr>,
     },
+    Dynamic(Box<Expr>),
+    Array(Vec<Expr>),
+    Object(Vec<(String, Expr)>),
+    Access {
+        expr: Box<Expr>,
+        index: Box<Expr>,
+    },
+    Type(ScalarType),
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,
@@ -260,4 +413,147 @@ pub enum BinaryOp {
     EndsWithCs,
     NotEndsWithCs,
     MatchesRegex,
+}
+
+impl Expr {
+    pub(crate) fn map_children(
+        &self,
+        mut map: impl FnMut(&Self) -> crate::Result<Self>,
+    ) -> crate::Result<Self> {
+        let kind = match &self.kind {
+            ExprKind::Cast { expr, ty } => ExprKind::Cast {
+                expr: Box::new(map(expr)?),
+                ty: *ty,
+            },
+            ExprKind::NamedArgument { name, value } => ExprKind::NamedArgument {
+                name: name.clone(),
+                value: Box::new(map(value)?),
+            },
+            ExprKind::Call { name, args } => ExprKind::Call {
+                name: name.clone(),
+                args: args.iter().map(&mut map).collect::<crate::Result<_>>()?,
+            },
+            ExprKind::Dynamic(expr) => ExprKind::Dynamic(Box::new(map(expr)?)),
+            ExprKind::Array(items) => {
+                ExprKind::Array(items.iter().map(&mut map).collect::<crate::Result<_>>()?)
+            }
+            ExprKind::Object(items) => ExprKind::Object(
+                items
+                    .iter()
+                    .map(|(name, value)| Ok((name.clone(), map(value)?)))
+                    .collect::<crate::Result<_>>()?,
+            ),
+            ExprKind::Access { expr, index } => ExprKind::Access {
+                expr: Box::new(map(expr)?),
+                index: Box::new(map(index)?),
+            },
+            ExprKind::Unary { op, expr } => ExprKind::Unary {
+                op: *op,
+                expr: Box::new(map(expr)?),
+            },
+            ExprKind::Binary { left, op, right } => ExprKind::Binary {
+                left: Box::new(map(left)?),
+                op: *op,
+                right: Box::new(map(right)?),
+            },
+            ExprKind::InList {
+                expr,
+                values,
+                negated,
+                case_insensitive,
+            } => ExprKind::InList {
+                expr: Box::new(map(expr)?),
+                values: values.iter().map(&mut map).collect::<crate::Result<_>>()?,
+                negated: *negated,
+                case_insensitive: *case_insensitive,
+            },
+            ExprKind::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => ExprKind::Between {
+                expr: Box::new(map(expr)?),
+                low: Box::new(map(low)?),
+                high: Box::new(map(high)?),
+                negated: *negated,
+            },
+            _ => self.kind.clone(),
+        };
+        Ok(Self {
+            kind,
+            span: self.span,
+            depth: self.depth,
+        })
+    }
+}
+
+impl Operator {
+    pub(crate) fn map_expressions(
+        &self,
+        mut map: impl FnMut(&Expr) -> crate::Result<Expr>,
+    ) -> crate::Result<Self> {
+        let mut operator = self.clone();
+        match &mut operator {
+            Self::Where(expr) | Self::Take(expr) | Self::Parse { input: expr, .. } => {
+                *expr = map(expr)?;
+            }
+            Self::Project(items) | Self::Extend(items) | Self::Serialize(items) => {
+                for item in items {
+                    item.expr = map(&item.expr)?;
+                }
+            }
+            Self::MvExpand { columns, .. } => {
+                for column in columns {
+                    column.value.expr = map(&column.value.expr)?;
+                }
+            }
+            Self::Summarize { aggregates, by } => {
+                for item in aggregates.iter_mut().chain(by) {
+                    item.expr = map(&item.expr)?;
+                }
+            }
+            Self::MakeSeries(series) => {
+                for aggregate in &mut series.aggregates {
+                    aggregate.value.expr = map(&aggregate.value.expr)?;
+                    if let Some(default) = &mut aggregate.default {
+                        *default = map(default)?;
+                    }
+                }
+                for group in &mut series.by {
+                    group.expr = map(&group.expr)?;
+                }
+                series.axis = map(&series.axis)?;
+                series.step = map(&series.step)?;
+                if let Some(from) = &mut series.from {
+                    *from = map(from)?;
+                }
+                if let Some(to) = &mut series.to {
+                    *to = map(to)?;
+                }
+            }
+            Self::Sort(keys) => {
+                for key in keys {
+                    key.expr = map(&key.expr)?;
+                }
+            }
+            Self::Top { count, key } => {
+                *count = map(count)?;
+                key.expr = map(&key.expr)?;
+            }
+            Self::Sample { count, distinct } => {
+                *count = map(count)?;
+                if let Some(distinct) = distinct {
+                    *distinct = map(distinct)?;
+                }
+            }
+            Self::Distinct(items) => {
+                for item in items {
+                    *item = map(item)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(operator)
+    }
 }

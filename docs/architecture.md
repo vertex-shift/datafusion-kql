@@ -27,7 +27,12 @@ KQL text -> borrowed lexer tokens -> typed AST -> schema-aware planner
 ```
 
 There is no row-oriented query interpreter, SQL string generation, custom
-execution engine, or implicit query execution during planning. Existing
+execution engine, or implicit query execution during planning. Dynamic/JSON
+operations use expression-local Arrow batch kernels without installing global
+functions. Dynamic values use compact dense unions; nulls and strings retain
+distinct types. Zipped expansion builds one list of struct rows and uses native
+DataFusion `Unnest`, avoiding both Cartesian expansion and null-index padding
+of union arrays. Existing
 `TableProvider`s, catalogs, runtime configuration, memory limits, object stores,
 and user-defined functions remain owned by the embedding DataFusion application.
 SQL is a development dependency for differential testing, not a runtime
@@ -54,7 +59,8 @@ errors rather than silently execute with different semantics.
   necessary and build an owned, reusable AST.
 - Keep ordinary predicates, arithmetic, sorting, and aggregations in native
   DataFusion expressions so optimizer rules can inspect them.
-- Use native string/regex kernels instead of per-row Rust UDF callbacks.
+- Use native string/regex kernels; implement KQL-specific dynamic semantics in
+  batch kernels while retaining standard DataFusion operators around them.
 - Reuse Arrow buffers and existing table providers; do not collect input data in
   the frontend.
 - Keep limits lazy; let DataFusion select top-k, hash joins, and partial/final
@@ -70,14 +76,31 @@ errors rather than silently execute with different semantics.
 
 ## Later compatibility milestones
 
-- Dynamic JSON values and property access, `mv-expand`, `mv-apply`, `parse`,
-  `extract`, and bag/list aggregations with explicit Arrow type mappings.
-- Time-series operators (`make-series`, series functions), window/serialization
-  semantics, `scan`, and `partition`.
-- Broader aggregate coverage, Kusto-specific approximate algorithms, schema
-  splitting for unions with conflicting column types, and additional hints.
-- Functions, query parameters, management commands, remote Kusto connectors,
-  visualization metadata, CLI/Python bindings, and language tooling.
+- Dynamic JSON values, property access, bag/array/set functions, and `mv-expand`
+  are implemented, together with bounded collection aggregation, nearest-rank
+  percentiles, correlated row-selection aggregates, and aggregate arithmetic.
+  Typed `parse`/`parse-where`, regex extraction and JSONPath extraction are also
+  implemented. Continue with `mv-apply` and broader specialized parsing.
+- Serialization, offsets, row numbering, restart-aware cumulative sums/ranks,
+  and bounded session windows are implemented. `make-series`, common series
+  arithmetic/interpolation/statistics, line fitting, and FIR/IIR processing are
+  also implemented. Continue with advanced signal processing, `scan`, and
+  `partition`.
+- UTC calendar arithmetic, constructors, formatting, Unix conversions, and lazy
+  numeric/datetime/timespan ranges are implemented. Full Kusto datetime/timespan
+  range and richer dynamic scalar types remain compatibility milestones.
+- Lookup, schema introspection, projection reordering, sampling, wildcard table
+  discovery, source-labelled unions and conflicting-type schema splitting are
+  implemented. Continue with Kusto-specific approximate algorithms and hints.
+- Typed request parameters and lexically captured scalar/tabular functions with
+  `invoke` are implemented through native expression/plan expansion. Continue
+  with scalar subqueries and view/wildcard function discovery.
+- Explicit materialization uses a lazy native table source and a shared Arrow
+  cache boundary. It preserves parallel input execution, reports retained
+  memory to the host pool, and does not change the host's planner or registry.
+  Snapshots are scoped to planned queries, including DataFrame clones.
+- Management commands, remote Kusto connectors, visualization metadata,
+  CLI/Python bindings, and language tooling.
 - Conformance fixtures against a real Kusto cluster and production workload
   benchmarks before claiming complete compatibility.
 

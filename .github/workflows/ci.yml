@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -26,3 +27,6 @@ jobs:
       - run: cargo test --locked --all-features
       - run: cargo check --locked --lib --no-default-features
       - run: cargo run --locked --example quickstart
+      - run: cargo run --locked --example telemetry_json
+      - run: cargo run --locked --example time_series
+      - run: cargo run --locked --example functions

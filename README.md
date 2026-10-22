@@ -5,8 +5,9 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** initial typed-tabular compatibility release, targeting **DataFusion
-55.2.x** and **Rust 1.94+**. This is not yet a complete implementation of KQL.
+**Status:** version 0.2 typed-tabular, dynamic/JSON, window and time-series
+support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
+complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
 and known semantic differences.
 
@@ -14,11 +15,17 @@ and known semantic differences.
 
 ```bash
 cargo run --example quickstart
+cargo run --example telemetry_json
+cargo run --example time_series
+cargo run --example functions
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
 and prints the native logical plan and results. No Azure account or service is
 required.
+
+`telemetry_json` parses JSON telemetry, reads nested properties, expands latency
+arrays with native `Unnest`, and aggregates the expanded measurements.
 
 ## Extend an existing DataFusion session
 
@@ -94,14 +101,52 @@ the application chooses to display query text.
 
 ## What is implemented
 
-Typed literals, scalar/tabular `let`, `print`, `datatable`, integer `range`,
+Typed literals, scalar/tabular `let`, `print`, `datatable`, numeric/temporal `range`,
 filtering, projection, extension, renaming, sorting, top-k, distinct, aggregation,
 joins (including default `innerunique`), and name-aligned unions. Common scalar
 functions and string predicates lower to native DataFusion expressions.
 KQL-specific null equality, non-null strings, aggregate defaults, and sort
 defaults are handled explicitly.
 
-Dynamic JSON, `mv-*`, `make-series`, management commands, hints, and complete
+Dynamic literals, JSON parsing, property/index access, bag/array/set functions,
+and `mv-expand` are supported with typed Arrow unions and native batch kernels.
+Multiple expanded columns zip with null padding rather than forming an
+accidental Cartesian product.
+
+Typed `parse`/`parse-where`, regex/JSON extraction, collection and percentile
+aggregations, correlated `arg_min`/`arg_max`, and scalar expressions over
+aggregates are also supported.
+
+Serialized row sets support `prev`, `next`, restart-aware row numbers,
+cumulative sums and ranks, and bounded session windows. Hidden order tracking
+preserves semantics through projections, filters, and expansion without adding
+window overhead to ordinary analytic queries.
+
+Lookup, schema introspection, projection reordering, sampling, wildcard table
+sources, and source-labelled/type-splitting unions extend the tabular surface.
+Limits and top-k counts can use constant `let` bindings and arithmetic.
+`make-series` supports sparse native aggregation, exact time/numeric axes,
+defaults and group bounds; series functions add interpolation, statistics,
+line fitting, arithmetic and FIR/IIR processing.
+Calendar arithmetic, period boundaries, Unix conversions, constructors, and
+compiled KQL date/time formatting are supported. Both tabular and scalar ranges
+handle numeric, datetime, and timespan values.
+
+Query parameters use typed request values rather than source interpolation:
+`declare query_parameters(...)` works with `kql_with_parameters` and
+`kql_ast_with_parameters`. Query-defined scalar and tabular functions support
+typed/default/named arguments, lexical captures, nested scalar definitions,
+tabular schemas, and `invoke`. Functions expand into ordinary native
+expressions/plans, without installing anything in the session registry.
+
+`materialize(...)` and `as hint.materialized=true` create lazy shared Arrow
+snapshots for repeated subqueries. Input partitions execute in parallel once,
+and cached buffers are charged to the host's DataFusion memory pool. Snapshots
+belong to the planned query/DataFrame, including its clones; plan a new query
+for a fresh snapshot. See the compatibility contract for lifetime and memory
+boundaries.
+
+`mv-apply`, advanced signal processing, management commands, hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.
 
 ## Architecture and performance
@@ -112,7 +157,9 @@ KQL -> lexer / AST -> DataFusion LogicalPlan / Expr
 ```
 
 Ordinary filters, projections, joins, aggregations, and limits remain visible to
-DataFusion's optimizer. There are no row-at-a-time frontend UDFs. `has` currently
+DataFusion's optimizer. Dynamic/JSON operations use expression-local Arrow batch
+kernels, not a separate row-oriented query interpreter, and do not overwrite the
+session's function registry. `has` currently
 uses native regex scanning, not a Kusto-style inverted index. Normalizing
 nullable Arrow strings can add work; non-null source schemas avoid that cost.
 

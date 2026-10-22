@@ -12,6 +12,7 @@ use datafusion::optimizer::simplify_expressions::{ExprSimplifier, SimplifyContex
 use datafusion::prelude::lit;
 
 use crate::ast::{self, BinaryOp, ExprKind, ScalarType, Span, UnaryOp};
+use crate::dynamic::{self, Kernel};
 use crate::error::{Error, Result};
 use crate::literals::{data_type, literal_value};
 
@@ -19,6 +20,62 @@ pub(crate) struct Expressions<'a> {
     pub state: &'a SessionState,
     pub scalars: &'a HashMap<String, Expr>,
     pub now: i64,
+}
+
+pub(crate) fn parameter_cast(
+    value: Expr,
+    ty: ScalarType,
+    schema: &DFSchema,
+    span: Span,
+) -> Result<Expr> {
+    let actual = value.get_type(schema)?;
+    let expected = data_type(ty);
+    if ty == ScalarType::Dynamic {
+        return Ok(dynamic::call(Kernel::IntoDynamic, vec![value]));
+    }
+    let integer_literal = match &value {
+        Expr::Literal(ScalarValue::Int64(value), _) => *value,
+        Expr::Negative(expr) => match expr.as_ref() {
+            Expr::Literal(ScalarValue::Int64(Some(value)), _) => value.checked_neg(),
+            _ => None,
+        },
+        _ => None,
+    };
+    let compatible = actual == expected
+        || actual == DataType::Null
+        || expected == DataType::Int32
+            && integer_literal.is_some_and(|value| i32::try_from(value).is_ok())
+        || matches!(
+            (&actual, &expected),
+            (DataType::Int32, DataType::Int64 | DataType::Float64)
+                | (DataType::Int64 | DataType::Float32, DataType::Float64)
+                | (
+                    DataType::Int8 | DataType::Int16,
+                    DataType::Int32 | DataType::Int64 | DataType::Float64
+                )
+                | (DataType::LargeUtf8 | DataType::Utf8View, DataType::Utf8)
+                | (DataType::Timestamp(_, _), DataType::Timestamp(_, _))
+                | (DataType::Duration(_), DataType::Duration(_))
+        );
+    if !compatible {
+        return Err(Error::syntax(
+            format!("parameter requires {expected}, received {actual}"),
+            span,
+        ));
+    }
+    let value = if actual == expected {
+        value
+    } else {
+        cast(value, expected)
+    };
+    if ty == ScalarType::String {
+        Ok(datafusion::functions::core::expr_fn::coalesce(vec![
+            value,
+            lit(""),
+        ]))
+    } else {
+        Ok(value)
+    }
 }
 
 impl Expressions<'_> {
@@ -46,7 +103,9 @@ impl Expressions<'_> {
                 self.state.execution_props().query_execution_start_time,
             )
             .build();
-        let simplified = ExprSimplifier::new(context).simplify(expr)?;
+        let simplifier = ExprSimplifier::new(context);
+        let expr = simplifier.coerce(expr, &DFSchema::empty())?;
+        let simplified = simplifier.simplify(expr)?;
         match simplified {
             Expr::Literal(value, _) => Ok(value),
             _ => Err(Error::unsupported(
@@ -56,18 +115,36 @@ impl Expressions<'_> {
         }
     }
 
+    pub(crate) fn constant_string(&self, expr: Expr, span: Span) -> Result<String> {
+        let value = self.constant(expr, span)?;
+        value
+            .try_as_str()
+            .flatten()
+            .map(str::to_owned)
+            .ok_or_else(|| Error::syntax("expected a constant string", span))
+    }
+
     fn lower(&self, expr: &ast::Expr, schema: &DFSchema, filter: bool) -> Result<Expr> {
         Ok(match &expr.kind {
             ExprKind::Literal(value) => lit(literal_value(value, expr.span)?),
+            ExprKind::BindingReference(name) => self
+                .scalars
+                .get(name)
+                .cloned()
+                .ok_or_else(|| Error::Plan("function capture is no longer in scope".into()))?,
+            ExprKind::Cast { expr, ty } => {
+                let value = self.lower(expr, schema, false)?;
+                parameter_cast(value, *ty, schema, expr.span)?
+            }
+            ExprKind::NamedArgument { .. } => {
+                return Err(Error::syntax(
+                    "named arguments are only supported for KQL-defined functions",
+                    expr.span,
+                ));
+            }
             ExprKind::Identifier(parts) => {
-                if parts.len() != 1 {
-                    return Err(Error::unsupported(
-                        "property access; use ['a.b'] for a column whose name contains a dot",
-                        expr.span,
-                    ));
-                }
                 let name = &parts[0];
-                if let Some(index) = schema.index_of_column_by_name(None, name) {
+                let mut value = if let Some(index) = schema.index_of_column_by_name(None, name) {
                     Expr::Column(Column::from(schema.qualified_field(index)))
                 } else if let Some(value) = self.scalars.get(name) {
                     value.clone()
@@ -75,8 +152,39 @@ impl Expressions<'_> {
                     return Err(Error::Plan(format!(
                         "unknown column or scalar binding '{name}'"
                     )));
+                };
+                for property in &parts[1..] {
+                    value = self.access(value, lit(property.clone()), schema)?;
                 }
+
+                value
             }
+            ExprKind::Dynamic(value) => {
+                let value = self.lower(value, schema, false)?;
+                let value = dynamic::call(Kernel::IntoDynamic, vec![value]);
+                self.constant(value, expr.span).map(lit)?
+            }
+            ExprKind::Array(items) => dynamic::call(
+                Kernel::PackArray,
+                items
+                    .iter()
+                    .map(|item| self.lower(item, schema, false))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            ExprKind::Object(items) => {
+                let mut args = Vec::with_capacity(items.len() * 2);
+                for (key, value) in items {
+                    args.push(lit(key.clone()));
+                    args.push(self.lower(value, schema, false)?);
+                }
+                dynamic::call(Kernel::BagPack, args)
+            }
+            ExprKind::Access { expr, index } => {
+                let value = self.lower(expr, schema, false)?;
+                let index = self.lower(index, schema, false)?;
+                self.access(value, index, schema)?
+            }
+            ExprKind::Type(ty) => lit(format!("{ty:?}").to_lowercase()),
             ExprKind::Unary { op, expr } => {
                 let value = self.lower(expr, schema, false)?;
                 match op {
@@ -116,11 +224,37 @@ impl Expressions<'_> {
                 case_insensitive,
             } => {
                 let value = self.lower(expr, schema, false)?;
+                let lowered = values
+                    .iter()
+                    .map(|item| {
+                        let value = self.lower(item, &DFSchema::empty(), false)?;
+                        Ok(lit(self.constant(value, item.span)?))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                if dynamic::is_dynamic(&value.get_type(schema)?)
+                    || lowered
+                        .iter()
+                        .map(|v| v.get_type(&DFSchema::empty()))
+                        .collect::<datafusion::error::Result<Vec<_>>>()?
+                        .iter()
+                        .any(dynamic::is_dynamic)
+                {
+                    let mut args = vec![value];
+                    args.extend(lowered);
+                    return Ok(dynamic::call(
+                        Kernel::Membership {
+                            negated: *negated,
+                            insensitive: *case_insensitive,
+                        },
+                        args,
+                    ));
+                }
                 let mut contains_null = false;
                 let mut list = Vec::with_capacity(values.len());
-                for item in values {
-                    let item_expr = self.lower(item, &DFSchema::empty(), false)?;
-                    let scalar = self.constant(item_expr, item.span)?;
+                for item in lowered {
+                    let Expr::Literal(scalar, _) = item else {
+                        unreachable!("list values are literal");
+                    };
                     if scalar.is_null() {
                         contains_null = true;
                     } else {
@@ -193,6 +327,15 @@ impl Expressions<'_> {
         filter: bool,
     ) -> Result<Expr> {
         use BinaryOp as B;
+        if matches!(op, B::Eq | B::NotEq)
+            && (dynamic::is_dynamic(&left.get_type(schema)?)
+                || dynamic::is_dynamic(&right.get_type(schema)?))
+        {
+            return Ok(dynamic::call(
+                Kernel::Equal(op == B::NotEq),
+                vec![left, right],
+            ));
+        }
         Ok(match op {
             B::And => left.and(right),
             B::Or => left.or(right),
@@ -201,8 +344,8 @@ impl Expressions<'_> {
                 let negated = matches!(op, B::NotEq | B::NotEqInsensitive);
                 let (left, right) = if insensitive {
                     (
-                        self.function("lower", vec![left])?,
-                        self.function("lower", vec![right])?,
+                        self.function("lower", vec![self.string_value(left, schema)?])?,
+                        self.function("lower", vec![self.string_value(right, schema)?])?,
                     )
                 } else {
                     (left, right)
@@ -404,7 +547,10 @@ impl Expressions<'_> {
         {
             return self.arithmetic(right, op, left, schema, span);
         }
-        if right_type.is_integer() && matches!(op, BinaryOp::Divide | BinaryOp::Modulo) {
+        if left_type.is_integer()
+            && right_type.is_integer()
+            && matches!(op, BinaryOp::Divide | BinaryOp::Modulo)
+        {
             right = self.function("nullif", vec![right, cast(lit(0_i64), right_type)])?;
         }
         Ok(match op {
@@ -428,6 +574,29 @@ impl Expressions<'_> {
         )
     }
 
+    fn access(&self, value: Expr, index: Expr, schema: &DFSchema) -> Result<Expr> {
+        match value.get_type(schema)? {
+            ty if dynamic::is_dynamic(&ty) => Ok(dynamic::call(Kernel::Get, vec![value, index])),
+            DataType::Struct(_) => self.function("get_field", vec![value, index]),
+            DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(_, _) => {
+                let index = when(index.clone().lt(lit(0_i64)), index.clone())
+                    .otherwise(index + lit(1_i64))?;
+                self.function("array_element", vec![value, index])
+            }
+            ty => Err(Error::Plan(format!(
+                "cannot subscript {ty}; parse JSON or use a dynamic value"
+            ))),
+        }
+    }
+
+    pub(crate) fn string_value(&self, value: Expr, schema: &DFSchema) -> Result<Expr> {
+        Ok(if dynamic::is_dynamic(&value.get_type(schema)?) {
+            dynamic::call(Kernel::Convert(DataType::Utf8), vec![value])
+        } else {
+            value
+        })
+    }
+
     fn call(&self, name: &str, args: &[ast::Expr], span: Span, schema: &DFSchema) -> Result<Expr> {
         let values = args
             .iter()
@@ -443,7 +612,362 @@ impl Expressions<'_> {
                 ))
             }
         };
+        if let Some(op) = crate::series_functions::Op::lookup(name) {
+            return Ok(dynamic::call(Kernel::Series(op), values));
+        }
+        let kernel = match name {
+            "parse_json" | "parsejson" | "todynamic" => Some(Kernel::ParseJson),
+            "gettype" => Some(Kernel::GetType),
+            "array_length" => Some(Kernel::ArrayLength),
+            "pack_array" => Some(Kernel::PackArray),
+            "bag_pack" | "pack" | "pack_dictionary" => Some(Kernel::BagPack),
+            "bag_keys" => Some(Kernel::BagKeys),
+            "bag_has_key" => Some(Kernel::BagHasKey),
+            "bag_merge" => Some(Kernel::BagMerge),
+            "bag_set_key" => Some(Kernel::BagSetKey),
+            "bag_remove_keys" => Some(Kernel::BagRemoveKeys),
+            "array_concat" => Some(Kernel::ArrayConcat),
+            "array_slice" => Some(Kernel::ArraySlice),
+            "array_index_of" => Some(Kernel::ArrayIndexOf),
+            "set_has_element" => Some(Kernel::ArrayHas),
+            "array_reverse" => Some(Kernel::ArrayReverse),
+            "array_sum" => Some(Kernel::ArraySum),
+            "set_union" => Some(Kernel::SetUnion),
+            "set_intersect" => Some(Kernel::SetIntersect),
+            "set_difference" => Some(Kernel::SetDifference),
+            "zip" => Some(Kernel::Zip),
+            "repeat" => Some(Kernel::Repeat),
+            "range" => Some(Kernel::Range),
+            "strcat_array" => Some(Kernel::StrcatArray),
+            "split" => Some(Kernel::Split),
+            _ => None,
+        };
+        if let Some(kernel) = kernel {
+            return Ok(dynamic::call(kernel, values));
+        }
         Ok(match name {
+            "format_datetime" | "format_timespan" => {
+                arity(2)?;
+                let pattern = self.constant_string(values[1].clone(), args[1].span)?;
+                let duration = name == "format_timespan";
+                let value = if duration {
+                    cast(values[0].clone(), DataType::Duration(TimeUnit::Nanosecond))
+                } else {
+                    self.date_value(values[0].clone(), schema)?
+                };
+                crate::format_time::call(value, &pattern, duration, args[1].span)?
+            }
+            "getyear" | "getmonth" | "monthofyear" | "dayofmonth" | "dayofyear" | "hourofday"
+            | "week_of_year" | "weekofyear" => {
+                arity(1)?;
+                let part = match name {
+                    "getyear" => "year",
+                    "getmonth" | "monthofyear" => "month",
+                    "dayofmonth" => "day",
+                    "dayofyear" => "doy",
+                    "hourofday" => "hour",
+                    _ => "week",
+                };
+                let value = self.date_value(values[0].clone(), schema)?;
+                cast(
+                    self.function("date_part", vec![lit(part), value])?,
+                    DataType::Int32,
+                )
+            }
+            "datetime_part" | "datepart" => {
+                arity(2)?;
+                let part = self
+                    .constant_string(values[0].clone(), args[0].span)?
+                    .to_ascii_lowercase();
+                let part = match part.as_str() {
+                    "week_of_year" | "weekofyear" => "week",
+                    "dayofyear" => "doy",
+                    part => part,
+                }
+                .to_owned();
+                let value = self.date_value(values[1].clone(), schema)?;
+                cast(
+                    self.function("date_part", vec![lit(part), value])?,
+                    DataType::Int32,
+                )
+            }
+            "dayofweek" => {
+                arity(1)?;
+                let value = self.date_value(values[0].clone(), schema)?;
+                let days = cast(
+                    self.function("date_part", vec![lit("dow"), value])?,
+                    DataType::Int64,
+                );
+                cast(
+                    days * lit(86_400_000_000_000_i64),
+                    DataType::Duration(TimeUnit::Nanosecond),
+                )
+            }
+            "startofday" | "startofweek" | "startofmonth" | "startofyear" | "endofday"
+            | "endofweek" | "endofmonth" | "endofyear" => {
+                if !(1..=2).contains(&values.len()) {
+                    return Err(Error::syntax(
+                        "period boundary functions expect date and optional offset",
+                        span,
+                    ));
+                }
+                let unit = if name.ends_with("day") {
+                    crate::calendar::Unit::Day
+                } else if name.ends_with("week") {
+                    crate::calendar::Unit::Week
+                } else if name.ends_with("month") {
+                    crate::calendar::Unit::Month
+                } else {
+                    crate::calendar::Unit::Year
+                };
+                let date = self.date_value(values[0].clone(), schema)?;
+                let offset = if let Some(value) = values.get(1) {
+                    cast(value.clone(), DataType::Int64)
+                } else {
+                    lit(0_i64)
+                };
+                let op = if name.starts_with("start") {
+                    crate::calendar::Op::Start(unit)
+                } else {
+                    crate::calendar::Op::End(unit)
+                };
+                crate::calendar::call(op, vec![date, offset])
+            }
+            "datetime_add" | "datetime_diff" => {
+                arity(3)?;
+                let unit = self.constant_string(values[0].clone(), args[0].span)?;
+                let unit = crate::calendar::Unit::parse(&unit)
+                    .ok_or_else(|| Error::syntax("unknown datetime period", args[0].span))?;
+                if name == "datetime_add" {
+                    let date = self.date_value(values[2].clone(), schema)?;
+                    crate::calendar::call(
+                        crate::calendar::Op::Add(unit),
+                        vec![date, cast(values[1].clone(), DataType::Int64)],
+                    )
+                } else {
+                    let left = self.date_value(values[1].clone(), schema)?;
+                    let right = self.date_value(values[2].clone(), schema)?;
+                    crate::calendar::call(crate::calendar::Op::Diff(unit), vec![left, right])
+                }
+            }
+            "datetime_to_unixtime" => {
+                arity(1)?;
+                crate::calendar::call(
+                    crate::calendar::Op::ToUnix,
+                    vec![self.date_value(values[0].clone(), schema)?],
+                )
+            }
+            "unixtime_seconds_todatetime"
+            | "unixtime_milliseconds_todatetime"
+            | "unixtime_microseconds_todatetime"
+            | "unixtime_nanoseconds_todatetime" => {
+                arity(1)?;
+                let unit = match name {
+                    "unixtime_seconds_todatetime" => 1_000_000_000,
+                    "unixtime_milliseconds_todatetime" => 1_000_000,
+                    "unixtime_microseconds_todatetime" => 1_000,
+                    _ => 1,
+                };
+                let ty = values[0].get_type(schema)?;
+                if !ty.is_numeric() && ty != DataType::Null {
+                    return Err(Error::syntax(
+                        "Unix time requires a numeric value",
+                        args[0].span,
+                    ));
+                }
+                let value = cast(
+                    values[0].clone(),
+                    if ty.is_integer() {
+                        DataType::Int64
+                    } else {
+                        DataType::Float64
+                    },
+                );
+                crate::calendar::call(crate::calendar::Op::FromUnix(unit), vec![value])
+            }
+            "make_datetime" => {
+                if values.len() == 1 {
+                    self.date_value(values[0].clone(), schema)?
+                } else {
+                    if !(3..=6).contains(&values.len()) {
+                        return Err(Error::syntax(
+                            "make_datetime expects 1 or 3-6 arguments",
+                            span,
+                        ));
+                    }
+                    let args = values
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, value)| {
+                            cast(
+                                value,
+                                if i == 5 {
+                                    DataType::Float64
+                                } else {
+                                    DataType::Int64
+                                },
+                            )
+                        })
+                        .collect();
+                    crate::calendar::call(crate::calendar::Op::MakeDatetime, args)
+                }
+            }
+            "make_timespan" => {
+                if values.len() == 1 {
+                    let value = cast(
+                        self.string_value(values[0].clone(), schema)?,
+                        DataType::Utf8,
+                    );
+                    crate::temporal::parse(crate::temporal::Target::Timespan, value)
+                } else {
+                    if !(2..=4).contains(&values.len()) {
+                        return Err(Error::syntax("make_timespan expects 1-4 arguments", span));
+                    }
+                    let length = values.len();
+                    let args = values
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, value)| {
+                            cast(
+                                value,
+                                if length >= 3 && i == length - 1 {
+                                    DataType::Float64
+                                } else {
+                                    DataType::Int64
+                                },
+                            )
+                        })
+                        .collect();
+                    crate::calendar::call(crate::calendar::Op::MakeTimespan, args)
+                }
+            }
+            "extract" => {
+                if !(3..=4).contains(&values.len()) {
+                    return Err(Error::syntax(
+                        "extract expects regex, capture group, source, and optional typeof",
+                        span,
+                    ));
+                }
+                let pattern = self.constant_string(values[0].clone(), args[0].span)?;
+                let compiled = regex::Regex::new(&pattern)
+                    .map_err(|e| Error::syntax(format!("invalid regex: {e}"), args[0].span))?;
+                let source = cast(
+                    self.string_value(values[2].clone(), schema)?,
+                    DataType::Utf8,
+                );
+                let captures =
+                    self.function("regexp_match", vec![source, lit(format!("({pattern})"))])?;
+                let index = cast(values[1].clone(), DataType::Int64);
+                let valid = index
+                    .clone()
+                    .gt_eq(lit(0_i64))
+                    .and(index.clone().lt(lit(compiled.captures_len() as i64)));
+                let index =
+                    when(valid, index).otherwise(lit(ScalarValue::Int64(None)))? + lit(1_i64);
+                let extracted = self.function("array_element", vec![captures, index])?;
+                self.extracted_type(extracted, args.get(3), span)?
+            }
+            "extract_all" | "extractall" => {
+                if !(2..=3).contains(&values.len()) {
+                    return Err(Error::syntax(
+                        "extract_all expects regex, optional groups, and source",
+                        span,
+                    ));
+                }
+                let pattern = self.constant_string(values[0].clone(), args[0].span)?;
+                let groups = if values.len() == 3 {
+                    let json = self.constant_string(
+                        dynamic::call(Kernel::EncodeJson, vec![values[1].clone()]),
+                        args[1].span,
+                    )?;
+                    let groups: Vec<serde_json::Value> =
+                        serde_json::from_str(&json).map_err(|_| {
+                            Error::syntax("capture groups must be a dynamic array", args[1].span)
+                        })?;
+                    Some(
+                        groups
+                            .into_iter()
+                            .map(|group| match group {
+                                serde_json::Value::String(name) => {
+                                    Ok(crate::regex_extract::Capture::Name(name))
+                                }
+                                value => value
+                                    .as_u64()
+                                    .and_then(|i| usize::try_from(i).ok())
+                                    .map(crate::regex_extract::Capture::Index)
+                                    .ok_or_else(|| {
+                                        Error::syntax(
+                                            "capture groups must be integer indices or names",
+                                            args[1].span,
+                                        )
+                                    }),
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                    )
+                } else {
+                    None
+                };
+                let source = cast(
+                    self.string_value(values[values.len() - 1].clone(), schema)?,
+                    DataType::Utf8,
+                );
+                crate::regex_extract::extract_all(pattern, groups, source, span)?
+            }
+            "extract_json" | "extractjson" => {
+                if !(2..=3).contains(&values.len()) {
+                    return Err(Error::syntax(
+                        "extract_json expects path, JSON text, and optional typeof",
+                        span,
+                    ));
+                }
+                let path = self.constant_string(values[0].clone(), args[0].span)?;
+                let path = crate::json_path::parse(&path, args[0].span)?;
+                let mut value = dynamic::call(Kernel::ParseJsonStrict, vec![values[1].clone()]);
+                for segment in path {
+                    let index = match segment {
+                        crate::json_path::Segment::Key(key) => lit(key),
+                        crate::json_path::Segment::Index(index) => lit(index),
+                    };
+                    value = dynamic::call(Kernel::Get, vec![value, index]);
+                }
+                let ty = args
+                    .get(2)
+                    .map(|arg| {
+                        if let ExprKind::Type(ty) = arg.kind {
+                            Ok(ty)
+                        } else {
+                            Err(Error::syntax("expected typeof(type)", arg.span))
+                        }
+                    })
+                    .transpose()?
+                    .unwrap_or(ScalarType::String);
+                if ty == ScalarType::Dynamic {
+                    value
+                } else if ty == ScalarType::Datetime || ty == ScalarType::Timespan {
+                    let text = dynamic::call(Kernel::Convert(DataType::Utf8), vec![value]);
+                    self.extracted_type(text, args.get(2), span)?
+                } else {
+                    dynamic::call(Kernel::Convert(data_type(ty)), vec![value])
+                }
+            }
+            "totimespan" | "totime" => {
+                arity(1)?;
+                let ty = values[0].get_type(schema)?;
+                if dynamic::is_dynamic(&ty) {
+                    dynamic::call(
+                        Kernel::Convert(DataType::Duration(TimeUnit::Nanosecond)),
+                        values,
+                    )
+                } else if matches!(ty, DataType::Duration(_)) {
+                    cast(values[0].clone(), DataType::Duration(TimeUnit::Nanosecond))
+                } else {
+                    let text = cast(
+                        self.string_value(values[0].clone(), schema)?,
+                        DataType::Utf8,
+                    );
+                    crate::temporal::parse(crate::temporal::Target::Timespan, text)
+                }
+            }
             "now" | "ago" => {
                 if name == "ago" {
                     arity(1)?;
@@ -468,6 +992,16 @@ impl Expressions<'_> {
             }
             "bin" | "floor" if values.len() == 2 => {
                 self.bin(values[0].clone(), values[1].clone(), schema, span)?
+            }
+            "bin_at" => {
+                arity(3)?;
+                self.bin_at(
+                    values[0].clone(),
+                    values[1].clone(),
+                    values[2].clone(),
+                    schema,
+                    span,
+                )?
             }
             "bin" => return Err(Error::syntax("bin expects two arguments", span)),
             "iff" | "iif" => {
@@ -511,25 +1045,46 @@ impl Expressions<'_> {
             }
             "tostring" => {
                 arity(1)?;
+                if dynamic::is_dynamic(&values[0].get_type(schema)?) {
+                    return Ok(dynamic::call(Kernel::Convert(DataType::Utf8), values));
+                }
                 self.function(
                     "coalesce",
                     vec![try_cast(values[0].clone(), DataType::Utf8), lit("")],
                 )?
             }
-            "tolong" | "toint" | "toreal" | "todouble" | "tobool" | "todatetime" => {
+            "todatetime" | "todate" => {
+                arity(1)?;
+                let ty = values[0].get_type(schema)?;
+                if matches!(ty, DataType::Timestamp(_, _)) {
+                    cast(values[0].clone(), data_type(ScalarType::Datetime))
+                } else {
+                    let text = cast(
+                        self.string_value(values[0].clone(), schema)?,
+                        DataType::Utf8,
+                    );
+                    crate::temporal::parse(crate::temporal::Target::Datetime, text)
+                }
+            }
+            "tolong" | "toint" | "toreal" | "todouble" | "tobool" => {
                 arity(1)?;
                 let ty = match name {
                     "tolong" => ScalarType::Long,
                     "toint" => ScalarType::Int,
                     "toreal" | "todouble" => ScalarType::Real,
-                    "tobool" => ScalarType::Bool,
-                    _ => ScalarType::Datetime,
+                    _ => ScalarType::Bool,
                 };
+                if dynamic::is_dynamic(&values[0].get_type(schema)?) {
+                    return Ok(dynamic::call(Kernel::Convert(data_type(ty)), values));
+                }
                 try_cast(values[0].clone(), data_type(ty))
             }
             "bool" | "boolean" | "int" | "long" | "real" | "double" | "string" => {
                 arity(1)?;
                 let ty = data_type(ScalarType::parse(name).expect("known type constructor"));
+                if dynamic::is_dynamic(&values[0].get_type(schema)?) {
+                    return Ok(dynamic::call(Kernel::Convert(ty), values));
+                }
                 if name == "string" {
                     self.function("coalesce", vec![try_cast(values[0].clone(), ty), lit("")])?
                 } else {
@@ -542,6 +1097,15 @@ impl Expressions<'_> {
                         "coalesce requires at least one argument",
                         span,
                     ));
+                }
+                if values
+                    .iter()
+                    .map(|v| v.get_type(schema))
+                    .collect::<datafusion::error::Result<Vec<_>>>()?
+                    .iter()
+                    .any(dynamic::is_dynamic)
+                {
+                    return Ok(dynamic::call(Kernel::Coalesce, values));
                 }
                 let strings = values
                     .iter()
@@ -593,21 +1157,7 @@ impl Expressions<'_> {
                 self.function("replace", values)?
             }
             _ => {
-                if matches!(
-                    name,
-                    "count"
-                        | "countif"
-                        | "dcount"
-                        | "dcountif"
-                        | "count_distinct"
-                        | "sumif"
-                        | "avgif"
-                        | "minif"
-                        | "maxif"
-                        | "stdev"
-                        | "variance"
-                ) || self.state.aggregate_functions().contains_key(name)
-                {
+                if crate::aggregation::is_aggregate(self.state, name) {
                     return Err(Error::unsupported(
                         "aggregation functions must appear in summarize",
                         span,
@@ -622,6 +1172,48 @@ impl Expressions<'_> {
         })
     }
 
+    fn date_value(&self, value: Expr, schema: &DFSchema) -> Result<Expr> {
+        let ty = value.get_type(schema)?;
+        Ok(
+            if matches!(
+                ty,
+                DataType::Timestamp(_, _) | DataType::Date32 | DataType::Date64
+            ) {
+                cast(value, DataType::Timestamp(TimeUnit::Nanosecond, None))
+            } else {
+                let value = cast(self.string_value(value, schema)?, DataType::Utf8);
+                crate::temporal::parse(crate::temporal::Target::Datetime, value)
+            },
+        )
+    }
+
+    pub(crate) fn extracted_type(
+        &self,
+        value: Expr,
+        ty: Option<&ast::Expr>,
+        span: Span,
+    ) -> Result<Expr> {
+        let ty = match ty {
+            Some(ast::Expr {
+                kind: ExprKind::Type(ty),
+                ..
+            }) => *ty,
+            None => ScalarType::String,
+            _ => return Err(Error::syntax("expected typeof(type)", span)),
+        };
+        Ok(match ty {
+            ScalarType::String => self.function("coalesce", vec![value, lit("")])?,
+            ScalarType::Datetime => {
+                crate::temporal::parse(crate::temporal::Target::Datetime, value)
+            }
+            ScalarType::Timespan => {
+                crate::temporal::parse(crate::temporal::Target::Timespan, value)
+            }
+            ScalarType::Dynamic => dynamic::call(Kernel::ParseJson, vec![value]),
+            _ => try_cast(value, data_type(ty)),
+        })
+    }
+
     fn duration_constant(&self, expr: Expr, span: Span) -> Result<Option<i64>> {
         let value = self.constant(expr, span)?;
         if !matches!(value.data_type(), DataType::Duration(_)) {
@@ -631,6 +1223,93 @@ impl Expressions<'_> {
             ScalarValue::DurationNanosecond(value) => Ok(value),
             _ => Err(Error::syntax("expected a timespan argument", span)),
         }
+    }
+
+    pub(crate) fn bin_at(
+        &self,
+        value: Expr,
+        size: Expr,
+        origin: Expr,
+        schema: &DFSchema,
+        span: Span,
+    ) -> Result<Expr> {
+        let ty = value.get_type(schema)?;
+        let temporal = matches!(ty, DataType::Timestamp(_, _) | DataType::Duration(_));
+        let (value, origin, size, output) = if temporal {
+            let output = if matches!(ty, DataType::Timestamp(_, _)) {
+                DataType::Timestamp(TimeUnit::Nanosecond, None)
+            } else {
+                DataType::Duration(TimeUnit::Nanosecond)
+            };
+            let width = self.duration_constant(size, span)?;
+            let Some(width) = width.filter(|w| *w > 0) else {
+                return Ok(lit(ScalarValue::try_from(&output)?));
+            };
+            if matches!(ty, DataType::Timestamp(_, _)) && matches!(origin, Expr::Literal(_, _)) {
+                return self.function(
+                    "date_bin",
+                    vec![
+                        lit(ScalarValue::IntervalMonthDayNano(Some(
+                            IntervalMonthDayNano::new(0, 0, width),
+                        ))),
+                        cast(value, output.clone()),
+                        cast(origin, output),
+                    ],
+                );
+            }
+            (
+                cast(cast(value, output.clone()), DataType::Int64),
+                cast(cast(origin, output.clone()), DataType::Int64),
+                lit(width),
+                output,
+            )
+        } else {
+            let types = [ty.clone(), size.get_type(schema)?, origin.get_type(schema)?];
+            if types.iter().any(|ty| !ty.is_integer() && !ty.is_floating()) {
+                return Err(Error::unsupported(
+                    "bin_at requires numeric or temporal values",
+                    span,
+                ));
+            }
+            let output = if types.iter().any(DataType::is_floating) {
+                DataType::Float64
+            } else if types.contains(&DataType::Int64) {
+                DataType::Int64
+            } else {
+                DataType::Int32
+            };
+            (
+                cast(value, output.clone()),
+                cast(origin, output.clone()),
+                cast(size, output.clone()),
+                output,
+            )
+        };
+        if output.is_floating() {
+            let size =
+                when(size.clone().gt(lit(0.0)), size).otherwise(lit(ScalarValue::Float64(None)))?;
+            return Ok(origin.clone()
+                + self.function("floor", vec![(value - origin) / size.clone()])? * size);
+        }
+        let wide = DataType::Decimal128(38, 0);
+        let (value, origin, size) = (
+            cast(value, wide.clone()),
+            cast(origin, wide.clone()),
+            cast(size, wide.clone()),
+        );
+        let zero = cast(lit(0_i64), wide.clone());
+        let size = when(size.clone().gt(zero.clone()), size)
+            .otherwise(lit(ScalarValue::try_from(&wide)?))?;
+        let difference = value - origin.clone();
+        let remainder = difference.clone() % size.clone();
+        let remainder =
+            when(remainder.clone().lt(zero), remainder.clone() + size).otherwise(remainder)?;
+        let result = origin + difference - remainder;
+        Ok(if temporal {
+            cast(try_cast(result, DataType::Int64), output)
+        } else {
+            try_cast(result, output)
+        })
     }
 
     fn bin(&self, value: Expr, size: Expr, schema: &DFSchema, span: Span) -> Result<Expr> {
@@ -655,6 +1334,10 @@ impl Expressions<'_> {
         let duration = matches!(ty, DataType::Duration(_));
         let numeric = if duration {
             DataType::Int64
+        } else if ty.is_floating() || size.get_type(schema)?.is_floating() {
+            DataType::Float64
+        } else if ty == DataType::Int64 || size.get_type(schema)? == DataType::Int64 {
+            DataType::Int64
         } else {
             ty.clone()
         };
@@ -675,7 +1358,7 @@ impl Expressions<'_> {
                 numeric.clone(),
             )
         } else {
-            value
+            cast(value, numeric.clone())
         };
         let size = if duration {
             let Some(size) = self.duration_constant(size, span)? else {

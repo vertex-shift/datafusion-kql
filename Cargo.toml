@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-kql"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.94"
 description = "A native Kusto Query Language frontend for Apache DataFusion"
@@ -14,20 +14,24 @@ default = ["parquet"]
 parquet = ["datafusion/parquet"]
 
 [dependencies]
+async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 datafusion = { version = "55.2.0", default-features = false, features = [
     "datetime_expressions",
     "math_expressions",
+    "nested_expressions",
     "recursive_protection",
     "regex_expressions",
     "string_expressions",
     "unicode_expressions",
 ] }
+futures = "0.3"
 regex = "1"
+serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync"] }
 
 [dev-dependencies]
-async-trait = "0.1"
 criterion = { version = "0.7", features = ["async_tokio"] }
 datafusion = { version = "55.2.0", default-features = false, features = ["sql"] }
 tempfile = "3"

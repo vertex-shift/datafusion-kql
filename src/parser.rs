@@ -39,6 +39,7 @@ pub fn parse_with_options(query: &str, options: &ParserOptions) -> Result<Query>
         tokens: lex(query)?,
         pos: 0,
         nesting: 0,
+        dynamic_depth: 0,
         options,
     };
     let result = parser.query()?;
@@ -50,6 +51,7 @@ struct Parser<'a, 'o> {
     tokens: Vec<Token<'a>>,
     pos: usize,
     nesting: usize,
+    dynamic_depth: usize,
     options: &'o ParserOptions,
 }
 
@@ -156,12 +158,50 @@ impl<'a> Parser<'a, '_> {
 
     fn query(&mut self) -> Result<Query> {
         self.enter()?;
+        let bindings = self.bindings()?;
+        let pipeline = self.pipeline()?;
+        self.eat(Kind::Semi);
+        if !matches!(self.current().kind, Kind::Eof | Kind::RParen | Kind::RBrace) {
+            return Err(self.expected("'|' or the end of the query"));
+        }
+        self.nesting -= 1;
+        Ok(Query { bindings, pipeline })
+    }
+
+    fn bindings(&mut self) -> Result<Vec<Binding>> {
         let mut bindings = Vec::new();
-        while self.eat_keyword("let") {
-            let start = self.tokens[self.pos - 1].span.start;
+        while self.keyword("let") || self.keyword("declare") {
+            let start = self.current().span.start;
+            if self.eat_keyword("declare") {
+                self.expect_keyword("query_parameters")?;
+                self.expect(Kind::LParen)?;
+                loop {
+                    let name = self.identifier()?;
+                    self.expect(Kind::Colon)?;
+                    let ty = self.scalar_type()?;
+                    let default = self.parameter_default(ty)?;
+                    bindings.push(Binding {
+                        name,
+                        value: BindingValue::Parameter { ty, default },
+                        span: Span::new(start, self.tokens[self.pos - 1].span.end),
+                    });
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Kind::RParen)?;
+                self.expect(Kind::Semi)?;
+                if bindings.len() > self.options.max_pipeline_operators {
+                    return Err(self.expected("fewer query declarations"));
+                }
+                continue;
+            }
+            self.expect_keyword("let")?;
             let name = self.identifier()?;
             self.expect(Kind::Assign)?;
-            let value = if self.looks_tabular() {
+            let value = if self.looks_function() {
+                BindingValue::Function(Box::new(self.function()?))
+            } else if self.looks_tabular() {
                 BindingValue::Tabular(self.pipeline()?)
             } else {
                 BindingValue::Scalar(self.expr(0)?)
@@ -177,13 +217,146 @@ impl<'a> Parser<'a, '_> {
                 return Err(Error::syntax("too many let bindings", self.current().span));
             }
         }
-        let pipeline = self.pipeline()?;
-        self.eat(Kind::Semi);
-        if !matches!(self.current().kind, Kind::Eof | Kind::RParen) {
-            return Err(self.expected("'|' or the end of the query"));
+        Ok(bindings)
+    }
+
+    fn scalar_type(&mut self) -> Result<ScalarType> {
+        let span = self.current().span;
+        let name = self.identifier()?;
+        ScalarType::parse(&name)
+            .ok_or_else(|| Error::unsupported(format!("scalar type '{name}'"), span))
+    }
+
+    fn parameter_default(&mut self, ty: ScalarType) -> Result<Option<Expr>> {
+        if !self.eat(Kind::Assign) {
+            return Ok(None);
         }
+        let value = self.expr(0)?;
+        fn literal(expr: &Expr) -> bool {
+            match &expr.kind {
+                ExprKind::Literal(_) => true,
+                ExprKind::Call { name, args } => {
+                    ScalarType::parse(name).is_some() && args.len() == 1 && literal(&args[0])
+                }
+                ExprKind::Unary {
+                    op: UnaryOp::Negate | UnaryOp::Plus,
+                    expr,
+                } => literal(expr),
+                _ => false,
+            }
+        }
+        if ty == ScalarType::Dynamic || !literal(&value) {
+            return Err(Error::syntax(
+                "parameter defaults must be non-dynamic scalar literals",
+                value.span,
+            ));
+        }
+        Ok(Some(value))
+    }
+
+    fn looks_function(&self) -> bool {
+        if !self.at(&Kind::LParen) {
+            return false;
+        }
+        let mut depth = 0;
+        for (i, token) in self.tokens[self.pos..].iter().enumerate() {
+            match token.kind {
+                Kind::LParen => depth += 1,
+                Kind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return self
+                            .tokens
+                            .get(self.pos + i + 1)
+                            .is_some_and(|next| matches!(next.kind, Kind::LBrace));
+                    }
+                }
+                Kind::Eof => break,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn function(&mut self) -> Result<Function> {
+        self.enter()?;
+        self.expect(Kind::LParen)?;
+        let mut parameters = Vec::new();
+        let mut names = std::collections::HashSet::new();
+        let mut scalar_seen = false;
+        let mut optional_seen = false;
+        if !self.at(&Kind::RParen) {
+            loop {
+                let start = self.current().span.start;
+                let name = self.identifier()?;
+                if !names.insert(name.clone()) {
+                    return Err(self.expected("a unique function parameter name"));
+                }
+                self.expect(Kind::Colon)?;
+                let (ty, default) = if self.eat(Kind::LParen) {
+                    if scalar_seen {
+                        return Err(self.expected("tabular parameters before scalar parameters"));
+                    }
+                    let columns = if self.eat(Kind::Star) {
+                        None
+                    } else {
+                        let mut columns = Vec::new();
+                        let mut names = std::collections::HashSet::new();
+                        loop {
+                            let name = self.identifier()?;
+                            if !names.insert(name.clone()) {
+                                return Err(self.expected("a unique parameter column name"));
+                            }
+                            self.expect(Kind::Colon)?;
+                            columns.push((name, self.scalar_type()?));
+                            if !self.eat(Kind::Comma) {
+                                break;
+                            }
+                        }
+                        Some(columns)
+                    };
+                    self.expect(Kind::RParen)?;
+                    (ParameterType::Tabular(columns), None)
+                } else {
+                    scalar_seen = true;
+                    let ty = self.scalar_type()?;
+                    let default = self.parameter_default(ty)?;
+                    if optional_seen && default.is_none() {
+                        return Err(self.expected("required parameters before optional parameters"));
+                    }
+                    optional_seen |= default.is_some();
+                    (ParameterType::Scalar(ty), default)
+                };
+                parameters.push(FunctionParameter {
+                    name,
+                    ty,
+                    default,
+                    span: Span::new(start, self.tokens[self.pos - 1].span.end),
+                });
+                if parameters.len() > 128 {
+                    return Err(self.expected("at most 128 function parameters"));
+                }
+                if !self.eat(Kind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(Kind::RParen)?;
+        self.expect(Kind::LBrace)?;
+        let bindings = self.bindings()?;
+        let body = if self.looks_tabular() {
+            FunctionBody::Tabular(self.pipeline()?)
+        } else {
+            FunctionBody::Scalar(self.expr(0)?)
+        };
+        self.eat(Kind::Semi);
+        self.expect(Kind::RBrace)?;
         self.nesting -= 1;
-        Ok(Query { bindings, pipeline })
+        Ok(Function {
+            parameters,
+            bindings,
+            body,
+        })
     }
 
     fn looks_tabular(&self) -> bool {
@@ -193,14 +366,28 @@ impl<'a> Parser<'a, '_> {
         }
         if matches!(
             self.tokens[at].kind,
-            Kind::Ident("print" | "datatable" | "union" | "range" | "let")
+            Kind::Ident("print" | "datatable" | "union" | "let" | "declare")
         ) {
             return true;
         }
-        self.tokens[self.pos..]
-            .iter()
-            .take_while(|t| !matches!(t.kind, Kind::Semi | Kind::Eof))
-            .any(|t| matches!(t.kind, Kind::Pipe))
+        if matches!(self.tokens[at].kind, Kind::Ident("range"))
+            && !matches!(self.tokens.get(at + 1).map(|t| &t.kind), Some(Kind::LParen))
+        {
+            return true;
+        }
+        let mut depth = 0;
+        for token in &self.tokens[self.pos..] {
+            match token.kind {
+                Kind::Pipe => return true,
+                Kind::LParen | Kind::LBracket | Kind::LBrace => depth += 1,
+                Kind::RParen | Kind::RBracket | Kind::RBrace if depth == 0 => break,
+                Kind::RParen | Kind::RBracket | Kind::RBrace => depth -= 1,
+                Kind::Semi | Kind::Eof => break,
+                Kind::Comma if depth == 0 => break,
+                _ => {}
+            }
+        }
+        false
     }
 
     fn pipeline(&mut self) -> Result<Pipeline> {
@@ -243,18 +430,91 @@ impl<'a> Parser<'a, '_> {
                 step: Box::new(step),
             }
         } else if self.eat_keyword("union") {
-            let (kind, inputs) = self.union_inputs()?;
-            Source::Union { kind, inputs }
+            let (kind, withsource, inputs) = self.union_inputs()?;
+            Source::Union {
+                kind,
+                withsource,
+                inputs,
+            }
         } else {
             let start = self.current().span.start;
-            let name = self.path()?;
-            Source::Table {
-                name,
-                span: Span::new(start, self.tokens[self.pos - 1].span.end),
+            if self.at(&Kind::Star) {
+                let pattern = self.pattern_one()?;
+                Source::Pattern {
+                    prefix: Vec::new(),
+                    pattern,
+                    span: Span::new(start, self.tokens[self.pos - 1].span.end),
+                }
+            } else {
+                let mut name = vec![self.identifier()?];
+                while self.eat(Kind::Dot) {
+                    if self.at(&Kind::Star) {
+                        name.push(String::new());
+                        break;
+                    }
+                    name.push(self.identifier()?);
+                }
+                if self.at(&Kind::Star) {
+                    let mut pattern = name.pop().ok_or_else(|| self.expected("table pattern"))?;
+                    pattern.push_str(&self.pattern_one()?);
+                    Source::Pattern {
+                        prefix: name,
+                        pattern,
+                        span: Span::new(start, self.tokens[self.pos - 1].span.end),
+                    }
+                } else if name.len() == 1 && self.at(&Kind::LParen) {
+                    Source::Call {
+                        name: name.remove(0),
+                        args: self.source_arguments()?,
+                        span: Span::new(start, self.tokens[self.pos - 1].span.end),
+                    }
+                } else {
+                    Source::Table {
+                        name,
+                        span: Span::new(start, self.tokens[self.pos - 1].span.end),
+                    }
+                }
             }
         };
         self.nesting -= 1;
         Ok(source)
+    }
+
+    fn source_arguments(&mut self) -> Result<Vec<CallArgument>> {
+        self.expect(Kind::LParen)?;
+        let mut args = Vec::new();
+        if !self.at(&Kind::RParen) {
+            loop {
+                let name = if matches!(self.current().kind, Kind::Ident(_))
+                    && self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == Kind::Assign)
+                {
+                    let name = self.identifier()?;
+                    self.expect(Kind::Assign)?;
+                    Some(name)
+                } else {
+                    None
+                };
+                let value = if self.looks_tabular() {
+                    let parenthesized = self.eat(Kind::LParen);
+                    let query = self.query()?;
+                    if parenthesized {
+                        self.expect(Kind::RParen)?;
+                    }
+                    ArgumentValue::Tabular(Box::new(query))
+                } else {
+                    ArgumentValue::Scalar(self.expr(0)?)
+                };
+                args.push(CallArgument { name, value });
+                if !self.eat(Kind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(Kind::RParen)?;
+        Ok(args)
     }
 
     fn datatable(&mut self) -> Result<Source> {
@@ -297,25 +557,41 @@ impl<'a> Parser<'a, '_> {
         Ok(Source::Datatable { columns, values })
     }
 
-    fn union_inputs(&mut self) -> Result<(UnionKind, Vec<Source>)> {
-        let kind = if self.eat_keyword("kind") {
+    fn union_inputs(&mut self) -> Result<(UnionKind, Option<String>, Vec<Source>)> {
+        let mut kind = UnionKind::Outer;
+        let mut withsource = None;
+        while self.keyword("kind") || self.keyword("withsource") || self.keyword("isfuzzy") {
+            let parameter = self.identifier()?;
             self.expect(Kind::Assign)?;
             let span = self.current().span;
-            match self.identifier()?.as_str() {
-                "outer" => UnionKind::Outer,
-                "inner" => UnionKind::Inner,
-                other => {
-                    return Err(Error::unsupported(format!("union kind '{other}'"), span));
+            if parameter == "withsource" {
+                if withsource.is_some() {
+                    return Err(Error::syntax("duplicate withsource parameter", span));
                 }
+                withsource = Some(self.identifier()?);
+            } else if parameter == "isfuzzy" {
+                if self.eat_keyword("true") {
+                    return Err(Error::unsupported(
+                        "fuzzy unions require a warning result channel",
+                        span,
+                    ));
+                }
+                self.expect_keyword("false")?;
+            } else {
+                kind = match self.identifier()?.as_str() {
+                    "outer" => UnionKind::Outer,
+                    "inner" => UnionKind::Inner,
+                    other => {
+                        return Err(Error::unsupported(format!("union kind '{other}'"), span));
+                    }
+                };
             }
-        } else {
-            UnionKind::Outer
-        };
+        }
         let mut inputs = vec![self.source()?];
         while self.eat(Kind::Comma) {
             inputs.push(self.source()?);
         }
-        Ok((kind, inputs))
+        Ok((kind, withsource, inputs))
     }
 
     fn operator(&mut self) -> Result<SpannedOperator> {
@@ -327,11 +603,249 @@ impl<'a> Parser<'a, '_> {
         }
         let kind = match name.as_str() {
             "where" | "filter" => Operator::Where(self.expr(0)?),
-            "take" | "limit" => Operator::Take(self.row_count()?),
+            "take" | "limit" => Operator::Take(self.row_count_expression()?),
             "project" => Operator::Project(self.named_list()?),
             "extend" => Operator::Extend(self.named_list()?),
+            "serialize" => Operator::Serialize(
+                if matches!(
+                    self.current().kind,
+                    Kind::Pipe | Kind::Semi | Kind::RParen | Kind::RBrace | Kind::Eof
+                ) {
+                    Vec::new()
+                } else {
+                    self.named_list()?
+                },
+            ),
+            "invoke" => {
+                let name = self.identifier()?;
+                let args = self.source_arguments()?;
+                Operator::Invoke { name, args }
+            }
+            "parse" | "parse-where" => {
+                let kind = if self.eat_keyword("kind") {
+                    self.expect(Kind::Assign)?;
+                    let span = self.current().span;
+                    match self.identifier()?.as_str() {
+                        "simple" => ParseKind::Simple,
+                        "regex" => ParseKind::Regex,
+                        "relaxed" => ParseKind::Relaxed,
+                        _ => {
+                            return Err(Error::syntax(
+                                "parse kind must be simple, regex, or relaxed",
+                                span,
+                            ));
+                        }
+                    }
+                } else {
+                    ParseKind::Simple
+                };
+                let flags = if self.eat_keyword("flags") {
+                    if kind != ParseKind::Regex {
+                        return Err(self.expected("kind=regex for flags"));
+                    }
+                    self.expect(Kind::Assign)?;
+                    if let Kind::String(value) = self.current().kind.clone() {
+                        self.advance();
+                        value.into_owned()
+                    } else {
+                        self.identifier()?
+                    }
+                } else {
+                    String::new()
+                };
+                let input = self.expr(0)?;
+                self.expect_keyword("with")?;
+                let mut pattern = Vec::new();
+                let mut names = std::collections::HashSet::new();
+                while !matches!(
+                    self.current().kind,
+                    Kind::Pipe | Kind::Semi | Kind::RParen | Kind::RBrace | Kind::Eof
+                ) {
+                    let part = match self.current().kind.clone() {
+                        Kind::Star => {
+                            self.advance();
+                            ParsePart::Wildcard
+                        }
+                        Kind::String(value) => {
+                            self.advance();
+                            ParsePart::Literal(value.into_owned())
+                        }
+                        _ => {
+                            let span = self.current().span;
+                            let name = self.identifier()?;
+                            if !names.insert(name.clone()) {
+                                return Err(Error::syntax("duplicate parse column", span));
+                            }
+                            let ty = if self.eat(Kind::Colon) {
+                                let name = self.identifier()?;
+                                ScalarType::parse(&name).ok_or_else(|| {
+                                    Error::unsupported(format!("parse type '{name}'"), span)
+                                })?
+                            } else {
+                                ScalarType::String
+                            };
+                            if ty == ScalarType::Dynamic {
+                                return Err(Error::unsupported(
+                                    "parse dynamic captures; use parse_json after extracting a string",
+                                    span,
+                                ));
+                            }
+                            ParsePart::Capture { name, ty }
+                        }
+                    };
+                    pattern.push(part);
+                    if pattern.len() > 256 {
+                        return Err(Error::syntax(
+                            "parse pattern limit exceeded",
+                            self.current().span,
+                        ));
+                    }
+                }
+                if pattern.is_empty() {
+                    return Err(self.expected("a parse pattern"));
+                }
+                Operator::Parse {
+                    input,
+                    kind,
+                    flags,
+                    pattern,
+                    filter: name == "parse-where",
+                }
+            }
+            "mv-expand" | "mvexpand" => {
+                let mut array_mode = false;
+                let mut index = None;
+                while self.keyword("kind")
+                    || self.keyword("bagexpansion")
+                    || self.keyword("with_itemindex")
+                {
+                    let parameter = self.identifier()?;
+                    self.expect(Kind::Assign)?;
+                    if parameter == "with_itemindex" {
+                        if index.is_some() {
+                            return Err(self.expected("only one with_itemindex"));
+                        }
+                        index = Some(self.identifier()?);
+                    } else {
+                        let span = self.current().span;
+                        array_mode = match self.identifier()?.as_str() {
+                            "bag" => false,
+                            "array" => true,
+                            _ => {
+                                return Err(Error::syntax(
+                                    "mv-expand kind must be bag or array",
+                                    span,
+                                ));
+                            }
+                        };
+                    }
+                }
+                let mut columns = Vec::new();
+                loop {
+                    let value = self.named_expr()?;
+                    let ty = if self.eat_keyword("to") {
+                        self.expect_keyword("typeof")?;
+                        self.expect(Kind::LParen)?;
+                        let span = self.current().span;
+                        let name = self.identifier()?;
+                        let ty = ScalarType::parse(&name).ok_or_else(|| {
+                            Error::unsupported(format!("scalar type '{name}'"), span)
+                        })?;
+                        self.expect(Kind::RParen)?;
+                        Some(ty)
+                    } else {
+                        None
+                    };
+                    columns.push(ExpandColumn { value, ty });
+                    if columns.len() > 128 {
+                        return Err(Error::syntax(
+                            "mv-expand column limit exceeded",
+                            self.current().span,
+                        ));
+                    }
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                }
+                let limit = if self.eat_keyword("limit") {
+                    self.row_count()?
+                } else if name == "mvexpand" {
+                    128
+                } else {
+                    2_147_483_647
+                };
+                Operator::MvExpand {
+                    array_mode,
+                    index,
+                    columns,
+                    limit,
+                }
+            }
             "project-away" => Operator::ProjectAway(self.pattern_list()?),
             "project-keep" => Operator::ProjectKeep(self.pattern_list()?),
+            "project-reorder" => {
+                let mut columns = Vec::new();
+                if !matches!(
+                    self.current().kind,
+                    Kind::Pipe | Kind::Semi | Kind::RParen | Kind::Eof
+                ) {
+                    loop {
+                        let pattern = self.pattern_one()?;
+                        let natural = self.eat_keyword("granny");
+                        if natural {
+                            self.expect(Kind::Minus)?;
+                        }
+                        let order = if self.eat_keyword("asc") {
+                            Some((true, natural))
+                        } else if self.eat_keyword("desc") {
+                            Some((false, natural))
+                        } else if natural {
+                            return Err(self.expected("asc or desc after granny-"));
+                        } else {
+                            None
+                        };
+                        columns.push(ReorderColumn { pattern, order });
+                        if !self.eat(Kind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                Operator::ProjectReorder(columns)
+            }
+            "getschema" => Operator::GetSchema,
+            "as" => {
+                let materialized = if self.eat_keyword("hint") {
+                    self.expect(Kind::Dot)?;
+                    self.expect_keyword("materialized")?;
+                    self.expect(Kind::Assign)?;
+                    if self.eat_keyword("true") {
+                        true
+                    } else {
+                        self.expect_keyword("false")?;
+                        false
+                    }
+                } else {
+                    false
+                };
+                let name = self.identifier()?;
+                if materialized {
+                    Operator::AsMaterialized(name)
+                } else {
+                    Operator::As(name)
+                }
+            }
+            "sample" => Operator::Sample {
+                count: self.row_count_expression()?,
+                distinct: None,
+            },
+            "sample-distinct" => {
+                let count = self.row_count_expression()?;
+                self.expect_keyword("of")?;
+                Operator::Sample {
+                    count,
+                    distinct: Some(self.expr(0)?),
+                }
+            }
             "project-rename" => {
                 let mut renames = Vec::new();
                 loop {
@@ -358,6 +872,72 @@ impl<'a> Parser<'a, '_> {
                 };
                 Operator::Summarize { aggregates, by }
             }
+            "make-series" => {
+                let nonempty = if self.eat_keyword("kind") {
+                    self.expect(Kind::Assign)?;
+                    self.expect_keyword("nonempty")?;
+                    true
+                } else {
+                    false
+                };
+                let mut aggregates = Vec::new();
+                loop {
+                    let value = self.named_expr()?;
+                    let default = if self.eat_keyword("default") {
+                        self.expect(Kind::Assign)?;
+                        Some(self.expr(0)?)
+                    } else {
+                        None
+                    };
+                    aggregates.push(SeriesAggregation { value, default });
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                }
+                self.expect_keyword("on")?;
+                let axis = self.expr(4)?;
+                let (from, to, step, inclusive, align_to_start) = if self.eat_keyword("in") {
+                    self.expect_keyword("range")?;
+                    self.expect(Kind::LParen)?;
+                    let from = self.expr(0)?;
+                    self.expect(Kind::Comma)?;
+                    let to = self.expr(0)?;
+                    self.expect(Kind::Comma)?;
+                    let step = self.expr(0)?;
+                    self.expect(Kind::RParen)?;
+                    (Some(from), Some(to), step, true, false)
+                } else {
+                    let from = if self.eat_keyword("from") {
+                        Some(self.expr(0)?)
+                    } else {
+                        None
+                    };
+                    let to = if self.eat_keyword("to") {
+                        Some(self.expr(0)?)
+                    } else {
+                        None
+                    };
+                    self.expect_keyword("step")?;
+                    let step = self.expr(0)?;
+                    (from, to, step, false, true)
+                };
+                let by = if self.eat_keyword("by") {
+                    self.named_list()?
+                } else {
+                    Vec::new()
+                };
+                Operator::MakeSeries(Box::new(MakeSeries {
+                    aggregates,
+                    axis,
+                    from,
+                    to,
+                    step,
+                    by,
+                    nonempty,
+                    inclusive,
+                    align_to_start,
+                }))
+            }
             "sort" | "order" => {
                 self.expect_keyword("by")?;
                 let mut keys = vec![self.sort_key()?];
@@ -367,7 +947,7 @@ impl<'a> Parser<'a, '_> {
                 Operator::Sort(keys)
             }
             "top" => {
-                let count = self.row_count()?;
+                let count = self.row_count_expression()?;
                 self.expect_keyword("by")?;
                 Operator::Top {
                     count,
@@ -382,10 +962,15 @@ impl<'a> Parser<'a, '_> {
                 Operator::Distinct(expressions)
             }
             "count" => Operator::Count,
-            "join" => self.join()?,
+            "join" => self.join(false)?,
+            "lookup" => self.join(true)?,
             "union" => {
-                let (kind, inputs) = self.union_inputs()?;
-                Operator::Union { kind, inputs }
+                let (kind, withsource, inputs) = self.union_inputs()?;
+                Operator::Union {
+                    kind,
+                    withsource,
+                    inputs,
+                }
             }
             _ => {
                 return Err(Error::unsupported(
@@ -413,27 +998,52 @@ impl<'a> Parser<'a, '_> {
         }
     }
 
+    fn row_count_expression(&mut self) -> Result<Expr> {
+        let expr = self.expr(0)?;
+        if matches!(
+            &expr.kind,
+            ExprKind::Literal(Literal::Real(_))
+                | ExprKind::Unary {
+                    op: UnaryOp::Negate,
+                    ..
+                }
+        ) {
+            return Err(Error::syntax(
+                "row count must be a nonnegative integer",
+                expr.span,
+            ));
+        }
+        Ok(expr)
+    }
+
     fn pattern_list(&mut self) -> Result<Vec<String>> {
         let mut patterns = Vec::new();
         loop {
-            let mut pattern = if self.at(&Kind::Star) {
-                String::new()
-            } else {
-                self.identifier()?
-            };
-            while self.eat(Kind::Star) {
-                pattern.push('*');
-                if let Kind::Ident(text) = self.current().kind {
-                    pattern.push_str(text);
-                    self.advance();
-                }
-            }
+            let pattern = self.pattern_one()?;
             patterns.push(pattern);
             if !self.eat(Kind::Comma) {
                 break;
             }
         }
         Ok(patterns)
+    }
+
+    fn pattern_one(&mut self) -> Result<String> {
+        let mut pattern = if self.at(&Kind::Star) {
+            String::new()
+        } else {
+            self.identifier()?
+        };
+        while self.eat(Kind::Star) {
+            pattern.push('*');
+            if let Kind::Ident(text) = self.current().kind
+                && self.current().span.start == self.tokens[self.pos - 1].span.end
+            {
+                pattern.push_str(text);
+                self.advance();
+            }
+        }
+        Ok(pattern)
     }
 
     fn named_list(&mut self) -> Result<Vec<NamedExpr>> {
@@ -494,7 +1104,7 @@ impl<'a> Parser<'a, '_> {
         })
     }
 
-    fn join(&mut self) -> Result<Operator> {
+    fn join(&mut self, lookup: bool) -> Result<Operator> {
         let kind = if self.eat_keyword("kind") {
             self.expect(Kind::Assign)?;
             let span = self.current().span;
@@ -513,8 +1123,18 @@ impl<'a> Parser<'a, '_> {
                 }
             }
         } else {
-            JoinKind::InnerUnique
+            if lookup {
+                JoinKind::LeftOuter
+            } else {
+                JoinKind::InnerUnique
+            }
         };
+        if lookup && !matches!(kind, JoinKind::LeftOuter | JoinKind::Inner) {
+            return Err(Error::syntax(
+                "lookup kind must be leftouter or inner",
+                self.current().span,
+            ));
+        }
         let input = if self.eat(Kind::LParen) {
             let input = self.query()?;
             self.expect(Kind::RParen)?;
@@ -559,10 +1179,18 @@ impl<'a> Parser<'a, '_> {
                 break;
             }
         }
-        Ok(Operator::Join {
-            kind,
-            input: Box::new(input),
-            keys,
+        Ok(if lookup {
+            Operator::Lookup {
+                kind,
+                input: Box::new(input),
+                keys,
+            }
+        } else {
+            Operator::Join {
+                kind,
+                input: Box::new(input),
+                keys,
+            }
         })
     }
 
@@ -577,6 +1205,41 @@ impl<'a> Parser<'a, '_> {
         self.enter()?;
         let mut left = self.prefix()?;
         loop {
+            if self.eat(Kind::LBracket) {
+                let index = self.expr(0)?;
+                self.expect(Kind::RBracket)?;
+                let span = Span::new(left.span.start, self.tokens[self.pos - 1].span.end);
+                let depth = left.depth.max(index.depth) + 1;
+                left = self.node(
+                    ExprKind::Access {
+                        expr: Box::new(left),
+                        index: Box::new(index),
+                    },
+                    span,
+                    depth,
+                )?;
+                continue;
+            }
+            if self.eat(Kind::Dot) {
+                let start = self.current().span.start;
+                let name = self.identifier()?;
+                let index = self.node(
+                    ExprKind::Literal(Literal::String(name)),
+                    Span::new(start, self.tokens[self.pos - 1].span.end),
+                    1,
+                )?;
+                let span = Span::new(left.span.start, index.span.end);
+                let depth = left.depth + 1;
+                left = self.node(
+                    ExprKind::Access {
+                        expr: Box::new(left),
+                        index: Box::new(index),
+                    },
+                    span,
+                    depth,
+                )?;
+                continue;
+            }
             let negated = self.at(&Kind::Bang);
             let next = if negated { self.pos + 1 } else { self.pos };
             let keyword = match self.tokens.get(next).map(|t| &t.kind) {
@@ -689,13 +1352,56 @@ impl<'a> Parser<'a, '_> {
             Kind::Ident("true") => ExprKind::Literal(Literal::Bool(true)),
             Kind::Ident("false") => ExprKind::Literal(Literal::Bool(false)),
             Kind::Ident("null") => ExprKind::Literal(Literal::Null),
+            Kind::Ident("typeof") => {
+                self.expect(Kind::LParen)?;
+                let token = self.current().span;
+                let name = self.identifier()?;
+                let ty = ScalarType::parse(&name)
+                    .ok_or_else(|| Error::unsupported(format!("scalar type '{name}'"), token))?;
+                self.expect(Kind::RParen)?;
+                ExprKind::Type(ty)
+            }
+            Kind::Ident("dynamic") => {
+                self.expect(Kind::LParen)?;
+                self.dynamic_depth += 1;
+                let value = self.expr(0)?;
+                self.dynamic_depth -= 1;
+                self.expect(Kind::RParen)?;
+                let depth = value.depth + 1;
+                return self.node(
+                    ExprKind::Dynamic(Box::new(value)),
+                    Span::new(span.start, self.tokens[self.pos - 1].span.end),
+                    depth,
+                );
+            }
             Kind::Ident(name) => {
                 let name = name.to_owned();
                 if self.eat(Kind::LParen) {
                     let mut args = Vec::new();
                     if !self.at(&Kind::RParen) {
                         loop {
-                            args.push(self.expr(0)?);
+                            let argument = if matches!(self.current().kind, Kind::Ident(_))
+                                && self
+                                    .tokens
+                                    .get(self.pos + 1)
+                                    .is_some_and(|t| t.kind == Kind::Assign)
+                            {
+                                let start = self.current().span.start;
+                                let name = self.identifier()?;
+                                self.expect(Kind::Assign)?;
+                                let value = self.expr(0)?;
+                                self.node(
+                                    ExprKind::NamedArgument {
+                                        name,
+                                        value: Box::new(value.clone()),
+                                    },
+                                    Span::new(start, value.span.end),
+                                    value.depth + 1,
+                                )?
+                            } else {
+                                self.expr(0)?
+                            };
+                            args.push(argument);
                             if !self.eat(Kind::Comma) {
                                 break;
                             }
@@ -714,6 +1420,51 @@ impl<'a> Parser<'a, '_> {
                     parts.push(self.identifier()?);
                 }
                 ExprKind::Identifier(parts)
+            }
+            Kind::LBracket if self.dynamic_depth > 0 => {
+                let mut items = Vec::new();
+                if !self.at(&Kind::RBracket) {
+                    loop {
+                        items.push(self.expr(0)?);
+                        if !self.eat(Kind::Comma) || self.at(&Kind::RBracket) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(Kind::RBracket)?;
+                let depth = items.iter().map(|e| e.depth).max().unwrap_or(0) + 1;
+                return self.node(
+                    ExprKind::Array(items),
+                    Span::new(span.start, self.tokens[self.pos - 1].span.end),
+                    depth,
+                );
+            }
+            Kind::LBrace if self.dynamic_depth > 0 => {
+                let mut items = Vec::new();
+                if !self.at(&Kind::RBrace) {
+                    loop {
+                        let token = self.advance();
+                        let Kind::String(name) = token.kind else {
+                            return Err(Error::syntax(
+                                "dynamic object keys must be strings",
+                                token.span,
+                            ));
+                        };
+                        let name = name.into_owned();
+                        self.expect(Kind::Colon)?;
+                        items.push((name, self.expr(0)?));
+                        if !self.eat(Kind::Comma) || self.at(&Kind::RBrace) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(Kind::RBrace)?;
+                let depth = items.iter().map(|(_, e)| e.depth).max().unwrap_or(0) + 1;
+                return self.node(
+                    ExprKind::Object(items),
+                    Span::new(span.start, self.tokens[self.pos - 1].span.end),
+                    depth,
+                );
             }
             Kind::LBracket => {
                 self.pos -= 1;

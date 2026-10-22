@@ -14,6 +14,7 @@ pub(crate) fn data_type(ty: ScalarType) -> DataType {
         ScalarType::String => DataType::Utf8,
         ScalarType::Datetime => DataType::Timestamp(TimeUnit::Nanosecond, None),
         ScalarType::Timespan => DataType::Duration(TimeUnit::Nanosecond),
+        ScalarType::Dynamic => crate::dynamic::data_type(),
     }
 }
 
