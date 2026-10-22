@@ -56,6 +56,15 @@ pub(crate) fn prepare(
                 item.expr = windows.rewrite(&item.expr)?;
             }
         }
+        Operator::MakeSeries(series) => {
+            for aggregate in &mut series.aggregates {
+                aggregate.value.expr = windows.rewrite(&aggregate.value.expr)?;
+            }
+            for group in &mut series.by {
+                group.expr = windows.rewrite(&group.expr)?;
+            }
+            series.axis = windows.rewrite(&series.axis)?;
+        }
         Operator::Sort(keys) => {
             for key in keys {
                 key.expr = windows.rewrite(&key.expr)?;

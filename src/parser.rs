@@ -624,6 +624,72 @@ impl<'a> Parser<'a, '_> {
                 };
                 Operator::Summarize { aggregates, by }
             }
+            "make-series" => {
+                let nonempty = if self.eat_keyword("kind") {
+                    self.expect(Kind::Assign)?;
+                    self.expect_keyword("nonempty")?;
+                    true
+                } else {
+                    false
+                };
+                let mut aggregates = Vec::new();
+                loop {
+                    let value = self.named_expr()?;
+                    let default = if self.eat_keyword("default") {
+                        self.expect(Kind::Assign)?;
+                        Some(self.expr(0)?)
+                    } else {
+                        None
+                    };
+                    aggregates.push(SeriesAggregation { value, default });
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                }
+                self.expect_keyword("on")?;
+                let axis = self.expr(4)?;
+                let (from, to, step, inclusive, align_to_start) = if self.eat_keyword("in") {
+                    self.expect_keyword("range")?;
+                    self.expect(Kind::LParen)?;
+                    let from = self.expr(0)?;
+                    self.expect(Kind::Comma)?;
+                    let to = self.expr(0)?;
+                    self.expect(Kind::Comma)?;
+                    let step = self.expr(0)?;
+                    self.expect(Kind::RParen)?;
+                    (Some(from), Some(to), step, true, false)
+                } else {
+                    let from = if self.eat_keyword("from") {
+                        Some(self.expr(0)?)
+                    } else {
+                        None
+                    };
+                    let to = if self.eat_keyword("to") {
+                        Some(self.expr(0)?)
+                    } else {
+                        None
+                    };
+                    self.expect_keyword("step")?;
+                    let step = self.expr(0)?;
+                    (from, to, step, false, true)
+                };
+                let by = if self.eat_keyword("by") {
+                    self.named_list()?
+                } else {
+                    Vec::new()
+                };
+                Operator::MakeSeries(Box::new(MakeSeries {
+                    aggregates,
+                    axis,
+                    from,
+                    to,
+                    step,
+                    by,
+                    nonempty,
+                    inclusive,
+                    align_to_start,
+                }))
+            }
             "sort" | "order" => {
                 self.expect_keyword("by")?;
                 let mut keys = vec![self.sort_key()?];

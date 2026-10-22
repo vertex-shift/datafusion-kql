@@ -375,6 +375,7 @@ pub(crate) enum Kernel {
     },
     EncodeWindow,
     DecodeWindow,
+    Series(crate::series_functions::Op),
     Get,
     GetType,
     Convert(DataType),
@@ -446,6 +447,7 @@ impl Kernel {
                 Self::DecodeList { .. } => "decode_ordered_list",
                 Self::EncodeWindow => "window_encode",
                 Self::DecodeWindow => "window_decode",
+                Self::Series(op) => op.name(),
                 Self::Get => "dynamic_get",
                 Self::GetType => "gettype",
                 Self::Convert(DataType::Utf8) => "dynamic_tostring",
@@ -488,6 +490,9 @@ impl Kernel {
     }
 
     fn validate(&self, len: usize) -> Result<()> {
+        if let Self::Series(op) = self {
+            return op.validate(len);
+        }
         let valid = match self {
             Self::IntoDynamic
             | Self::ParseJson
@@ -523,6 +528,7 @@ impl Kernel {
             | Self::SetIntersect => len >= 2,
             Self::Expand { columns, .. } => len >= 1 && len == *columns,
             Self::Coalesce | Self::Membership { .. } => len >= 1,
+            Self::Series(_) => unreachable!("series arity checked above"),
         };
         if valid {
             Ok(())
@@ -879,6 +885,13 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
             value => value.json()?,
         },
         K::EncodeJson => values[0].json()?.to_string().into(),
+        K::Series(op) => crate::series_functions::evaluate(
+            *op,
+            &values
+                .iter()
+                .map(|value| value.json())
+                .collect::<Result<Vec<_>>>()?,
+        )?,
         K::EncodeWindow => {
             let payload = match values[0] {
                 Value::Datetime(value) | Value::Timespan(value) => Json::from(value),

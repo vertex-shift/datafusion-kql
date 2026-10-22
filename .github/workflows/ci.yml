@@ -27,3 +27,4 @@ jobs:
       - run: cargo check --locked --lib --no-default-features
       - run: cargo run --locked --example quickstart
       - run: cargo run --locked --example telemetry_json
+      - run: cargo run --locked --example time_series

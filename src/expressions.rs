@@ -538,6 +538,9 @@ impl Expressions<'_> {
                 ))
             }
         };
+        if let Some(op) = crate::series_functions::Op::lookup(name) {
+            return Ok(dynamic::call(Kernel::Series(op), values));
+        }
         let kernel = match name {
             "parse_json" | "parsejson" | "todynamic" => Some(Kernel::ParseJson),
             "gettype" => Some(Kernel::GetType),
@@ -715,6 +718,16 @@ impl Expressions<'_> {
             }
             "bin" | "floor" if values.len() == 2 => {
                 self.bin(values[0].clone(), values[1].clone(), schema, span)?
+            }
+            "bin_at" => {
+                arity(3)?;
+                self.bin_at(
+                    values[0].clone(),
+                    values[1].clone(),
+                    values[2].clone(),
+                    schema,
+                    span,
+                )?
             }
             "bin" => return Err(Error::syntax("bin expects two arguments", span)),
             "iff" | "iif" => {
@@ -923,6 +936,93 @@ impl Expressions<'_> {
         }
     }
 
+    pub(crate) fn bin_at(
+        &self,
+        value: Expr,
+        size: Expr,
+        origin: Expr,
+        schema: &DFSchema,
+        span: Span,
+    ) -> Result<Expr> {
+        let ty = value.get_type(schema)?;
+        let temporal = matches!(ty, DataType::Timestamp(_, _) | DataType::Duration(_));
+        let (value, origin, size, output) = if temporal {
+            let output = if matches!(ty, DataType::Timestamp(_, _)) {
+                DataType::Timestamp(TimeUnit::Nanosecond, None)
+            } else {
+                DataType::Duration(TimeUnit::Nanosecond)
+            };
+            let width = self.duration_constant(size, span)?;
+            let Some(width) = width.filter(|w| *w > 0) else {
+                return Ok(lit(ScalarValue::try_from(&output)?));
+            };
+            if matches!(ty, DataType::Timestamp(_, _)) && matches!(origin, Expr::Literal(_, _)) {
+                return self.function(
+                    "date_bin",
+                    vec![
+                        lit(ScalarValue::IntervalMonthDayNano(Some(
+                            IntervalMonthDayNano::new(0, 0, width),
+                        ))),
+                        cast(value, output.clone()),
+                        cast(origin, output),
+                    ],
+                );
+            }
+            (
+                cast(cast(value, output.clone()), DataType::Int64),
+                cast(cast(origin, output.clone()), DataType::Int64),
+                lit(width),
+                output,
+            )
+        } else {
+            let types = [ty.clone(), size.get_type(schema)?, origin.get_type(schema)?];
+            if types.iter().any(|ty| !ty.is_integer() && !ty.is_floating()) {
+                return Err(Error::unsupported(
+                    "bin_at requires numeric or temporal values",
+                    span,
+                ));
+            }
+            let output = if types.iter().any(DataType::is_floating) {
+                DataType::Float64
+            } else if types.contains(&DataType::Int64) {
+                DataType::Int64
+            } else {
+                DataType::Int32
+            };
+            (
+                cast(value, output.clone()),
+                cast(origin, output.clone()),
+                cast(size, output.clone()),
+                output,
+            )
+        };
+        if output.is_floating() {
+            let size =
+                when(size.clone().gt(lit(0.0)), size).otherwise(lit(ScalarValue::Float64(None)))?;
+            return Ok(origin.clone()
+                + self.function("floor", vec![(value - origin) / size.clone()])? * size);
+        }
+        let wide = DataType::Decimal128(38, 0);
+        let (value, origin, size) = (
+            cast(value, wide.clone()),
+            cast(origin, wide.clone()),
+            cast(size, wide.clone()),
+        );
+        let zero = cast(lit(0_i64), wide.clone());
+        let size = when(size.clone().gt(zero.clone()), size)
+            .otherwise(lit(ScalarValue::try_from(&wide)?))?;
+        let difference = value - origin.clone();
+        let remainder = difference.clone() % size.clone();
+        let remainder =
+            when(remainder.clone().lt(zero), remainder.clone() + size).otherwise(remainder)?;
+        let result = origin + difference - remainder;
+        Ok(if temporal {
+            cast(try_cast(result, DataType::Int64), output)
+        } else {
+            try_cast(result, output)
+        })
+    }
+
     fn bin(&self, value: Expr, size: Expr, schema: &DFSchema, span: Span) -> Result<Expr> {
         let ty = value.get_type(schema)?;
         if let DataType::Timestamp(_, zone) = &ty {
@@ -945,6 +1045,10 @@ impl Expressions<'_> {
         let duration = matches!(ty, DataType::Duration(_));
         let numeric = if duration {
             DataType::Int64
+        } else if ty.is_floating() || size.get_type(schema)?.is_floating() {
+            DataType::Float64
+        } else if ty == DataType::Int64 || size.get_type(schema)? == DataType::Int64 {
+            DataType::Int64
         } else {
             ty.clone()
         };
@@ -965,7 +1069,7 @@ impl Expressions<'_> {
                 numeric.clone(),
             )
         } else {
-            value
+            cast(value, numeric.clone())
         };
         let size = if duration {
             let Some(size) = self.duration_constant(size, span)? else {

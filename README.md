@@ -15,6 +15,7 @@ and known semantic differences.
 ```bash
 cargo run --example quickstart
 cargo run --example telemetry_json
+cargo run --example time_series
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -122,8 +123,11 @@ window overhead to ordinary analytic queries.
 Lookup, schema introspection, projection reordering, sampling, wildcard table
 sources, and source-labelled/type-splitting unions extend the tabular surface.
 Limits and top-k counts can use constant `let` bindings and arithmetic.
+`make-series` supports sparse native aggregation, exact time/numeric axes,
+defaults and group bounds; series functions add interpolation, statistics,
+line fitting, arithmetic and FIR/IIR processing.
 
-`mv-apply`, `make-series`, management commands, hints, and complete
+`mv-apply`, advanced signal processing, management commands, hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.
 
 ## Architecture and performance

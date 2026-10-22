@@ -48,6 +48,7 @@ column; assignments in a single `extend` resolve against its input.
 | `mv-expand`, `mvexpand` | Arrays and bags, zipped multiple columns, per-row limits, `with_itemindex`, cast-only `to typeof(...)` |
 | `parse`, `parse-where` | Simple, regex, and relaxed patterns; typed captures, regex flags, and strict failure filtering |
 | `serialize` | Freezes row order and supports calculated columns and native window expressions |
+| `make-series` | Numeric/datetime/timespan axes, per-group bounds, defaults, nonempty results, and alternate range syntax |
 
 Joins accept a table or parenthesized query on the right. Keys can be `on Key`
 or `$left.Key == $right.OtherKey`, with comma/`and` conjunctions. The default
@@ -205,6 +206,40 @@ ordered collections. Ordinary filter/aggregate/top-k queries retain native-plan
 parity with SQL. Serialization can limit parallelism, and restart-aware windows
 may require additional repartitioning/sorting.
 
+## Time-series generation and processing
+
+`make-series` uses native grouped aggregation for bins, a second grouped
+aggregation for sparse records, and a batch kernel for array filling. It does
+not cross-join a dense time grid with every input row. Explicit and automatically
+inferred per-group bounds, group expressions, multiple numeric aggregations,
+aggregate arithmetic, default values, empty/nonempty ungrouped results, and
+integer/real/datetime/timespan axes are supported. Main-syntax upper bounds are
+exclusive; alternate `in range(...)` uses inclusive stop and epoch-aligned bins.
+Arrays are limited to 1,048,576 points. Integer axes retain precision beyond
+`2^53`; typed `bin_at` also uses exact wide arithmetic for integral origins.
+
+Explicit starting bounds avoid the extra per-group minimum window needed for
+automatic origins. Filter inputs early and configure host memory budgets.
+Datetime/timespan array elements use lossless JSON strings, consistent with the
+collection representation; cast accessed elements back with `todatetime` or
+`totimespan`.
+
+Series processors include element-wise arithmetic and numeric comparisons;
+absolute value, trigonometric/exponential/logarithmic functions, square root,
+floor/ceiling/sign; forward/backward/constant/linear filling;
+`series_stats_dynamic`; `series_fit_line_dynamic`; and FIR/IIR filters.
+Missing or nonnumeric arithmetic elements produce nulls, including padding for
+unequal lengths. Linear interpolation retains integral types without rounding
+large endpoints through floating point. Statistics use sample variance and
+original positions, with explicit nonfinite-value handling. FIR normalization,
+centering, and IIR denominator rules follow KQL conventions.
+
+Generic FIR/IIR filtering has a per-row budget of 67,108,864 multiply-add
+operations and errors beyond it. Seasonal decomposition, FFT/period detection,
+forecasting, and multiple-output tuple variants remain future work. Numeric
+JSON serialization of nonfinite values retains the broader dynamic
+representation limitations described below.
+
 ## Aggregations
 
 `count`, `countif`, `sum`, `sumif`, `avg`, `avgif`, `min`, `minif`, `max`,
@@ -280,7 +315,7 @@ representations and continue to ignore nulls.
   native regex kernels, rather than promising Kusto's indexed search complexity.
 - Only one final tabular result is supported. Management commands,
   parameter declarations, user-defined KQL functions, `materialize`, `render`,
-  hints, `make-series`, additional window/scan operators, and `mv-apply` are future
+  hints, additional window/scan operators, and `mv-apply` are future
   work. See [the delivery plan](architecture.md).
 - Default parsing limits: 1 MiB of query text, nesting/expression depth 64,
   and 128 operators per pipeline. `parse_with_options` permits changing these

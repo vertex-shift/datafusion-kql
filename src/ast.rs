@@ -125,6 +125,7 @@ pub enum Operator {
         count: Expr,
         distinct: Option<Expr>,
     },
+    MakeSeries(Box<MakeSeries>),
     MvExpand {
         array_mode: bool,
         index: Option<String>,
@@ -182,6 +183,25 @@ pub struct ExpandColumn {
 pub struct ReorderColumn {
     pub pattern: String,
     pub order: Option<(bool, bool)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeriesAggregation {
+    pub value: NamedExpr,
+    pub default: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MakeSeries {
+    pub aggregates: Vec<SeriesAggregation>,
+    pub axis: Expr,
+    pub from: Option<Expr>,
+    pub to: Option<Expr>,
+    pub step: Expr,
+    pub by: Vec<NamedExpr>,
+    pub nonempty: bool,
+    pub inclusive: bool,
+    pub align_to_start: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

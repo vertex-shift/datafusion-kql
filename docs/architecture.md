@@ -82,8 +82,10 @@ errors rather than silently execute with different semantics.
   Typed `parse`/`parse-where`, regex extraction and JSONPath extraction are also
   implemented. Continue with `mv-apply` and broader specialized parsing.
 - Serialization, offsets, row numbering, restart-aware cumulative sums/ranks,
-  and bounded session windows are implemented. Continue with time-series
-  operators (`make-series`, series functions), `scan`, and `partition`.
+  and bounded session windows are implemented. `make-series`, common series
+  arithmetic/interpolation/statistics, line fitting, and FIR/IIR processing are
+  also implemented. Continue with advanced signal processing, `scan`, and
+  `partition`.
 - Lookup, schema introspection, projection reordering, sampling, wildcard table
   discovery, source-labelled unions and conflicting-type schema splitting are
   implemented. Continue with Kusto-specific approximate algorithms and hints.

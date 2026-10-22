@@ -470,6 +470,14 @@ impl<'s> Planner<'s> {
                     crate::parsing::plan(&self.expressions(), plan, operator, temporary)?
                 }
                 Operator::Summarize { aggregates, by } => self.summarize(plan, aggregates, by)?,
+                Operator::MakeSeries(series) => crate::make_series::plan(
+                    self.state,
+                    &self.scalars,
+                    self.now,
+                    plan,
+                    series,
+                    operator.span,
+                )?,
                 Operator::Sort(keys) => {
                     let sorts = keys
                         .iter()
@@ -1030,7 +1038,7 @@ fn default_name(expr: &ast::Expr, index: usize) -> String {
                     None
                 }
             });
-            if matches!(name.as_str(), "bin" | "floor")
+            if matches!(name.as_str(), "bin" | "bin_at" | "floor")
                 && let Some(column) = column
             {
                 return column.clone();

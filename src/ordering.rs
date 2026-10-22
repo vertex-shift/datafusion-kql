@@ -193,6 +193,13 @@ pub(crate) fn expressions(operator: &Operator) -> Vec<&ast::Expr> {
         Operator::Summarize { aggregates, by } => {
             aggregates.iter().chain(by).map(|i| &i.expr).collect()
         }
+        Operator::MakeSeries(series) => series
+            .aggregates
+            .iter()
+            .map(|a| &a.value.expr)
+            .chain(series.by.iter().map(|b| &b.expr))
+            .chain(std::iter::once(&series.axis))
+            .collect(),
         Operator::Sort(keys) => keys.iter().map(|k| &k.expr).collect(),
         Operator::Top { key, .. } => vec![&key.expr],
         Operator::Sample {
