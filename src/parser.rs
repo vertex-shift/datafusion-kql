@@ -158,12 +158,50 @@ impl<'a> Parser<'a, '_> {
 
     fn query(&mut self) -> Result<Query> {
         self.enter()?;
+        let bindings = self.bindings()?;
+        let pipeline = self.pipeline()?;
+        self.eat(Kind::Semi);
+        if !matches!(self.current().kind, Kind::Eof | Kind::RParen | Kind::RBrace) {
+            return Err(self.expected("'|' or the end of the query"));
+        }
+        self.nesting -= 1;
+        Ok(Query { bindings, pipeline })
+    }
+
+    fn bindings(&mut self) -> Result<Vec<Binding>> {
         let mut bindings = Vec::new();
-        while self.eat_keyword("let") {
-            let start = self.tokens[self.pos - 1].span.start;
+        while self.keyword("let") || self.keyword("declare") {
+            let start = self.current().span.start;
+            if self.eat_keyword("declare") {
+                self.expect_keyword("query_parameters")?;
+                self.expect(Kind::LParen)?;
+                loop {
+                    let name = self.identifier()?;
+                    self.expect(Kind::Colon)?;
+                    let ty = self.scalar_type()?;
+                    let default = self.parameter_default(ty)?;
+                    bindings.push(Binding {
+                        name,
+                        value: BindingValue::Parameter { ty, default },
+                        span: Span::new(start, self.tokens[self.pos - 1].span.end),
+                    });
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Kind::RParen)?;
+                self.expect(Kind::Semi)?;
+                if bindings.len() > self.options.max_pipeline_operators {
+                    return Err(self.expected("fewer query declarations"));
+                }
+                continue;
+            }
+            self.expect_keyword("let")?;
             let name = self.identifier()?;
             self.expect(Kind::Assign)?;
-            let value = if self.looks_tabular() {
+            let value = if self.looks_function() {
+                BindingValue::Function(Box::new(self.function()?))
+            } else if self.looks_tabular() {
                 BindingValue::Tabular(self.pipeline()?)
             } else {
                 BindingValue::Scalar(self.expr(0)?)
@@ -179,13 +217,146 @@ impl<'a> Parser<'a, '_> {
                 return Err(Error::syntax("too many let bindings", self.current().span));
             }
         }
-        let pipeline = self.pipeline()?;
-        self.eat(Kind::Semi);
-        if !matches!(self.current().kind, Kind::Eof | Kind::RParen) {
-            return Err(self.expected("'|' or the end of the query"));
+        Ok(bindings)
+    }
+
+    fn scalar_type(&mut self) -> Result<ScalarType> {
+        let span = self.current().span;
+        let name = self.identifier()?;
+        ScalarType::parse(&name)
+            .ok_or_else(|| Error::unsupported(format!("scalar type '{name}'"), span))
+    }
+
+    fn parameter_default(&mut self, ty: ScalarType) -> Result<Option<Expr>> {
+        if !self.eat(Kind::Assign) {
+            return Ok(None);
         }
+        let value = self.expr(0)?;
+        fn literal(expr: &Expr) -> bool {
+            match &expr.kind {
+                ExprKind::Literal(_) => true,
+                ExprKind::Call { name, args } => {
+                    ScalarType::parse(name).is_some() && args.len() == 1 && literal(&args[0])
+                }
+                ExprKind::Unary {
+                    op: UnaryOp::Negate | UnaryOp::Plus,
+                    expr,
+                } => literal(expr),
+                _ => false,
+            }
+        }
+        if ty == ScalarType::Dynamic || !literal(&value) {
+            return Err(Error::syntax(
+                "parameter defaults must be non-dynamic scalar literals",
+                value.span,
+            ));
+        }
+        Ok(Some(value))
+    }
+
+    fn looks_function(&self) -> bool {
+        if !self.at(&Kind::LParen) {
+            return false;
+        }
+        let mut depth = 0;
+        for (i, token) in self.tokens[self.pos..].iter().enumerate() {
+            match token.kind {
+                Kind::LParen => depth += 1,
+                Kind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return self
+                            .tokens
+                            .get(self.pos + i + 1)
+                            .is_some_and(|next| matches!(next.kind, Kind::LBrace));
+                    }
+                }
+                Kind::Eof => break,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn function(&mut self) -> Result<Function> {
+        self.enter()?;
+        self.expect(Kind::LParen)?;
+        let mut parameters = Vec::new();
+        let mut names = std::collections::HashSet::new();
+        let mut scalar_seen = false;
+        let mut optional_seen = false;
+        if !self.at(&Kind::RParen) {
+            loop {
+                let start = self.current().span.start;
+                let name = self.identifier()?;
+                if !names.insert(name.clone()) {
+                    return Err(self.expected("a unique function parameter name"));
+                }
+                self.expect(Kind::Colon)?;
+                let (ty, default) = if self.eat(Kind::LParen) {
+                    if scalar_seen {
+                        return Err(self.expected("tabular parameters before scalar parameters"));
+                    }
+                    let columns = if self.eat(Kind::Star) {
+                        None
+                    } else {
+                        let mut columns = Vec::new();
+                        let mut names = std::collections::HashSet::new();
+                        loop {
+                            let name = self.identifier()?;
+                            if !names.insert(name.clone()) {
+                                return Err(self.expected("a unique parameter column name"));
+                            }
+                            self.expect(Kind::Colon)?;
+                            columns.push((name, self.scalar_type()?));
+                            if !self.eat(Kind::Comma) {
+                                break;
+                            }
+                        }
+                        Some(columns)
+                    };
+                    self.expect(Kind::RParen)?;
+                    (ParameterType::Tabular(columns), None)
+                } else {
+                    scalar_seen = true;
+                    let ty = self.scalar_type()?;
+                    let default = self.parameter_default(ty)?;
+                    if optional_seen && default.is_none() {
+                        return Err(self.expected("required parameters before optional parameters"));
+                    }
+                    optional_seen |= default.is_some();
+                    (ParameterType::Scalar(ty), default)
+                };
+                parameters.push(FunctionParameter {
+                    name,
+                    ty,
+                    default,
+                    span: Span::new(start, self.tokens[self.pos - 1].span.end),
+                });
+                if parameters.len() > 128 {
+                    return Err(self.expected("at most 128 function parameters"));
+                }
+                if !self.eat(Kind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(Kind::RParen)?;
+        self.expect(Kind::LBrace)?;
+        let bindings = self.bindings()?;
+        let body = if self.looks_tabular() {
+            FunctionBody::Tabular(self.pipeline()?)
+        } else {
+            FunctionBody::Scalar(self.expr(0)?)
+        };
+        self.eat(Kind::Semi);
+        self.expect(Kind::RBrace)?;
         self.nesting -= 1;
-        Ok(Query { bindings, pipeline })
+        Ok(Function {
+            parameters,
+            bindings,
+            body,
+        })
     }
 
     fn looks_tabular(&self) -> bool {
@@ -195,7 +366,7 @@ impl<'a> Parser<'a, '_> {
         }
         if matches!(
             self.tokens[at].kind,
-            Kind::Ident("print" | "datatable" | "union" | "let")
+            Kind::Ident("print" | "datatable" | "union" | "let" | "declare")
         ) {
             return true;
         }
@@ -204,10 +375,19 @@ impl<'a> Parser<'a, '_> {
         {
             return true;
         }
-        self.tokens[self.pos..]
-            .iter()
-            .take_while(|t| !matches!(t.kind, Kind::Semi | Kind::Eof))
-            .any(|t| matches!(t.kind, Kind::Pipe))
+        let mut depth = 0;
+        for token in &self.tokens[self.pos..] {
+            match token.kind {
+                Kind::Pipe => return true,
+                Kind::LParen | Kind::LBracket | Kind::LBrace => depth += 1,
+                Kind::RParen | Kind::RBracket | Kind::RBrace if depth == 0 => break,
+                Kind::RParen | Kind::RBracket | Kind::RBrace => depth -= 1,
+                Kind::Semi | Kind::Eof => break,
+                Kind::Comma if depth == 0 => break,
+                _ => {}
+            }
+        }
+        false
     }
 
     fn pipeline(&mut self) -> Result<Pipeline> {
@@ -282,6 +462,12 @@ impl<'a> Parser<'a, '_> {
                         pattern,
                         span: Span::new(start, self.tokens[self.pos - 1].span.end),
                     }
+                } else if name.len() == 1 && self.at(&Kind::LParen) {
+                    Source::Call {
+                        name: name.remove(0),
+                        args: self.source_arguments()?,
+                        span: Span::new(start, self.tokens[self.pos - 1].span.end),
+                    }
                 } else {
                     Source::Table {
                         name,
@@ -292,6 +478,43 @@ impl<'a> Parser<'a, '_> {
         };
         self.nesting -= 1;
         Ok(source)
+    }
+
+    fn source_arguments(&mut self) -> Result<Vec<CallArgument>> {
+        self.expect(Kind::LParen)?;
+        let mut args = Vec::new();
+        if !self.at(&Kind::RParen) {
+            loop {
+                let name = if matches!(self.current().kind, Kind::Ident(_))
+                    && self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|t| t.kind == Kind::Assign)
+                {
+                    let name = self.identifier()?;
+                    self.expect(Kind::Assign)?;
+                    Some(name)
+                } else {
+                    None
+                };
+                let value = if self.looks_tabular() {
+                    let parenthesized = self.eat(Kind::LParen);
+                    let query = self.query()?;
+                    if parenthesized {
+                        self.expect(Kind::RParen)?;
+                    }
+                    ArgumentValue::Tabular(Box::new(query))
+                } else {
+                    ArgumentValue::Scalar(self.expr(0)?)
+                };
+                args.push(CallArgument { name, value });
+                if !self.eat(Kind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(Kind::RParen)?;
+        Ok(args)
     }
 
     fn datatable(&mut self) -> Result<Source> {
@@ -386,13 +609,18 @@ impl<'a> Parser<'a, '_> {
             "serialize" => Operator::Serialize(
                 if matches!(
                     self.current().kind,
-                    Kind::Pipe | Kind::Semi | Kind::RParen | Kind::Eof
+                    Kind::Pipe | Kind::Semi | Kind::RParen | Kind::RBrace | Kind::Eof
                 ) {
                     Vec::new()
                 } else {
                     self.named_list()?
                 },
             ),
+            "invoke" => {
+                let name = self.identifier()?;
+                let args = self.source_arguments()?;
+                Operator::Invoke { name, args }
+            }
             "parse" | "parse-where" => {
                 let kind = if self.eat_keyword("kind") {
                     self.expect(Kind::Assign)?;
@@ -431,7 +659,7 @@ impl<'a> Parser<'a, '_> {
                 let mut names = std::collections::HashSet::new();
                 while !matches!(
                     self.current().kind,
-                    Kind::Pipe | Kind::Semi | Kind::RParen | Kind::Eof
+                    Kind::Pipe | Kind::Semi | Kind::RParen | Kind::RBrace | Kind::Eof
                 ) {
                     let part = match self.current().kind.clone() {
                         Kind::Star => {
@@ -1132,7 +1360,28 @@ impl<'a> Parser<'a, '_> {
                     let mut args = Vec::new();
                     if !self.at(&Kind::RParen) {
                         loop {
-                            args.push(self.expr(0)?);
+                            let argument = if matches!(self.current().kind, Kind::Ident(_))
+                                && self
+                                    .tokens
+                                    .get(self.pos + 1)
+                                    .is_some_and(|t| t.kind == Kind::Assign)
+                            {
+                                let start = self.current().span.start;
+                                let name = self.identifier()?;
+                                self.expect(Kind::Assign)?;
+                                let value = self.expr(0)?;
+                                self.node(
+                                    ExprKind::NamedArgument {
+                                        name,
+                                        value: Box::new(value.clone()),
+                                    },
+                                    Span::new(start, value.span.end),
+                                    value.depth + 1,
+                                )?
+                            } else {
+                                self.expr(0)?
+                            };
+                            args.push(argument);
                             if !self.eat(Kind::Comma) {
                                 break;
                             }

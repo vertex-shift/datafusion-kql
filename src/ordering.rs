@@ -162,7 +162,10 @@ fn any_expression(expression: &ast::Expr, predicate: fn(&str) -> bool) -> bool {
         ExprKind::Call { name, args } => {
             predicate(name) || args.iter().any(|e| any_expression(e, predicate))
         }
-        ExprKind::Unary { expr, .. } | ExprKind::Dynamic(expr) => any_expression(expr, predicate),
+        ExprKind::Unary { expr, .. } | ExprKind::Dynamic(expr) | ExprKind::Cast { expr, .. } => {
+            any_expression(expr, predicate)
+        }
+        ExprKind::NamedArgument { value, .. } => any_expression(value, predicate),
         ExprKind::Binary { left, right, .. } => {
             any_expression(left, predicate) || any_expression(right, predicate)
         }
@@ -230,6 +233,10 @@ pub(crate) fn needed(query: &ast::Query) -> bool {
             Source::Subquery(query) => needed(query),
             Source::Union { inputs, .. } => inputs.iter().any(source),
             Source::Print(items) => items.iter().any(|i| any_expression(&i.expr, interesting)),
+            Source::Call { args, .. } => args.iter().any(|arg| match &arg.value {
+                ast::ArgumentValue::Scalar(expr) => any_expression(expr, interesting),
+                ast::ArgumentValue::Tabular(query) => needed(query),
+            }),
             _ => false,
         }
     }
@@ -249,8 +256,21 @@ pub(crate) fn needed(query: &ast::Query) -> bool {
                     }
             })
     }
-    query.bindings.iter().any(|binding| match &binding.value {
-        BindingValue::Scalar(expr) => any_expression(expr, interesting),
-        BindingValue::Tabular(value) => pipeline(value),
-    }) || pipeline(&query.pipeline)
+    fn binding_needed(binding: &ast::Binding) -> bool {
+        match &binding.value {
+            BindingValue::Scalar(expr) => any_expression(expr, interesting),
+            BindingValue::Tabular(value) => pipeline(value),
+            BindingValue::Parameter { default, .. } => default
+                .as_ref()
+                .is_some_and(|value| any_expression(value, interesting)),
+            BindingValue::Function(function) => {
+                function.bindings.iter().any(binding_needed)
+                    || match &function.body {
+                        ast::FunctionBody::Scalar(expr) => any_expression(expr, interesting),
+                        ast::FunctionBody::Tabular(value) => pipeline(value),
+                    }
+            }
+        }
+    }
+    query.bindings.iter().any(binding_needed) || pipeline(&query.pipeline)
 }

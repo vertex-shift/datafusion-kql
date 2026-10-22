@@ -92,8 +92,11 @@ errors rather than silently execute with different semantics.
 - Lookup, schema introspection, projection reordering, sampling, wildcard table
   discovery, source-labelled unions and conflicting-type schema splitting are
   implemented. Continue with Kusto-specific approximate algorithms and hints.
-- Functions, query parameters, management commands, remote Kusto connectors,
-  visualization metadata, CLI/Python bindings, and language tooling.
+- Typed request parameters and lexically captured scalar/tabular functions with
+  `invoke` are implemented through native expression/plan expansion. Continue
+  with scalar subqueries, materialization, and view/wildcard function discovery.
+- Management commands, remote Kusto connectors, visualization metadata,
+  CLI/Python bindings, and language tooling.
 - Conformance fixtures against a real Kusto cluster and production workload
   benchmarks before claiming complete compatibility.
 

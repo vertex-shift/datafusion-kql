@@ -17,6 +17,7 @@ and known semantic differences.
 cargo run --example quickstart
 cargo run --example telemetry_json
 cargo run --example time_series
+cargo run --example functions
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -130,6 +131,13 @@ line fitting, arithmetic and FIR/IIR processing.
 Calendar arithmetic, period boundaries, Unix conversions, constructors, and
 compiled KQL date/time formatting are supported. Both tabular and scalar ranges
 handle numeric, datetime, and timespan values.
+
+Query parameters use typed request values rather than source interpolation:
+`declare query_parameters(...)` works with `kql_with_parameters` and
+`kql_ast_with_parameters`. Query-defined scalar and tabular functions support
+typed/default/named arguments, lexical captures, nested scalar definitions,
+tabular schemas, and `invoke`. Functions expand into ordinary native
+expressions/plans, without installing anything in the session registry.
 
 `mv-apply`, advanced signal processing, management commands, hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.

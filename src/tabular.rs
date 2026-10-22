@@ -290,6 +290,7 @@ fn natural_compare(left: &str, right: &str) -> Ordering {
 pub(crate) fn source_name(source: &ast::Source) -> String {
     match source {
         ast::Source::Table { name, .. } => name.join("."),
+        ast::Source::Call { name, .. } => name.clone(),
         ast::Source::Pattern {
             prefix, pattern, ..
         } => prefix

@@ -24,6 +24,37 @@ rescan its inputs. Scalar bindings retain expressions, matching KQL's binding
 rather than assignment model. Use a new pipe to reference a newly extended
 column; assignments in a single `extend` resolve against its input.
 
+## Parameters and query-defined functions
+
+`declare query_parameters(name:type [= literal], ...);` binds values from the
+`QueryParameters` map passed to `kql_with_parameters`,
+`kql_ast_with_parameters`, or `logical_plan_with_parameters`. Values are native
+typed `ScalarValue`s, not strings interpolated into query text. Missing required
+parameters and incompatible types error. Literal defaults and typed nulls are
+supported; dynamic defaults are rejected. Undeclared request values do not
+become variables. The same parsed AST can be reused with different request maps.
+
+`let F=(parameters){ ... };` defines lexically scoped scalar/tabular functions.
+Scalar functions inline expressions before aggregate/window planning, retaining
+native optimization and function-registry isolation. Local scalar bindings and
+nested scalar functions capture definition-time lexical values, not caller
+columns with matching names. Zero-argument functions support bare-name syntax.
+Default values must be literals; named arguments may omit/reorder optional
+parameters. Required parameters precede optional parameters, and tabular
+parameters precede scalar parameters.
+
+Tabular parameters accept explicit column schemas or `(*)`. Explicit schemas
+check/project the declared columns. Wildcard inputs retain their actual schema.
+Tabular calls accept names or parenthesized queries, and `invoke F(...)` supplies
+the input as the first tabular argument. Tabular-function scalar arguments must
+be row-independent constants. Scalar/table result contexts, missing/duplicate
+arguments, and recursion/forward references fail explicitly. Functions have at
+most 128 parameters; scalar expansion has depth/node budgets.
+
+Scalar functions containing tabular local statements or scalar subqueries,
+view declarations, and Kusto's static opaque-schema restrictions for `(*)`
+parameters remain compatibility work.
+
 ## Tabular operators
 
 | Operators | Notes |
@@ -39,6 +70,7 @@ column; assignments in a single `extend` resolve against its input.
 | `take`, `limit` | Constant integer expressions; no ordering guarantee without a sort |
 | `sample`, `sample-distinct` | Native random top-k sampling; distinct sampling returns unique projected values |
 | `as` | Lazy intermediate table binding within the query |
+| `invoke` | Apply a query-defined tabular function with the input as its first argument |
 | `getschema` | KQL schema rows, excluding hidden helpers; does not execute the input |
 | `distinct` | Scalar expressions or `*` |
 | `count` | One `Count:long` result column, including zero for empty input |
@@ -335,7 +367,7 @@ representations and continue to ignore nulls.
   service. No string term index is installed: `has` scans Arrow batches using
   native regex kernels, rather than promising Kusto's indexed search complexity.
 - Only one final tabular result is supported. Management commands,
-  parameter declarations, user-defined KQL functions, `materialize`, `render`,
+  scalar subqueries, view declarations, `materialize`, `render`,
   hints, additional window/scan operators, and `mv-apply` are future
   work. See [the delivery plan](architecture.md).
 - Default parsing limits: 1 MiB of query text, nesting/expression depth 64,

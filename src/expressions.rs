@@ -22,6 +22,62 @@ pub(crate) struct Expressions<'a> {
     pub now: i64,
 }
 
+pub(crate) fn parameter_cast(
+    value: Expr,
+    ty: ScalarType,
+    schema: &DFSchema,
+    span: Span,
+) -> Result<Expr> {
+    let actual = value.get_type(schema)?;
+    let expected = data_type(ty);
+    if ty == ScalarType::Dynamic {
+        return Ok(dynamic::call(Kernel::IntoDynamic, vec![value]));
+    }
+    let integer_literal = match &value {
+        Expr::Literal(ScalarValue::Int64(value), _) => *value,
+        Expr::Negative(expr) => match expr.as_ref() {
+            Expr::Literal(ScalarValue::Int64(Some(value)), _) => value.checked_neg(),
+            _ => None,
+        },
+        _ => None,
+    };
+    let compatible = actual == expected
+        || actual == DataType::Null
+        || expected == DataType::Int32
+            && integer_literal.is_some_and(|value| i32::try_from(value).is_ok())
+        || matches!(
+            (&actual, &expected),
+            (DataType::Int32, DataType::Int64 | DataType::Float64)
+                | (DataType::Int64 | DataType::Float32, DataType::Float64)
+                | (
+                    DataType::Int8 | DataType::Int16,
+                    DataType::Int32 | DataType::Int64 | DataType::Float64
+                )
+                | (DataType::LargeUtf8 | DataType::Utf8View, DataType::Utf8)
+                | (DataType::Timestamp(_, _), DataType::Timestamp(_, _))
+                | (DataType::Duration(_), DataType::Duration(_))
+        );
+    if !compatible {
+        return Err(Error::syntax(
+            format!("parameter requires {expected}, received {actual}"),
+            span,
+        ));
+    }
+    let value = if actual == expected {
+        value
+    } else {
+        cast(value, expected)
+    };
+    if ty == ScalarType::String {
+        Ok(datafusion::functions::core::expr_fn::coalesce(vec![
+            value,
+            lit(""),
+        ]))
+    } else {
+        Ok(value)
+    }
+}
+
 impl Expressions<'_> {
     pub fn scalar(&self, expr: &ast::Expr, schema: &DFSchema) -> Result<Expr> {
         let result = self.lower(expr, schema, false)?;
@@ -47,7 +103,9 @@ impl Expressions<'_> {
                 self.state.execution_props().query_execution_start_time,
             )
             .build();
-        let simplified = ExprSimplifier::new(context).simplify(expr)?;
+        let simplifier = ExprSimplifier::new(context);
+        let expr = simplifier.coerce(expr, &DFSchema::empty())?;
+        let simplified = simplifier.simplify(expr)?;
         match simplified {
             Expr::Literal(value, _) => Ok(value),
             _ => Err(Error::unsupported(
@@ -69,6 +127,21 @@ impl Expressions<'_> {
     fn lower(&self, expr: &ast::Expr, schema: &DFSchema, filter: bool) -> Result<Expr> {
         Ok(match &expr.kind {
             ExprKind::Literal(value) => lit(literal_value(value, expr.span)?),
+            ExprKind::BindingReference(name) => self
+                .scalars
+                .get(name)
+                .cloned()
+                .ok_or_else(|| Error::Plan("function capture is no longer in scope".into()))?,
+            ExprKind::Cast { expr, ty } => {
+                let value = self.lower(expr, schema, false)?;
+                parameter_cast(value, *ty, schema, expr.span)?
+            }
+            ExprKind::NamedArgument { .. } => {
+                return Err(Error::syntax(
+                    "named arguments are only supported for KQL-defined functions",
+                    expr.span,
+                ));
+            }
             ExprKind::Identifier(parts) => {
                 let name = &parts[0];
                 let mut value = if let Some(index) = schema.index_of_column_by_name(None, name) {
@@ -83,6 +156,7 @@ impl Expressions<'_> {
                 for property in &parts[1..] {
                     value = self.access(value, lit(property.clone()), schema)?;
                 }
+
                 value
             }
             ExprKind::Dynamic(value) => {

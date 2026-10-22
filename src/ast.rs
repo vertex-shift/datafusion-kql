@@ -36,6 +36,50 @@ pub struct Binding {
 pub enum BindingValue {
     Scalar(Expr),
     Tabular(Pipeline),
+    Parameter {
+        ty: ScalarType,
+        default: Option<Expr>,
+    },
+    Function(Box<Function>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Function {
+    pub parameters: Vec<FunctionParameter>,
+    pub bindings: Vec<Binding>,
+    pub body: FunctionBody,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionParameter {
+    pub name: String,
+    pub ty: ParameterType,
+    pub default: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParameterType {
+    Scalar(ScalarType),
+    Tabular(Option<Vec<(String, ScalarType)>>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FunctionBody {
+    Scalar(Expr),
+    Tabular(Pipeline),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallArgument {
+    pub name: Option<String>,
+    pub value: ArgumentValue,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArgumentValue {
+    Scalar(Expr),
+    Tabular(Box<Query>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -56,6 +100,11 @@ pub enum Source {
         span: Span,
     },
     Subquery(Box<Query>),
+    Call {
+        name: String,
+        args: Vec<CallArgument>,
+        span: Span,
+    },
     Print(Vec<NamedExpr>),
     Datatable {
         columns: Vec<(String, ScalarType)>,
@@ -121,6 +170,10 @@ pub enum Operator {
     ProjectReorder(Vec<ReorderColumn>),
     GetSchema,
     As(String),
+    Invoke {
+        name: String,
+        args: Vec<CallArgument>,
+    },
     Sample {
         count: Expr,
         distinct: Option<Expr>,
@@ -260,7 +313,17 @@ pub struct Expr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Identifier(Vec<String>),
+    #[doc(hidden)]
+    BindingReference(String),
     Literal(Literal),
+    Cast {
+        expr: Box<Expr>,
+        ty: ScalarType,
+    },
+    NamedArgument {
+        name: String,
+        value: Box<Expr>,
+    },
     Call {
         name: String,
         args: Vec<Expr>,
@@ -357,6 +420,14 @@ impl Expr {
         mut map: impl FnMut(&Self) -> crate::Result<Self>,
     ) -> crate::Result<Self> {
         let kind = match &self.kind {
+            ExprKind::Cast { expr, ty } => ExprKind::Cast {
+                expr: Box::new(map(expr)?),
+                ty: *ty,
+            },
+            ExprKind::NamedArgument { name, value } => ExprKind::NamedArgument {
+                name: name.clone(),
+                value: Box::new(map(value)?),
+            },
             ExprKind::Call { name, args } => ExprKind::Call {
                 name: name.clone(),
                 args: args.iter().map(&mut map).collect::<crate::Result<_>>()?,
@@ -413,5 +484,75 @@ impl Expr {
             span: self.span,
             depth: self.depth,
         })
+    }
+}
+
+impl Operator {
+    pub(crate) fn map_expressions(
+        &self,
+        mut map: impl FnMut(&Expr) -> crate::Result<Expr>,
+    ) -> crate::Result<Self> {
+        let mut operator = self.clone();
+        match &mut operator {
+            Self::Where(expr) | Self::Take(expr) | Self::Parse { input: expr, .. } => {
+                *expr = map(expr)?;
+            }
+            Self::Project(items) | Self::Extend(items) | Self::Serialize(items) => {
+                for item in items {
+                    item.expr = map(&item.expr)?;
+                }
+            }
+            Self::MvExpand { columns, .. } => {
+                for column in columns {
+                    column.value.expr = map(&column.value.expr)?;
+                }
+            }
+            Self::Summarize { aggregates, by } => {
+                for item in aggregates.iter_mut().chain(by) {
+                    item.expr = map(&item.expr)?;
+                }
+            }
+            Self::MakeSeries(series) => {
+                for aggregate in &mut series.aggregates {
+                    aggregate.value.expr = map(&aggregate.value.expr)?;
+                    if let Some(default) = &mut aggregate.default {
+                        *default = map(default)?;
+                    }
+                }
+                for group in &mut series.by {
+                    group.expr = map(&group.expr)?;
+                }
+                series.axis = map(&series.axis)?;
+                series.step = map(&series.step)?;
+                if let Some(from) = &mut series.from {
+                    *from = map(from)?;
+                }
+                if let Some(to) = &mut series.to {
+                    *to = map(to)?;
+                }
+            }
+            Self::Sort(keys) => {
+                for key in keys {
+                    key.expr = map(&key.expr)?;
+                }
+            }
+            Self::Top { count, key } => {
+                *count = map(count)?;
+                key.expr = map(&key.expr)?;
+            }
+            Self::Sample { count, distinct } => {
+                *count = map(count)?;
+                if let Some(distinct) = distinct {
+                    *distinct = map(distinct)?;
+                }
+            }
+            Self::Distinct(items) => {
+                for item in items {
+                    *item = map(item)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(operator)
     }
 }
