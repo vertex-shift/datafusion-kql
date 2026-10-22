@@ -5,8 +5,9 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.2 typed-tabular, dynamic/JSON, window and time-series support, targeting **DataFusion
-55.2.x** and **Rust 1.94+**. This is not yet a complete implementation of KQL.
+**Status:** version 0.2 typed-tabular, dynamic/JSON, window and time-series
+support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
+complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
 and known semantic differences.
 
@@ -99,7 +100,7 @@ the application chooses to display query text.
 
 ## What is implemented
 
-Typed literals, scalar/tabular `let`, `print`, `datatable`, integer `range`,
+Typed literals, scalar/tabular `let`, `print`, `datatable`, numeric/temporal `range`,
 filtering, projection, extension, renaming, sorting, top-k, distinct, aggregation,
 joins (including default `innerunique`), and name-aligned unions. Common scalar
 functions and string predicates lower to native DataFusion expressions.

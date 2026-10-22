@@ -1,9 +1,9 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.2 implements the typed tabular and dynamic subset below. Keywords, function names, table
-names, and column names are case-sensitive. Unsupported syntax/functions return
-an error; there is no SQL fallback.
+0.2 implements the typed tabular and dynamic subset below. Keywords, function
+names, table names, and column names are case-sensitive. Unsupported
+syntax/functions return an error; there is no SQL fallback.
 
 ## Sources and bindings
 
@@ -130,7 +130,7 @@ Functions: `array_length`, `pack_array`, `bag_pack`/`pack`/`pack_dictionary`,
 `bag_keys`, `bag_has_key`, `bag_merge` (leftmost wins), root-key `bag_set_key`
 and `bag_remove_keys`, `array_concat`, `array_slice` (inclusive end),
 `array_index_of`, `set_has_element`, `array_reverse`, `array_sum`, `set_union`,
-`set_intersect`, `set_difference`, `zip`, `repeat`, integer `range()`,
+`set_intersect`, `set_difference`, `zip`, `repeat`, `range()`,
 `strcat_array`, and `split`. Array-producing builders and expansion reject
 collections exceeding 1,048,576 elements instead of allocating without a bound.
 JSONPath writes are not yet implemented. Scalar `range()` supports integers,

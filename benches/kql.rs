@@ -16,6 +16,9 @@ const QUERY: &str =
     "Events | where Value > 42 | summarize Total=sum(Value) by Category | top 10 by Total";
 const SQL: &str = "SELECT \"Category\", coalesce(sum(\"Value\"), 0) AS \"Total\" FROM \"Events\" WHERE \"Value\" > 42 GROUP BY \"Category\" ORDER BY \"Total\" DESC NULLS LAST LIMIT 10";
 const ROWS: usize = 1_000_000;
+const JSON_ROWS: usize = 100_000;
+const JSON_QUERY: &str = "JsonEvents | extend Payload=parse_json(Raw) | project Service=tostring(Payload.service), Latency=Payload.latencies | mv-expand Latency to typeof(long) | summarize Total=sum(Latency) by Service";
+const SERIES_QUERY: &str = "Events | make-series Total=sum(Value) default=0 on Value from 0 to 100 step 1 by Category | project Category, Smoothed=series_fir(Total, dynamic([1,2,1]))";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -41,6 +44,31 @@ fn context() -> SessionContext {
         .collect();
     ctx.register_table(
         TableReference::bare("Events"),
+        Arc::new(MemTable::try_new(schema, partitions).unwrap()),
+    )
+    .unwrap();
+    ctx
+}
+
+fn json_context() -> SessionContext {
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let schema = Arc::new(Schema::new(vec![Field::new("Raw", DataType::Utf8, false)]));
+    let payloads = [
+        r#"{"service":"api","latencies":[1,5,9]}"#,
+        r#"{"service":"worker","latencies":[2,6,10]}"#,
+    ];
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(StringArray::from_iter_values(
+            (0..JSON_ROWS).map(|i| payloads[i % payloads.len()]),
+        ))],
+    )
+    .unwrap();
+    let partitions = (0..4)
+        .map(|i| vec![batch.slice(i * JSON_ROWS / 4, JSON_ROWS / 4)])
+        .collect();
+    ctx.register_table(
+        TableReference::bare("JsonEvents"),
         Arc::new(MemTable::try_new(schema, partitions).unwrap()),
     )
     .unwrap();
@@ -107,6 +135,48 @@ fn benchmarks(c: &mut Criterion) {
         })
     });
     execution.finish();
+
+    let json = json_context();
+    let mut workloads = c.benchmark_group("workloads");
+    for (name, query, context, rows, expected_rows) in [
+        ("json_expand", JSON_QUERY, &json, JSON_ROWS, 2),
+        ("make_series_fir", SERIES_QUERY, &ctx, ROWS, 4),
+    ] {
+        let plan = runtime.block_on(async {
+            context
+                .kql(query)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap()
+        });
+        let result = runtime.block_on(async {
+            collect(
+                reset_plan_states(Arc::clone(&plan)).unwrap(),
+                context.task_ctx(),
+            )
+            .await
+            .unwrap()
+        });
+        assert_eq!(
+            result.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            expected_rows,
+            "unexpected result cardinality for {name}",
+        );
+        workloads.throughput(Throughput::Elements(rows as u64));
+        workloads.bench_function(name, |b| {
+            b.to_async(&runtime).iter(|| async {
+                collect(
+                    reset_plan_states(Arc::clone(&plan)).unwrap(),
+                    context.task_ctx(),
+                )
+                .await
+                .unwrap()
+            })
+        });
+    }
+    workloads.finish();
 }
 
 criterion_group!(benches, benchmarks);

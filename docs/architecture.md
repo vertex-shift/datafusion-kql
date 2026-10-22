@@ -86,6 +86,9 @@ errors rather than silently execute with different semantics.
   arithmetic/interpolation/statistics, line fitting, and FIR/IIR processing are
   also implemented. Continue with advanced signal processing, `scan`, and
   `partition`.
+- UTC calendar arithmetic, constructors, formatting, Unix conversions, and lazy
+  numeric/datetime/timespan ranges are implemented. Full Kusto datetime/timespan
+  range and richer dynamic scalar types remain compatibility milestones.
 - Lookup, schema introspection, projection reordering, sampling, wildcard table
   discovery, source-labelled unions and conflicting-type schema splitting are
   implemented. Continue with Kusto-specific approximate algorithms and hints.
