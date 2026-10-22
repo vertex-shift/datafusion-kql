@@ -1,0 +1,819 @@
+use crate::ast::*;
+use crate::error::{Error, Result};
+use crate::lexer::{Kind, Token, lex};
+
+/// Resource limits apply before DataFusion analysis and execution.
+#[derive(Debug, Clone)]
+pub struct ParserOptions {
+    pub max_query_bytes: usize,
+    pub max_nesting: usize,
+    pub max_pipeline_operators: usize,
+}
+
+impl Default for ParserOptions {
+    fn default() -> Self {
+        Self {
+            max_query_bytes: 1 << 20,
+            max_nesting: 64,
+            max_pipeline_operators: 128,
+        }
+    }
+}
+
+/// Parse a KQL query without accessing a catalog or executing data.
+pub fn parse(query: &str) -> Result<Query> {
+    parse_with_options(query, &ParserOptions::default())
+}
+
+pub fn parse_with_options(query: &str, options: &ParserOptions) -> Result<Query> {
+    if query.len() > options.max_query_bytes {
+        return Err(Error::syntax(
+            format!("query exceeds the {} byte limit", options.max_query_bytes),
+            Span::new(0, query.len()),
+        ));
+    }
+    if options.max_nesting == 0 || options.max_nesting > 128 {
+        return Err(Error::Plan("max_nesting must be between 1 and 128".into()));
+    }
+    let mut parser = Parser {
+        tokens: lex(query)?,
+        pos: 0,
+        nesting: 0,
+        options,
+    };
+    let result = parser.query()?;
+    parser.expect(Kind::Eof)?;
+    Ok(result)
+}
+
+struct Parser<'a, 'o> {
+    tokens: Vec<Token<'a>>,
+    pos: usize,
+    nesting: usize,
+    options: &'o ParserOptions,
+}
+
+impl<'a> Parser<'a, '_> {
+    fn current(&self) -> &Token<'a> {
+        &self.tokens[self.pos]
+    }
+
+    fn advance(&mut self) -> Token<'a> {
+        let token = self.tokens[self.pos].clone();
+        if !matches!(token.kind, Kind::Eof) {
+            self.pos += 1;
+        }
+        token
+    }
+
+    fn at(&self, kind: &Kind<'_>) -> bool {
+        self.current().kind == *kind
+    }
+
+    fn eat(&mut self, kind: Kind<'_>) -> bool {
+        if self.at(&kind) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn keyword(&self, word: &str) -> bool {
+        matches!(&self.current().kind, Kind::Ident(text) if *text == word)
+    }
+
+    fn eat_keyword(&mut self, word: &str) -> bool {
+        if self.keyword(word) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_keyword(&mut self, word: &str) -> Result<()> {
+        if self.eat_keyword(word) {
+            Ok(())
+        } else {
+            Err(self.expected(&format!("'{word}'")))
+        }
+    }
+
+    fn expect(&mut self, kind: Kind<'_>) -> Result<()> {
+        if self.eat(kind.clone()) {
+            Ok(())
+        } else {
+            Err(self.expected(&format!("{kind:?}")))
+        }
+    }
+
+    fn expected(&self, expected: &str) -> Error {
+        Error::syntax(
+            format!("expected {expected}, found {:?}", self.current().kind),
+            self.current().span,
+        )
+    }
+
+    fn enter(&mut self) -> Result<()> {
+        self.nesting += 1;
+        if self.nesting > self.options.max_nesting {
+            return Err(Error::syntax(
+                "query nesting limit exceeded",
+                self.current().span,
+            ));
+        }
+        Ok(())
+    }
+
+    fn identifier(&mut self) -> Result<String> {
+        if self.eat(Kind::LBracket) {
+            let token = self.advance();
+            let Kind::String(value) = token.kind else {
+                return Err(Error::syntax(
+                    "escaped identifiers use ['column name']",
+                    token.span,
+                ));
+            };
+            let value = value.into_owned();
+            self.expect(Kind::RBracket)?;
+            return Ok(value);
+        }
+        let token = self.advance();
+        match token.kind {
+            Kind::Ident(value) => Ok(value.to_owned()),
+            _ => Err(Error::syntax("expected an identifier", token.span)),
+        }
+    }
+
+    fn path(&mut self) -> Result<Vec<String>> {
+        let mut parts = vec![self.identifier()?];
+        while self.eat(Kind::Dot) {
+            parts.push(self.identifier()?);
+        }
+        Ok(parts)
+    }
+
+    fn query(&mut self) -> Result<Query> {
+        self.enter()?;
+        let mut bindings = Vec::new();
+        while self.eat_keyword("let") {
+            let start = self.tokens[self.pos - 1].span.start;
+            let name = self.identifier()?;
+            self.expect(Kind::Assign)?;
+            let value = if self.looks_tabular() {
+                BindingValue::Tabular(self.pipeline()?)
+            } else {
+                BindingValue::Scalar(self.expr(0)?)
+            };
+            let end = self.current().span.end;
+            self.expect(Kind::Semi)?;
+            bindings.push(Binding {
+                name,
+                value,
+                span: Span::new(start, end),
+            });
+            if bindings.len() > self.options.max_pipeline_operators {
+                return Err(Error::syntax("too many let bindings", self.current().span));
+            }
+        }
+        let pipeline = self.pipeline()?;
+        self.eat(Kind::Semi);
+        if !matches!(self.current().kind, Kind::Eof | Kind::RParen) {
+            return Err(self.expected("'|' or the end of the query"));
+        }
+        self.nesting -= 1;
+        Ok(Query { bindings, pipeline })
+    }
+
+    fn looks_tabular(&self) -> bool {
+        let mut at = self.pos;
+        while matches!(self.tokens[at].kind, Kind::LParen) {
+            at += 1;
+        }
+        if matches!(
+            self.tokens[at].kind,
+            Kind::Ident("print" | "datatable" | "union" | "range" | "let")
+        ) {
+            return true;
+        }
+        self.tokens[self.pos..]
+            .iter()
+            .take_while(|t| !matches!(t.kind, Kind::Semi | Kind::Eof))
+            .any(|t| matches!(t.kind, Kind::Pipe))
+    }
+
+    fn pipeline(&mut self) -> Result<Pipeline> {
+        let source = self.source()?;
+        let mut operators = Vec::new();
+        while self.eat(Kind::Pipe) {
+            if operators.len() == self.options.max_pipeline_operators {
+                return Err(Error::syntax(
+                    "pipeline operator limit exceeded",
+                    self.current().span,
+                ));
+            }
+            operators.push(self.operator()?);
+        }
+        Ok(Pipeline { source, operators })
+    }
+
+    fn source(&mut self) -> Result<Source> {
+        self.enter()?;
+        let source = if self.eat(Kind::LParen) {
+            let query = self.query()?;
+            self.expect(Kind::RParen)?;
+            Source::Subquery(Box::new(query))
+        } else if self.eat_keyword("print") {
+            Source::Print(self.named_list()?)
+        } else if self.eat_keyword("datatable") {
+            self.datatable()?
+        } else if self.eat_keyword("range") {
+            let name = self.identifier()?;
+            self.expect_keyword("from")?;
+            let start = self.expr(0)?;
+            self.expect_keyword("to")?;
+            let end = self.expr(0)?;
+            self.expect_keyword("step")?;
+            let step = self.expr(0)?;
+            Source::Range {
+                name,
+                start: Box::new(start),
+                end: Box::new(end),
+                step: Box::new(step),
+            }
+        } else if self.eat_keyword("union") {
+            let (kind, inputs) = self.union_inputs()?;
+            Source::Union { kind, inputs }
+        } else {
+            let start = self.current().span.start;
+            let name = self.path()?;
+            Source::Table {
+                name,
+                span: Span::new(start, self.tokens[self.pos - 1].span.end),
+            }
+        };
+        self.nesting -= 1;
+        Ok(source)
+    }
+
+    fn datatable(&mut self) -> Result<Source> {
+        self.expect(Kind::LParen)?;
+        let mut columns = Vec::new();
+        loop {
+            let name = self.identifier()?;
+            self.expect(Kind::Colon)?;
+            let span = self.current().span;
+            let ty_name = self.identifier()?;
+            let ty = ScalarType::parse(&ty_name)
+                .ok_or_else(|| Error::unsupported(format!("datatable type '{ty_name}'"), span))?;
+            columns.push((name, ty));
+            if !self.eat(Kind::Comma) {
+                break;
+            }
+        }
+        self.expect(Kind::RParen)?;
+        self.expect(Kind::LBracket)?;
+        let mut values = Vec::new();
+        if !self.at(&Kind::RBracket) {
+            loop {
+                values.push(self.expr(0)?);
+                if !self.eat(Kind::Comma) || self.at(&Kind::RBracket) {
+                    break;
+                }
+            }
+        }
+        self.expect(Kind::RBracket)?;
+        if !values.len().is_multiple_of(columns.len()) {
+            return Err(Error::syntax(
+                format!(
+                    "{} datatable values do not fill rows of {} columns",
+                    values.len(),
+                    columns.len()
+                ),
+                self.tokens[self.pos - 1].span,
+            ));
+        }
+        Ok(Source::Datatable { columns, values })
+    }
+
+    fn union_inputs(&mut self) -> Result<(UnionKind, Vec<Source>)> {
+        let kind = if self.eat_keyword("kind") {
+            self.expect(Kind::Assign)?;
+            let span = self.current().span;
+            match self.identifier()?.as_str() {
+                "outer" => UnionKind::Outer,
+                "inner" => UnionKind::Inner,
+                other => {
+                    return Err(Error::unsupported(format!("union kind '{other}'"), span));
+                }
+            }
+        } else {
+            UnionKind::Outer
+        };
+        let mut inputs = vec![self.source()?];
+        while self.eat(Kind::Comma) {
+            inputs.push(self.source()?);
+        }
+        Ok((kind, inputs))
+    }
+
+    fn operator(&mut self) -> Result<SpannedOperator> {
+        let start = self.current().span.start;
+        let mut name = self.identifier()?;
+        while self.eat(Kind::Minus) {
+            name.push('-');
+            name.push_str(&self.identifier()?);
+        }
+        let kind = match name.as_str() {
+            "where" | "filter" => Operator::Where(self.expr(0)?),
+            "take" | "limit" => Operator::Take(self.row_count()?),
+            "project" => Operator::Project(self.named_list()?),
+            "extend" => Operator::Extend(self.named_list()?),
+            "project-away" => Operator::ProjectAway(self.pattern_list()?),
+            "project-keep" => Operator::ProjectKeep(self.pattern_list()?),
+            "project-rename" => {
+                let mut renames = Vec::new();
+                loop {
+                    let new = self.identifier()?;
+                    self.expect(Kind::Assign)?;
+                    let old = self.identifier()?;
+                    renames.push((new, old));
+                    if !self.eat(Kind::Comma) {
+                        break;
+                    }
+                }
+                Operator::ProjectRename(renames)
+            }
+            "summarize" => {
+                let aggregates = if self.keyword("by") {
+                    Vec::new()
+                } else {
+                    self.named_list()?
+                };
+                let by = if self.eat_keyword("by") {
+                    self.named_list()?
+                } else {
+                    Vec::new()
+                };
+                Operator::Summarize { aggregates, by }
+            }
+            "sort" | "order" => {
+                self.expect_keyword("by")?;
+                let mut keys = vec![self.sort_key()?];
+                while self.eat(Kind::Comma) {
+                    keys.push(self.sort_key()?);
+                }
+                Operator::Sort(keys)
+            }
+            "top" => {
+                let count = self.row_count()?;
+                self.expect_keyword("by")?;
+                Operator::Top {
+                    count,
+                    key: self.sort_key()?,
+                }
+            }
+            "distinct" => {
+                let mut expressions = vec![self.expr(0)?];
+                while self.eat(Kind::Comma) {
+                    expressions.push(self.expr(0)?);
+                }
+                Operator::Distinct(expressions)
+            }
+            "count" => Operator::Count,
+            "join" => self.join()?,
+            "union" => {
+                let (kind, inputs) = self.union_inputs()?;
+                Operator::Union { kind, inputs }
+            }
+            _ => {
+                return Err(Error::unsupported(
+                    format!("tabular operator '{name}'"),
+                    Span::new(start, self.tokens[self.pos - 1].span.end),
+                ));
+            }
+        };
+        Ok(SpannedOperator {
+            kind,
+            span: Span::new(start, self.tokens[self.pos - 1].span.end),
+        })
+    }
+
+    fn row_count(&mut self) -> Result<usize> {
+        let token = self.advance();
+        match token.kind {
+            Kind::Number(text) => text
+                .parse()
+                .map_err(|_| Error::syntax("row count must be a nonnegative integer", token.span)),
+            _ => Err(Error::unsupported(
+                "take/top currently require a literal nonnegative row count",
+                token.span,
+            )),
+        }
+    }
+
+    fn pattern_list(&mut self) -> Result<Vec<String>> {
+        let mut patterns = Vec::new();
+        loop {
+            let mut pattern = if self.at(&Kind::Star) {
+                String::new()
+            } else {
+                self.identifier()?
+            };
+            while self.eat(Kind::Star) {
+                pattern.push('*');
+                if let Kind::Ident(text) = self.current().kind {
+                    pattern.push_str(text);
+                    self.advance();
+                }
+            }
+            patterns.push(pattern);
+            if !self.eat(Kind::Comma) {
+                break;
+            }
+        }
+        Ok(patterns)
+    }
+
+    fn named_list(&mut self) -> Result<Vec<NamedExpr>> {
+        let mut expressions = vec![self.named_expr()?];
+        while self.eat(Kind::Comma) {
+            expressions.push(self.named_expr()?);
+        }
+        Ok(expressions)
+    }
+
+    fn named_expr(&mut self) -> Result<NamedExpr> {
+        let alias = match &self.current().kind {
+            Kind::Ident(_) => self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.kind == Kind::Assign),
+            Kind::LBracket => self
+                .tokens
+                .get(self.pos + 3)
+                .is_some_and(|t| t.kind == Kind::Assign),
+            _ => false,
+        };
+        let name = if alias {
+            let name = self.identifier()?;
+            self.expect(Kind::Assign)?;
+            Some(name)
+        } else {
+            None
+        };
+        Ok(NamedExpr {
+            name,
+            expr: self.expr(0)?,
+        })
+    }
+
+    fn sort_key(&mut self) -> Result<SortKey> {
+        let expr = self.expr(0)?;
+        let ascending = if self.eat_keyword("asc") {
+            true
+        } else {
+            self.eat_keyword("desc");
+            false
+        };
+        let nulls_first = if self.eat_keyword("nulls") {
+            if self.eat_keyword("first") {
+                true
+            } else {
+                self.expect_keyword("last")?;
+                false
+            }
+        } else {
+            ascending
+        };
+        Ok(SortKey {
+            expr,
+            ascending,
+            nulls_first,
+        })
+    }
+
+    fn join(&mut self) -> Result<Operator> {
+        let kind = if self.eat_keyword("kind") {
+            self.expect(Kind::Assign)?;
+            let span = self.current().span;
+            match self.identifier()?.as_str() {
+                "innerunique" => JoinKind::InnerUnique,
+                "inner" => JoinKind::Inner,
+                "leftouter" => JoinKind::LeftOuter,
+                "rightouter" => JoinKind::RightOuter,
+                "fullouter" => JoinKind::FullOuter,
+                "leftsemi" => JoinKind::LeftSemi,
+                "rightsemi" => JoinKind::RightSemi,
+                "leftanti" | "anti" | "leftantisemi" => JoinKind::LeftAnti,
+                "rightanti" | "rightantisemi" => JoinKind::RightAnti,
+                other => {
+                    return Err(Error::unsupported(format!("join kind '{other}'"), span));
+                }
+            }
+        } else {
+            JoinKind::InnerUnique
+        };
+        let input = if self.eat(Kind::LParen) {
+            let input = self.query()?;
+            self.expect(Kind::RParen)?;
+            input
+        } else {
+            Query {
+                bindings: Vec::new(),
+                pipeline: Pipeline {
+                    source: self.source()?,
+                    operators: Vec::new(),
+                },
+            }
+        };
+        self.expect_keyword("on")?;
+        let mut keys = Vec::new();
+        loop {
+            let span = self.current().span;
+            let left = self.path()?;
+            let key = if self.eat(Kind::Eq) {
+                let right = self.path()?;
+                if left.len() != 2 || left[0] != "$left" || right.len() != 2 || right[0] != "$right"
+                {
+                    return Err(Error::unsupported(
+                        "join comparisons must be $left.Column == $right.Column",
+                        span,
+                    ));
+                }
+                JoinKey {
+                    left: left[1].clone(),
+                    right: right[1].clone(),
+                }
+            } else if left.len() == 1 {
+                JoinKey {
+                    left: left[0].clone(),
+                    right: left[0].clone(),
+                }
+            } else {
+                return Err(Error::syntax("expected a join key", span));
+            };
+            keys.push(key);
+            if !self.eat(Kind::Comma) && !self.eat_keyword("and") {
+                break;
+            }
+        }
+        Ok(Operator::Join {
+            kind,
+            input: Box::new(input),
+            keys,
+        })
+    }
+
+    fn node(&self, kind: ExprKind, span: Span, depth: usize) -> Result<Expr> {
+        if depth > self.options.max_nesting {
+            return Err(Error::syntax("expression depth limit exceeded", span));
+        }
+        Ok(Expr { kind, span, depth })
+    }
+
+    fn expr(&mut self, minimum: u8) -> Result<Expr> {
+        self.enter()?;
+        let mut left = self.prefix()?;
+        loop {
+            let negated = self.at(&Kind::Bang);
+            let next = if negated { self.pos + 1 } else { self.pos };
+            let keyword = match self.tokens.get(next).map(|t| &t.kind) {
+                Some(Kind::Ident(word)) => Some(*word),
+                _ => None,
+            };
+            if minimum <= 3 && matches!(keyword, Some("in" | "between")) {
+                if negated {
+                    self.advance();
+                }
+                self.advance();
+                let start = left.span.start;
+                let depth = left.depth;
+                if keyword == Some("in") {
+                    let case_insensitive = self.eat(Kind::Tilde);
+                    self.expect(Kind::LParen)?;
+                    let mut values = Vec::new();
+                    if !self.at(&Kind::RParen) {
+                        loop {
+                            values.push(self.expr(0)?);
+                            if !self.eat(Kind::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(Kind::RParen)?;
+                    let depth = depth.max(values.iter().map(|v| v.depth).max().unwrap_or(0));
+                    left = self.node(
+                        ExprKind::InList {
+                            expr: Box::new(left),
+                            values,
+                            negated,
+                            case_insensitive,
+                        },
+                        Span::new(start, self.tokens[self.pos - 1].span.end),
+                        depth + 1,
+                    )?;
+                } else {
+                    self.expect(Kind::LParen)?;
+                    let low = self.expr(0)?;
+                    self.expect(Kind::DotDot)?;
+                    let high = self.expr(0)?;
+                    self.expect(Kind::RParen)?;
+                    let depth = depth.max(low.depth).max(high.depth) + 1;
+                    left = self.node(
+                        ExprKind::Between {
+                            expr: Box::new(left),
+                            low: Box::new(low),
+                            high: Box::new(high),
+                            negated,
+                        },
+                        Span::new(start, self.tokens[self.pos - 1].span.end),
+                        depth,
+                    )?;
+                }
+                continue;
+            }
+            let Some((op, precedence, tokens)) = self.binary() else {
+                break;
+            };
+            if precedence < minimum {
+                break;
+            }
+            for _ in 0..tokens {
+                self.advance();
+            }
+            let right = self.expr(precedence + 1)?;
+            let span = Span::new(left.span.start, right.span.end);
+            let depth = left.depth.max(right.depth) + 1;
+            left = self.node(
+                ExprKind::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                },
+                span,
+                depth,
+            )?;
+        }
+        self.nesting -= 1;
+        Ok(left)
+    }
+
+    fn prefix(&mut self) -> Result<Expr> {
+        let token = self.advance();
+        let span = token.span;
+        let kind = match token.kind {
+            Kind::Number(text) => {
+                let literal = if text.contains(['.', 'e', 'E']) {
+                    let value: f64 = text
+                        .parse()
+                        .map_err(|_| Error::syntax("invalid real literal", span))?;
+                    if !value.is_finite() {
+                        return Err(Error::syntax("real literal is out of range", span));
+                    }
+                    Literal::Real(value)
+                } else {
+                    Literal::Integer(text.parse().map_err(|_| {
+                        Error::syntax("integer literal is outside the signed 64-bit range", span)
+                    })?)
+                };
+                ExprKind::Literal(literal)
+            }
+            Kind::String(text) => ExprKind::Literal(Literal::String(text.into_owned())),
+            Kind::Timespan(text) => ExprKind::Literal(Literal::Timespan(text.to_owned())),
+            Kind::Typed { ty, value } => ExprKind::Literal(Literal::Typed {
+                ty: ScalarType::parse(ty).expect("lexer only produces known literal types"),
+                value: value.to_owned(),
+            }),
+            Kind::Ident("true") => ExprKind::Literal(Literal::Bool(true)),
+            Kind::Ident("false") => ExprKind::Literal(Literal::Bool(false)),
+            Kind::Ident("null") => ExprKind::Literal(Literal::Null),
+            Kind::Ident(name) => {
+                let name = name.to_owned();
+                if self.eat(Kind::LParen) {
+                    let mut args = Vec::new();
+                    if !self.at(&Kind::RParen) {
+                        loop {
+                            args.push(self.expr(0)?);
+                            if !self.eat(Kind::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(Kind::RParen)?;
+                    let depth = args.iter().map(|a| a.depth).max().unwrap_or(0) + 1;
+                    return self.node(
+                        ExprKind::Call { name, args },
+                        Span::new(span.start, self.tokens[self.pos - 1].span.end),
+                        depth,
+                    );
+                }
+                let mut parts = vec![name];
+                while self.eat(Kind::Dot) {
+                    parts.push(self.identifier()?);
+                }
+                ExprKind::Identifier(parts)
+            }
+            Kind::LBracket => {
+                self.pos -= 1;
+                let parts = self.path()?;
+                return self.node(
+                    ExprKind::Identifier(parts),
+                    Span::new(span.start, self.tokens[self.pos - 1].span.end),
+                    1,
+                );
+            }
+            Kind::LParen => {
+                let mut expr = self.expr(0)?;
+                self.expect(Kind::RParen)?;
+                expr.span = Span::new(span.start, self.tokens[self.pos - 1].span.end);
+                return Ok(expr);
+            }
+            Kind::Minus | Kind::Plus | Kind::Bang => {
+                if matches!(token.kind, Kind::Minus)
+                    && matches!(self.current().kind, Kind::Number("9223372036854775808"))
+                {
+                    let end = self.advance().span.end;
+                    return self.node(
+                        ExprKind::Literal(Literal::Integer(i64::MIN)),
+                        Span::new(span.start, end),
+                        1,
+                    );
+                }
+                let op = match token.kind {
+                    Kind::Minus => UnaryOp::Negate,
+                    Kind::Plus => UnaryOp::Plus,
+                    _ => UnaryOp::Not,
+                };
+                let expr = self.expr(6)?;
+                let end = expr.span.end;
+                let depth = expr.depth + 1;
+                return self.node(
+                    ExprKind::Unary {
+                        op,
+                        expr: Box::new(expr),
+                    },
+                    Span::new(span.start, end),
+                    depth,
+                );
+            }
+            Kind::Star => ExprKind::Wildcard,
+            _ => return Err(Error::syntax("expected a scalar expression", span)),
+        };
+        self.node(kind, span, 1)
+    }
+
+    fn binary(&self) -> Option<(BinaryOp, u8, usize)> {
+        use BinaryOp as B;
+        let direct = match self.current().kind {
+            Kind::Plus => Some((B::Add, 4)),
+            Kind::Minus => Some((B::Subtract, 4)),
+            Kind::Star => Some((B::Multiply, 5)),
+            Kind::Slash => Some((B::Divide, 5)),
+            Kind::Percent => Some((B::Modulo, 5)),
+            Kind::Eq => Some((B::Eq, 3)),
+            Kind::NotEq => Some((B::NotEq, 3)),
+            Kind::EqInsensitive => Some((B::EqInsensitive, 3)),
+            Kind::NotEqInsensitive => Some((B::NotEqInsensitive, 3)),
+            Kind::Lt => Some((B::Lt, 3)),
+            Kind::LtEq => Some((B::LtEq, 3)),
+            Kind::Gt => Some((B::Gt, 3)),
+            Kind::GtEq => Some((B::GtEq, 3)),
+            _ => None,
+        };
+        if let Some((op, precedence)) = direct {
+            return Some((op, precedence, 1));
+        }
+        let negated = self.at(&Kind::Bang);
+        let at = self.pos + usize::from(negated);
+        let Kind::Ident(word) = self.tokens.get(at)?.kind else {
+            return None;
+        };
+        let op = match (word, negated) {
+            ("or", false) => return Some((B::Or, 1, 1)),
+            ("and", false) => return Some((B::And, 2, 1)),
+            ("contains", false) => B::Contains,
+            ("contains", true) => B::NotContains,
+            ("contains_cs", false) => B::ContainsCs,
+            ("contains_cs", true) => B::NotContainsCs,
+            ("has", false) => B::Has,
+            ("has", true) => B::NotHas,
+            ("has_cs", false) => B::HasCs,
+            ("has_cs", true) => B::NotHasCs,
+            ("startswith", false) => B::StartsWith,
+            ("startswith", true) => B::NotStartsWith,
+            ("startswith_cs", false) => B::StartsWithCs,
+            ("startswith_cs", true) => B::NotStartsWithCs,
+            ("endswith", false) => B::EndsWith,
+            ("endswith", true) => B::NotEndsWith,
+            ("endswith_cs", false) => B::EndsWithCs,
+            ("endswith_cs", true) => B::NotEndsWithCs,
+            ("matches", false) if matches!(self.tokens.get(at + 1)?.kind, Kind::Ident("regex")) => {
+                return Some((B::MatchesRegex, 3, 2));
+            }
+            _ => return None,
+        };
+        Some((op, 3, 1 + usize::from(negated)))
+    }
+}
