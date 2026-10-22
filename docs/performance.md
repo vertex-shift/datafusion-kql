@@ -65,6 +65,24 @@ operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
 
+## Measured 0.5 GUID workload
+
+At commit `32a4944`, parsing 100,000 valid GUID strings and performing exact
+distinct counting measured **1.14 ms** (95% interval **1.12-1.16 ms**), about
+87.5 million input rows/second on the same Apple M4/Rust 1.95/DataFusion 55.2
+configuration with four target partitions:
+
+```bash
+cargo bench --locked --bench kql -- workloads/guid_parse \
+  --warm-up-time 1 --measurement-time 3 --sample-size 30
+```
+
+The fixture repeats two valid canonical IDs and verifies exactly two distinct
+128-bit values. It measures conversion and a small exact hash state, not
+high-cardinality aggregation, UUID generation, persistent I/O, or arbitrary
+malformed strings. The shared-host and workload-specific comparison limits
+below apply.
+
 ## Measured 0.4 operator workloads
 
 The new operators at commit `bef5a54` were measured on 2026-10-22 on the same
