@@ -88,6 +88,7 @@ async fn bag_unpack_preserves_serialized_rows_and_user_named_helpers() {
 
 #[tokio::test]
 async fn pivot_count_and_sum_compile_to_native_conditional_aggregates() {
+    check("let __kql_temporary_0=100; print k='A',v=2 | evaluate pivot(k,sum(v+__kql_temporary_0)):(A:long)", &[&["102"]]).await;
     let data = "datatable(State:string,Kind:string,Value:long)['A','wind',2,'B','wind',3,'A','rain',5,'A','wind',7]";
     check(&format!("{data} | project State,Kind | evaluate pivot(State):(Kind:string,A:long,B:long) | sort by Kind asc"),
         &[&["rain","1","0"],&["wind","2","1"]]).await;

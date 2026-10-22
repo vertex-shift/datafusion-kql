@@ -2105,7 +2105,11 @@ impl<'s> Planner<'s> {
         loop {
             let name = format!("__kql_temporary_{}", self.next_alias);
             self.next_alias += 1;
-            if plan.schema().index_of_column_by_name(None, &name).is_none() {
+            if plan.schema().index_of_column_by_name(None, &name).is_none()
+                && !self.scalars.contains_key(&name)
+                && !self.tables.contains_key(&name)
+                && !self.functions.contains_key(&name)
+            {
                 return name;
             }
         }
