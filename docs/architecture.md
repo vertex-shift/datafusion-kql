@@ -80,12 +80,15 @@ errors rather than silently execute with different semantics.
   are implemented, together with bounded collection aggregation, nearest-rank
   percentiles, correlated row-selection aggregates, and aggregate arithmetic.
   Typed `parse`/`parse-where`, regex extraction and JSONPath extraction are also
-  implemented. Continue with `mv-apply` and broader specialized parsing.
+  implemented. `mv-apply` compiles reusable native subquery templates with
+  per-row Arrow input binding. Continue with broader specialized parsing.
 - Serialization, offsets, row numbering, restart-aware cumulative sums/ranks,
   and bounded session windows are implemented. `make-series`, common series
   arithmetic/interpolation/statistics, line fitting, and FIR/IIR processing are
-  also implemented. Continue with advanced signal processing, `scan`, and
-  `partition`.
+  also implemented. `scan` uses a bounded native state machine with compiled
+  scalar expressions, and `partition` uses vectorized window/aggregate fast
+  paths or reusable native subquery templates. Continue with advanced signal
+  processing and wider conformance fixtures.
 - UTC calendar arithmetic, constructors, formatting, Unix conversions, and lazy
   numeric/datetime/timespan ranges are implemented. Full Kusto datetime/timespan
   range and richer dynamic scalar types remain compatibility milestones.
@@ -94,7 +97,8 @@ errors rather than silently execute with different semantics.
   implemented. Continue with Kusto-specific approximate algorithms and hints.
 - Typed request parameters and lexically captured scalar/tabular functions with
   `invoke` are implemented through native expression/plan expansion. Continue
-  with scalar subqueries and view/wildcard function discovery.
+  with scalar-subquery functions. Lazy scalar subqueries and wildcard-discovered
+  lexical views are implemented.
 - Explicit materialization uses a lazy native table source and a shared Arrow
   cache boundary. It preserves parallel input execution, reports retained
   memory to the host pool, and does not change the host's planner or registry.

@@ -820,6 +820,10 @@ impl<'s> Planner<'s> {
                     )
                     .await?
                 }
+                Operator::Scan(scan) => {
+                    let name = self.temporary_name(&plan);
+                    crate::scan::plan(self.state, &self.scalars, self.now, plan, scan, name)?
+                }
                 Operator::Partition {
                     key,
                     strategy,

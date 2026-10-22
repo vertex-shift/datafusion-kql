@@ -101,6 +101,7 @@ Scalar functions containing their own `toscalar` remain a future extension.
 | `mv-expand`, `mvexpand` | Arrays and bags, zipped multiple columns, per-row limits, `with_itemindex`, cast-only `to typeof(...)` |
 | `mv-apply` | Per-input-row native subqueries over zipped arrays, indices, type-only casts, and limits |
 | `partition` | Implicit-source per-key transformations with legacy/native/shuffle strategies |
+| `scan` | Typed declared state, step conditions/promotion, simultaneous assignments, match IDs, and all/last/none output |
 | `parse`, `parse-where` | Simple, regex, and relaxed patterns; typed captures, regex flags, and strict failure filtering |
 | `serialize` | Freezes row order and supports calculated columns and native window expressions |
 | `make-series` | Numeric/datetime/timespan axes, per-group bounds, defaults, nonempty results, and alternate range syntax |
@@ -261,6 +262,39 @@ native-plan initialization has overhead for very many tiny groups. Prefer
 ordinary `summarize`/windows or the vectorized partition fast paths where
 equivalent. Group-local materialization rebinds its input and cache per group;
 unrelated outer snapshots remain shared.
+
+## Stateful scans
+
+`scan [with_match_id=...] [declare(...)] with (step ...; ...)` is a native
+streaming execution source. Conditions and assignments are compiled once using
+DataFusion's scalar expressions and type coercion; the scan owns the sequential
+state machine rather than interpreting KQL expressions per row.
+
+Each input row checks steps in reverse order. A successful promotion transfers
+and clears the previous step's sequence before the earlier steps are evaluated.
+Self-state updates retain the sequence's match ID; an inactive first step starts
+a new zero-based match ID. Assignments are simultaneous and can update source
+columns as well as declared columns. Unqualified names mean the current input
+row/default declarations; `Step.Column` accesses that step's captured state.
+Later-step references, duplicate declarations/steps/assignments, incompatible
+types, and nonboolean conditions error.
+
+`output=none` suppresses output without suppressing state changes.
+`output=last` retains a sequence's last matching row until promotion/replacement
+or end of input. Hidden ordinals restore source-row order, including multiple
+matches on one row and delayed output, before downstream row windows or final
+results. Missing input order is unspecified; sort explicitly when order matters.
+State resets independently inside each `partition`/`mv-apply` subtable.
+
+The operator retains bounded step history rather than every input row, with
+at most 128 steps, 128 declarations, and 128 assignments per step. Variable-size
+state and buffered outputs are charged to the host memory pool. State does not
+spill. A nonnullable-long, zero-initialized additive single-step scan uses native
+cumulative windows instead; nullable inputs use the state machine so null
+propagation is not accidentally changed into SQL SUM's null-skipping behavior.
+Compute row-window expressions in an earlier `extend`, not directly inside
+step conditions/assignments. Full cross-service scan conformance still requires
+real-Kusto differential fixtures.
 
 ## Parsing and extraction
 

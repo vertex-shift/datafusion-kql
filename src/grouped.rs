@@ -407,6 +407,11 @@ fn bind_changes(
         {
             return Ok(bound);
         }
+        if let Some(bound) =
+            crate::scan::bind_input(&plan, |input| bind_changes(input, slot, batches))?
+        {
+            return Ok(bound);
+        }
         Ok(Transformed::no(plan))
     })
 }

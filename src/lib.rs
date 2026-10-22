@@ -35,6 +35,7 @@ mod parsing;
 mod planner;
 mod ranges;
 mod regex_extract;
+mod scan;
 mod series_functions;
 mod tabular;
 mod temporal;

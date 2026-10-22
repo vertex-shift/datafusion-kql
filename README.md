@@ -151,6 +151,8 @@ boundaries.
 `mv-apply` runs native per-row subqueries over zipped dynamic arrays. `partition`
 supports per-key transformations, with vectorized fast paths for common
 aggregate/top-k workloads and reusable native templates for general subqueries.
+`scan` adds typed state machines, step promotion, match IDs, simultaneous
+assignments, output modes, and native cumulative-window fast paths.
 
 Advanced signal processing, management commands, additional hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.

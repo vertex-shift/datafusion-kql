@@ -199,6 +199,7 @@ pub enum Operator {
         strategy: PartitionStrategy,
         operators: Vec<SpannedOperator>,
     },
+    Scan(Box<Scan>),
     Parse {
         input: Expr,
         kind: ParseKind,
@@ -251,6 +252,35 @@ pub enum PartitionStrategy {
     Legacy,
     Native,
     Shuffle,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scan {
+    pub match_id: Option<String>,
+    pub declarations: Vec<ScanDeclaration>,
+    pub steps: Vec<ScanStep>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScanDeclaration {
+    pub name: String,
+    pub ty: ScalarType,
+    pub default: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScanStep {
+    pub name: String,
+    pub output: ScanOutput,
+    pub condition: Expr,
+    pub assignments: Vec<(String, Expr)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanOutput {
+    All,
+    Last,
+    None,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -531,6 +561,19 @@ impl Operator {
             Self::MvExpand { columns, .. } | Self::MvApply { columns, .. } => {
                 for column in columns {
                     column.value.expr = map(&column.value.expr)?;
+                }
+            }
+            Self::Scan(scan) => {
+                for declaration in &mut scan.declarations {
+                    if let Some(default) = &mut declaration.default {
+                        *default = map(default)?;
+                    }
+                }
+                for step in &mut scan.steps {
+                    step.condition = map(&step.condition)?;
+                    for (_, value) in &mut step.assignments {
+                        *value = map(value)?;
+                    }
                 }
             }
             Self::Summarize { aggregates, by } => {

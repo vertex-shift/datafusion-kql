@@ -199,6 +199,14 @@ pub(crate) fn expressions(operator: &Operator) -> Vec<&ast::Expr> {
         Operator::MvExpand { columns, .. } | Operator::MvApply { columns, .. } => {
             columns.iter().map(|c| &c.value.expr).collect()
         }
+        Operator::Scan(scan) => scan
+            .steps
+            .iter()
+            .flat_map(|step| {
+                std::iter::once(&step.condition)
+                    .chain(step.assignments.iter().map(|(_, value)| value))
+            })
+            .collect(),
         Operator::Summarize { aggregates, by } => {
             aggregates.iter().chain(by).map(|i| &i.expr).collect()
         }
@@ -249,7 +257,7 @@ pub(crate) fn needed(query: &ast::Query) -> bool {
     fn pipeline(pipeline: &ast::Pipeline) -> bool {
         source(&pipeline.source)
             || pipeline.operators.iter().any(|operator| {
-                matches!(operator.kind, Operator::Serialize(_))
+                matches!(operator.kind, Operator::Serialize(_) | Operator::Scan(_))
                     || expressions(&operator.kind)
                         .iter()
                         .any(|e| any_expression(e, interesting))
@@ -261,7 +269,7 @@ pub(crate) fn needed(query: &ast::Query) -> bool {
                         Operator::MvApply { operators, .. }
                         | Operator::Partition { operators, .. } => {
                             operators.iter().any(|operator| {
-                                matches!(operator.kind, Operator::Serialize(_))
+                                matches!(operator.kind, Operator::Serialize(_) | Operator::Scan(_))
                                     || expressions(&operator.kind)
                                         .iter()
                                         .any(|expr| any_expression(expr, interesting))

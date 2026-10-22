@@ -629,6 +629,90 @@ impl<'a> Parser<'a, '_> {
                 let args = self.source_arguments()?;
                 Operator::Invoke { name, args }
             }
+            "scan" => {
+                let match_id = if self.eat_keyword("with_match_id") {
+                    self.expect(Kind::Assign)?;
+                    Some(self.identifier()?)
+                } else {
+                    None
+                };
+                let mut declarations = Vec::new();
+                if self.eat_keyword("declare") {
+                    self.expect(Kind::LParen)?;
+                    loop {
+                        let name = self.identifier()?;
+                        self.expect(Kind::Colon)?;
+                        let ty = self.scalar_type()?;
+                        let default = if self.eat(Kind::Assign) {
+                            Some(self.expr(0)?)
+                        } else {
+                            None
+                        };
+                        declarations.push(ScanDeclaration { name, ty, default });
+                        if declarations.len() > 128 {
+                            return Err(self.expected("at most 128 scan declarations"));
+                        }
+                        if !self.eat(Kind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Kind::RParen)?;
+                }
+                self.expect_keyword("with")?;
+                self.expect(Kind::LParen)?;
+                let mut steps = Vec::new();
+                loop {
+                    self.expect_keyword("step")?;
+                    let name = self.identifier()?;
+                    let output = if self.eat_keyword("output") {
+                        self.expect(Kind::Assign)?;
+                        match self.identifier()?.as_str() {
+                            "all" => ScanOutput::All,
+                            "last" => ScanOutput::Last,
+                            "none" => ScanOutput::None,
+                            _ => return Err(self.expected("output=all, last, or none")),
+                        }
+                    } else {
+                        ScanOutput::All
+                    };
+                    self.expect(Kind::Colon)?;
+                    let condition = self.expr(0)?;
+                    let mut assignments = Vec::new();
+                    if self.eat(Kind::Assign) {
+                        self.expect(Kind::Gt)?;
+                        loop {
+                            let name = self.identifier()?;
+                            self.expect(Kind::Assign)?;
+                            assignments.push((name, self.expr(0)?));
+                            if assignments.len() > 128 {
+                                return Err(self.expected("at most 128 scan assignments per step"));
+                            }
+                            if !self.eat(Kind::Comma) {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(Kind::Semi)?;
+                    steps.push(ScanStep {
+                        name,
+                        output,
+                        condition,
+                        assignments,
+                    });
+                    if steps.len() > 128 {
+                        return Err(self.expected("at most 128 scan steps"));
+                    }
+                    if self.at(&Kind::RParen) {
+                        break;
+                    }
+                }
+                self.expect(Kind::RParen)?;
+                Operator::Scan(Box::new(Scan {
+                    match_id,
+                    declarations,
+                    steps,
+                }))
+            }
             "parse" | "parse-where" => {
                 let kind = if self.eat_keyword("kind") {
                     self.expect(Kind::Assign)?;
