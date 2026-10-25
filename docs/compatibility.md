@@ -245,6 +245,24 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
 - `strcat`, `strlen`, `tolower`, `toupper`, `substring` (zero-based),
   `replace_string`, `extract`, `extract_all`/`extractall`, `extract_json`/`extractjson`,
   `totimespan`/`totime`, and `todate`.
+- `indexof(source, match [, start [, length [, occurrence]]])` returns zero-based
+  character positions, not SQL's one-based `strpos`. Start/length may vary by row;
+  occurrence is a constant integer. Negative starts are relative to the end.
+  Repeated nonoverlapping searches reapply the length at each occurrence, matching
+  the published optional-argument example. Not found returns -1; invalid/null
+  positions/counts return typed null. Unicode positions count scalar values;
+  supplementary-character parity still needs a live reference check.
+- `strrep(value, multiplier [, delimiter])` produces a string, unlike dynamic
+  `repeat`. Values/delimiters use scalar string conversion; counts are integral.
+  Nonpositive/null counts produce empty strings. Counts above 67,108,864 and
+  outputs above the 16 MiB text budget error rather than truncate silently.
+  Microsoft's current page contradicts itself about a legacy 1024 cap; this
+  implementation follows its larger multiplier contract, pending live edge checks.
+- `replace_regex(source, constant_regex, constant_rewrite)` replaces every
+  nonoverlapping match. Rewrites use `\0` through `\9` capture references and
+  `\\` for a literal slash; dollar signs are literal. Invalid patterns/references
+  fail explicitly. Compiled expressions obey a 16 MiB regex budget, with bounded
+  input/output text and at most 1,048,576 replacements per value.
 - Other names already registered in the session scalar registry are callable
   with **their DataFusion-defined semantics**. This is an extension point, not
   a promise that every SQL function has Kusto semantics. The frontend does not

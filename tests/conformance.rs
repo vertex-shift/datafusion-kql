@@ -685,6 +685,24 @@ const SOURCE_FIXTURES: &[Fixture] = &[
         columns: &["N", "Restored"],
         rows: &[&["0", "0"]],
     },
+    Fixture {
+        name: "source-indexof-published-optional-arguments",
+        query: "print a=tostring(indexof('abcdefg','cde')),b=tostring(indexof('abcdefg','cde',1,4)),c=tostring(indexof('abcdefg','cde',1,2)),d=tostring(indexof('abcdefg','cde',3,4)),e=tostring(indexof('abcdefg','cde',-5)),f=tostring(indexof(1234567,5,1,4)),g=tostring(indexof('abcdefg','cde',2,-1)),h=tostring(indexof('abcdefgabcdefg','cde',1,10,2)),i=tostring(indexof('abcdefgabcdefg','cde',1,-1,3))",
+        columns: &["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        rows: &[&["2", "2", "-1", "-1", "2", "4", "2", "9", "-1"]],
+    },
+    Fixture {
+        name: "source-strrep-published-coercion",
+        query: "print a=strrep('ABC',2),b=strrep(123,3,'.'),c=strrep(3s,2,' ')",
+        columns: &["a", "b", "c"],
+        rows: &[&["ABCABC", "123.123.123", "00:00:03 00:00:03"]],
+    },
+    Fixture {
+        name: "source-replace-regex-published-capture",
+        query: r#"range x from 1 to 3 step 1 | extend text=strcat('Number is ',tostring(x)) | project text=replace_regex(text,@'is (\d+)',@'was: \1')"#,
+        columns: &["text"],
+        rows: &[&["Number was: 1"], &["Number was: 2"], &["Number was: 3"]],
+    },
 ];
 
 fn endpoint(uri: &str) -> TestResult<(String, bool)> {
@@ -986,7 +1004,7 @@ async fn captured_reference_fixtures_match_locally() -> TestResult<()> {
 }
 
 #[tokio::test]
-async fn source_hll_fixtures_match_published_contracts_locally() -> TestResult<()> {
+async fn source_fixtures_match_published_contracts_locally() -> TestResult<()> {
     let ctx = SessionContext::new();
     for fixture in SOURCE_FIXTURES {
         assert!(

@@ -963,6 +963,93 @@ impl Expressions<'_> {
                 ))
             }
         };
+        if matches!(name, "indexof" | "strrep" | "replace_regex") {
+            let text = |index: usize| -> Result<Expr> {
+                let mut value = values[index].clone();
+                if matches!(value.get_type(schema)?, DataType::Duration(_)) {
+                    value = crate::text_functions::timespan(cast(
+                        value,
+                        DataType::Duration(TimeUnit::Nanosecond),
+                    ));
+                }
+                self.function(
+                    "coalesce",
+                    vec![
+                        cast(self.string_value(value, schema)?, DataType::Utf8),
+                        lit(""),
+                    ],
+                )
+            };
+            let integer = |index: usize| -> Result<Expr> {
+                let ty = values[index].get_type(schema)?;
+                if !ty.is_integer() && ty != DataType::Null {
+                    return Err(Error::syntax(
+                        format!("{name} requires integer position/count arguments"),
+                        args[index].span,
+                    ));
+                }
+                Ok(cast(values[index].clone(), DataType::Int64))
+            };
+            return match name {
+                "indexof" => {
+                    if !(2..=5).contains(&values.len()) {
+                        return Err(Error::syntax(
+                            "indexof expects source, match, and optional start, length, occurrence",
+                            span,
+                        ));
+                    }
+                    let occurrence = if values.len() == 5 {
+                        match self.constant(integer(4)?, args[4].span)? {
+                            ScalarValue::Int64(value) => value,
+                            _ => {
+                                return Err(Error::syntax(
+                                    "indexof occurrence must be a constant integer",
+                                    args[4].span,
+                                ));
+                            }
+                        }
+                    } else {
+                        Some(1)
+                    };
+                    Ok(crate::text_functions::indexof(
+                        vec![
+                            text(0)?,
+                            text(1)?,
+                            if values.len() > 2 {
+                                integer(2)?
+                            } else {
+                                lit(0_i64)
+                            },
+                            if values.len() > 3 {
+                                integer(3)?
+                            } else {
+                                lit(-1_i64)
+                            },
+                        ],
+                        occurrence,
+                    ))
+                }
+                "strrep" => {
+                    if !(2..=3).contains(&values.len()) {
+                        return Err(Error::syntax(
+                            "strrep expects value, multiplier, and an optional delimiter",
+                            span,
+                        ));
+                    }
+                    Ok(crate::text_functions::strrep(vec![
+                        text(0)?,
+                        integer(1)?,
+                        if values.len() == 3 { text(2)? } else { lit("") },
+                    ]))
+                }
+                _ => {
+                    arity(3)?;
+                    let pattern = self.constant_string(values[1].clone(), args[1].span)?;
+                    let replacement = self.constant_string(values[2].clone(), args[2].span)?;
+                    crate::text_functions::replace_regex(text(0)?, pattern, replacement, span)
+                }
+            };
+        }
         if matches!(name, "dcount_hll" | "hll_merge") {
             if name == "dcount_hll" {
                 arity(1)?;

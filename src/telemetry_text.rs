@@ -60,7 +60,7 @@ impl Op {
     }
 }
 
-fn bounded(size: usize) -> Result<()> {
+pub(crate) fn bounded(size: usize) -> Result<()> {
     if size > MAX_BYTES {
         Err(DataFusionError::Execution(
             "text conversion exceeds its 16 MiB per-value byte budget".into(),

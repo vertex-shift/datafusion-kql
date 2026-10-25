@@ -53,6 +53,7 @@ mod tabular;
 mod telemetry_text;
 mod temporal;
 mod terms;
+mod text_functions;
 mod top;
 mod windows;
 
