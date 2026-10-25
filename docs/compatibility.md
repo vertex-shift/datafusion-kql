@@ -659,3 +659,12 @@ HTTP fixture and verifies serialized request properties, read-only headers, and
 the client parser. It does not emulate KQL or certify reference parity. CI runs
 this transport check explicitly; the actual live Kusto test remains ignored
 until a caller configures and requests it.
+
+The manual **Kusto reference conformance** workflow provides a Linux/x64
+reference environment without needing an Azure cluster or host Docker daemon.
+It uses a pinned Microsoft emulator digest, a loopback-only port, a 4 GB/2 CPU
+container, an isolated disposable database, and unconditional container cleanup.
+It never runs on pushes or pull requests. Its `accept_emulator_license` input
+defaults to false and must be explicitly set to true by a caller who accepts
+the linked Microsoft terms. This workflow is prepared but has not been run or
+represented as passing merely because ordinary CI succeeds.
