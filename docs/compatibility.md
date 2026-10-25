@@ -345,8 +345,11 @@ loopback, or link-local addresses.
 
 `decimal(...)` supports exact base-ten literals, scientific notation, `min`,
 `max`, and typed nulls; `todecimal` performs nullable runtime conversion. Values
-use a signed 96-bit coefficient and scale 0-28, consistent with the decimal
-constant representation in Microsoft's public Kusto language frontend.
+currently use a signed 96-bit coefficient and scale 0-28, a **bounded local
+profile, not full Kusto decimal parity**.
+The [public decimal literal reader](https://github.com/microsoft/Kusto-Query-Language/blob/328e05d10d6c73654e416675fc75af7ed0e05ffd/src/Kusto.Language/Syntax/SyntaxToken.cs#L622-L636)
+uses `System.Decimal`, but that frontend representation does not establish
+the engine's runtime range or precision.
 Arithmetic uses checked decimal operations, not an intermediate `f64`.
 Overflow and division by zero produce typed decimal nulls.
 
@@ -365,9 +368,13 @@ so exact decimal text is not first rounded through a JSON `f64`. The `min` and
 Typed datatables/parameters/functions, nullable parsing/extraction, numeric
 arithmetic, exact binning/floor/ceiling, native decimal inputs, unions, root
 dynamic tags, and serialized offsets are supported. Mixed decimal/real
-arithmetic promotes to real. Complete decimal edge-case parity still requires
-an authorized Kusto reference run; the documented local implementation and
-source evidence are not represented as a completed live comparison.
+arithmetic promotes to real. Initial synthetic queries against the public
+Kusto help cluster on 2026-10-25 exposed a material remaining gap: the engine
+returns `1E+38` for `decimal(max)`, retains more precision for decimal division
+and averages, and can multiply the local maximum by two without overflowing.
+The local `min`/`max`, overflow boundary, precision, and non-exponential
+formatting therefore differ. The measured exact decimal workloads do not
+certify these unsupported boundaries.
 Decimal table ranges currently error rather than silently casting their bounds
 and steps to real.
 
@@ -728,7 +735,8 @@ representations and continue to ignore nulls.
 The conformance suite in `tests/conformance.rs` runs synthetic inline-data
 fixtures locally by default. It covers counts/nulls, expansion, per-row/per-key
 queries, scans, hierarchical tops, schema-declared plugins, scalar subqueries,
-ranges, GUIDs, parsing, and series shape. Local fixture checks are **not**
+ranges, GUIDs, parsing, decimal precision, rich nested tags, term/IP/encoding
+helpers, documented NaN defaults, and series shape. Local fixture checks are **not**
 evidence that those fixtures have passed against a Kusto engine.
 
 To compare the same fixtures against an explicitly configured reference:

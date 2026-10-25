@@ -31,6 +31,12 @@ const SEARCH_QUERY: &str = "Events | search Category:'api' and Value>42 | summar
 const HITTERS_QUERY: &str = "Events | top-hitters 2 of Category by Value";
 const GUID_QUERY: &str =
     "GuidEvents | extend id=toguid(Text) | summarize Distinct=count_distinct(id)";
+const DECIMAL_QUERY: &str = "Telemetry | summarize Total=sum(todecimal(Amount)+decimal(0.25)) | project Total=tostring(Total)";
+const RICH_QUERY: &str = "Events | take 10000 | extend p=bag_pack('when',datetime(2025-01-01),'amount',decimal(1.25),'row',Value) | extend a=pack_array(p,1h) | extend d=todecimal(a[0].amount),kind=gettype(a[1]) | summarize Total=sum(d),Good=countif(kind=='timespan') | project Total=tostring(Total),Good";
+const TERMS_QUERY: &str =
+    "Telemetry | where Message has_any(dynamic(['error','warn'])) | summarize N=count()";
+const IP_QUERY: &str = "Telemetry | where ipv4_is_in_any_range(IP,dynamic(['10.0.0.0/8','192.168.0.0/16'])) | summarize N=count()";
+const ENCODING_QUERY: &str = "Telemetry | extend decoded=base64_decode_tostring(base64_encode_tostring(Message)) | summarize N=countif(decoded==Message)";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -111,6 +117,43 @@ fn guid_context() -> SessionContext {
     ctx
 }
 
+fn telemetry_context() -> SessionContext {
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let messages = ["ERROR disk", "WARN request", "INFO healthy", "terror"];
+    let addresses = ["10.1.2.3", "192.168.1.5", "8.8.8.8", "bad"];
+    let amounts = ["0.1", "9007199254740993.25"];
+    let batch = RecordBatch::try_from_iter(vec![
+        (
+            "Message",
+            Arc::new(StringArray::from_iter_values(
+                (0..JSON_ROWS).map(|i| messages[i % 4]),
+            )) as _,
+        ),
+        (
+            "IP",
+            Arc::new(StringArray::from_iter_values(
+                (0..JSON_ROWS).map(|i| addresses[i % 4]),
+            )) as _,
+        ),
+        (
+            "Amount",
+            Arc::new(StringArray::from_iter_values(
+                (0..JSON_ROWS).map(|i| amounts[i % 2]),
+            )) as _,
+        ),
+    ])
+    .unwrap();
+    let partitions = (0..4)
+        .map(|i| vec![batch.slice(i * JSON_ROWS / 4, JSON_ROWS / 4)])
+        .collect();
+    ctx.register_table(
+        TableReference::bare("Telemetry"),
+        Arc::new(MemTable::try_new(batch.schema(), partitions).unwrap()),
+    )
+    .unwrap();
+    ctx
+}
+
 fn benchmarks(c: &mut Criterion) {
     c.bench_function("parse/kql_pipeline", |b| {
         b.iter(|| parse(black_box(QUERY)).unwrap())
@@ -174,6 +217,7 @@ fn benchmarks(c: &mut Criterion) {
 
     let json = json_context();
     let guids = guid_context();
+    let telemetry = telemetry_context();
     let mut workloads = c.benchmark_group("workloads");
     for (name, query, context, rows, expected_rows) in [
         ("json_expand", JSON_QUERY, &json, JSON_ROWS, 2),
@@ -188,6 +232,11 @@ fn benchmarks(c: &mut Criterion) {
         ("search", SEARCH_QUERY, &ctx, ROWS, 1),
         ("top_hitters", HITTERS_QUERY, &ctx, ROWS, 2),
         ("guid_parse", GUID_QUERY, &guids, JSON_ROWS, 1),
+        ("decimal_exact", DECIMAL_QUERY, &telemetry, JSON_ROWS, 1),
+        ("rich_nested", RICH_QUERY, &ctx, 10_000, 1),
+        ("term_set", TERMS_QUERY, &telemetry, JSON_ROWS, 1),
+        ("ip_ranges", IP_QUERY, &telemetry, JSON_ROWS, 1),
+        ("encoding", ENCODING_QUERY, &telemetry, JSON_ROWS, 1),
     ] {
         let plan = runtime.block_on(async {
             context
@@ -245,6 +294,33 @@ fn benchmarks(c: &mut Criterion) {
             assert_eq!(
                 datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
                 datafusion::common::ScalarValue::Int64(Some(2))
+            );
+        }
+        if matches!(name, "term_set" | "ip_ranges" | "encoding") {
+            let expected = if name == "encoding" {
+                JSON_ROWS as i64
+            } else {
+                (JSON_ROWS / 2) as i64
+            };
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(expected))
+            );
+        }
+        if name == "decimal_exact" {
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+                datafusion::common::ScalarValue::Utf8(Some("450359962737049692500".into()))
+            );
+        }
+        if name == "rich_nested" {
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+                datafusion::common::ScalarValue::Utf8(Some("12500".into()))
+            );
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(1), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(10_000))
             );
         }
         if matches!(name, "bag_unpack" | "json_fields") {

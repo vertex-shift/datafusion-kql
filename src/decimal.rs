@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use datafusion::arrow::array::{
-    Array, ArrayRef, Decimal128Array, Decimal256Array, Decimal256Builder, StringArray,
-    StringBuilder,
+    Array, ArrayRef, Decimal128Array, Decimal256Array, Decimal256Builder, Int32Array, Int64Array,
+    StringArray, StringBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, i256};
 use datafusion::arrow::util::display::array_value_to_string;
@@ -17,6 +17,14 @@ use crate::ast::BinaryOp;
 
 pub(crate) const PRECISION: u8 = 57;
 pub(crate) const SCALE: i8 = 28;
+
+static POWERS: LazyLock<[i256; 77]> = LazyLock::new(|| {
+    let mut powers = [i256::ONE; 77];
+    for index in 1..powers.len() {
+        powers[index] = powers[index - 1] * i256::from_i128(10);
+    }
+    powers
+});
 
 pub(crate) fn data_type() -> DataType {
     DataType::Decimal256(PRECISION, SCALE)
@@ -48,10 +56,8 @@ pub(crate) fn encode(value: Decimal) -> i256 {
 }
 
 pub(crate) fn decode(mut value: i256, mut scale: u32) -> Option<Decimal> {
-    let ten = i256::from_i128(10);
-    while scale > 0 && value % ten == i256::ZERO {
-        value /= ten;
-        scale -= 1;
+    if value == i256::ZERO {
+        return Some(Decimal::ZERO);
     }
     if scale <= 28
         && let Some(value) = value.to_i128()
@@ -59,8 +65,28 @@ pub(crate) fn decode(mut value: i256, mut scale: u32) -> Option<Decimal> {
     {
         return Some(decimal);
     }
+    let (mut low, mut high) = (0, scale.checked_add(1)?);
+    if scale as usize >= POWERS.len() {
+        return None;
+    }
+    while low + 1 < high {
+        let middle = (low + high) / 2;
+        if value % POWERS[middle as usize] == i256::ZERO {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    value /= POWERS[low as usize];
+    scale -= low;
+    if scale <= 28
+        && let Some(value) = value.to_i128()
+        && let Ok(decimal) = Decimal::try_from_i128_with_scale(value, scale)
+    {
+        return Some(decimal);
+    }
     for drop in scale.saturating_sub(28).max(1)..=scale {
-        let divisor = ten.checked_pow(drop)?;
+        let divisor = POWERS[drop as usize];
         let mut coefficient = value / divisor;
         let remainder = value % divisor;
         let remainder = if remainder < i256::ZERO {
@@ -115,6 +141,20 @@ fn value(array: &ArrayRef, row: usize) -> Result<Option<Decimal>> {
                 .ok_or_else(|| DataFusionError::Internal("invalid decimal string array".into()))?;
             parse(strings.value(row))
         }
+        DataType::Int64 => Some(Decimal::from(
+            array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| DataFusionError::Internal("invalid long decimal input".into()))?
+                .value(row),
+        )),
+        DataType::Int32 => Some(Decimal::from(
+            array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .ok_or_else(|| DataFusionError::Internal("invalid int decimal input".into()))?
+                .value(row),
+        )),
         ty if ty.is_numeric() => parse(&array_value_to_string(array, row)?),
         DataType::Boolean => match ScalarValue::try_from_array(array, row)? {
             ScalarValue::Boolean(Some(true)) => Some(Decimal::ONE),
@@ -310,11 +350,30 @@ impl ScalarUDFImpl for Function {
             let arrays = args
                 .args
                 .iter()
-                .map(|arg| arg.to_array(count))
+                .map(|arg| arg.to_array(1))
                 .collect::<Result<Vec<_>>>()?;
+            let scalars = args
+                .args
+                .iter()
+                .zip(&arrays)
+                .map(|(arg, array)| {
+                    if matches!(arg, ColumnarValue::Scalar(_)) {
+                        value(array, 0).map(Some)
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let at = |index: usize, row| {
+                if let Some(value) = scalars[index] {
+                    Ok(value)
+                } else {
+                    value(&arrays[index], row)
+                }
+            };
             let mut output = Decimal256Builder::with_capacity(count).with_data_type(data_type());
             for row in 0..count {
-                let left = value(&arrays[0], row)?;
+                let left = at(0, row)?;
                 let result = if matches!(self.op, Op::Floor | Op::Ceiling) {
                     left.map(|value| {
                         if self.op == Op::Floor {
@@ -324,9 +383,9 @@ impl ScalarUDFImpl for Function {
                         }
                     })
                 } else if matches!(self.op, Op::Bin | Op::BinAt) {
-                    let size = value(&arrays[1], row)?;
+                    let size = at(1, row)?;
                     let origin = if self.op == Op::BinAt {
-                        value(&arrays[2], row)?
+                        at(2, row)?
                     } else {
                         Some(Decimal::ZERO)
                     };
@@ -343,7 +402,7 @@ impl ScalarUDFImpl for Function {
                         _ => None,
                     }
                 } else {
-                    match (left, value(&arrays[1], row)?) {
+                    match (left, at(1, row)?) {
                         (Some(left), Some(right)) => match self.op {
                             Op::Add => left.checked_add(right),
                             Op::Subtract => left.checked_sub(right),

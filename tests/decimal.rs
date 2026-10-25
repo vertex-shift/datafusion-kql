@@ -86,6 +86,11 @@ async fn nullable_decimal_conversion_has_no_success_shaped_fallback() {
 
 #[tokio::test]
 async fn decimal_bins_and_floor_preserve_large_integral_values() {
+    check(
+        "print a=isnull(bin_at(decimal(1.25),null,0)),b=isnull(bin_at(decimal(1.25),1,null))",
+        &[&["true", "true"]],
+    )
+    .await;
     check("print a=tostring(bin(decimal(9007199254740993.25),decimal(1))),b=tostring(bin(decimal(-1.2),decimal(0.5))),c=tostring(bin_at(decimal(5.5),decimal(2),decimal(0.5))),d=tostring(floor(decimal(-1.1))),e=tostring(ceiling(decimal(-1.1)))",
         &[&["9007199254740993","-1.5","4.5","-2","-1"]]).await;
     check(
@@ -238,6 +243,8 @@ async fn invalid_decimal_literals_and_datatable_values_fail_during_planning() {
         "print d=decimal(79228162514264337593543950336)",
         "datatable(d:decimal)['invalid']",
         "range d from decimal(9007199254740993) to decimal(9007199254740994) step decimal(0.1)",
+        "print d=bin(decimal(1.25),1h)",
+        "print d=bin_at(decimal(1.25),1,datetime(2025-01-01))",
     ] {
         assert!(ctx.kql(query).await.is_err(), "{query}");
     }

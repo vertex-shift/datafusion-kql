@@ -1565,6 +1565,16 @@ impl Expressions<'_> {
     ) -> Result<Expr> {
         let ty = value.get_type(schema)?;
         if crate::decimal::is_decimal(&ty) {
+            let size_type = size.get_type(schema)?;
+            let origin_type = origin.get_type(schema)?;
+            if !(size_type.is_numeric() || size_type == DataType::Null)
+                || !(origin_type.is_numeric() || origin_type == DataType::Null)
+            {
+                return Err(Error::syntax(
+                    "decimal bin_at requires numeric size and origin",
+                    span,
+                ));
+            }
             return Ok(crate::decimal::call(
                 crate::decimal::Op::BinAt,
                 vec![value, size, origin],
@@ -1651,6 +1661,9 @@ impl Expressions<'_> {
     fn bin(&self, value: Expr, size: Expr, schema: &DFSchema, span: Span) -> Result<Expr> {
         let ty = value.get_type(schema)?;
         if crate::decimal::is_decimal(&ty) {
+            if !size.get_type(schema)?.is_numeric() && size.get_type(schema)? != DataType::Null {
+                return Err(Error::syntax("decimal bin requires a numeric size", span));
+            }
             return Ok(crate::decimal::call(
                 crate::decimal::Op::Bin,
                 vec![value, size],

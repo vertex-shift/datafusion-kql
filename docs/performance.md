@@ -46,6 +46,11 @@ capacity estimates.
 | `workloads/search` | Column-restricted regex term search and a numeric filter over 1,000,000 rows |
 | `workloads/top_hitters` | Exact native weighted heavy hitters over 1,000,000 rows |
 | `workloads/guid_parse` | Parse 100,000 canonical GUID strings to native 128-bit values and verify two distinct IDs |
+| `workloads/decimal_exact` | Parse/add 100,000 decimals, aggregate natively, and verify an exact total beyond `2^53` |
+| `workloads/rich_nested` | Pack/access typed nested values over 10,000 rows; verify exact amounts and preserved timespan tags |
+| `workloads/term_set` | Case-insensitive compiled term-set matching over 100,000 telemetry strings |
+| `workloads/ip_ranges` | Cached merged-CIDR membership over 100,000 IPv4 strings, including invalid addresses |
+| `workloads/encoding` | UTF-8 base64 encode/decode over 100,000 strings and verify every round trip |
 
 The fixture uses two non-null columns, four in-memory partitions, a filter,
 grouped sum, and top-k. Source data and physical planning are outside the
@@ -64,6 +69,56 @@ Each execution iteration uses DataFusion's `reset_plan_states` to create fresh
 operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
+
+## Measured 0.6 type and telemetry workloads
+
+These workloads were measured on 2026-10-25 on the same Apple M4/arm64 host,
+Rust 1.95.0, DataFusion 55.2.0, optimized bench profile, and four target
+partitions:
+
+```bash
+cargo bench --locked --bench kql -j 2 -- \
+  'workloads/(decimal_exact|rich_nested|term_set|ip_ranges|encoding)' \
+  --warm-up-time 1 --measurement-time 3 --sample-size 30
+```
+
+| Benchmark | Criterion estimate | 95% confidence interval | Input rows/second |
+| --- | --- | --- | --- |
+| Exact decimal parse/add/sum, 100,000 rows | 10.42 ms | 10.30-10.57 ms | 9.60 million |
+| Rich nested pack/access/aggregate, 10,000 rows | 95.49 ms | 93.10-98.01 ms | 104,700 |
+| Compiled term-set matching, 100,000 rows | 6.19 ms | 6.02-6.36 ms | 16.1 million |
+| Merged CIDR membership, 100,000 rows | 2.83 ms | 2.77-2.90 ms | 35.3 million |
+| UTF-8 base64 round trips, 100,000 rows | 6.09 ms | 6.00-6.18 ms | 16.4 million |
+
+The decimal/rich rows above were remeasured after removing repeated scalar
+expansion/conversion and replacing linear decimal trailing-zero normalization
+with a bounded binary search over cached powers of ten. At the original
+0.6 implementation (`85b8c34`), the same fixtures measured 108.05 ms
+(106.23-109.87 ms) and 143.53 ms (136.80-151.33 ms), respectively. These
+shared-host runs indicate about 10.4 times faster decimal execution and
+1.5 times faster rich nested execution for these fixtures, not universal
+speedups or a controlled release-to-release comparison. The term/IP/encoding
+measurements use the original implementation; these decimal changes do not
+affect their kernels.
+
+All five workloads assert their actual results before timing. The decimal
+total is exactly `450359962737049692500`, beyond binary64 integer precision.
+The rich fixture constructs a source-dependent bag on every row and verifies
+an exact `12500` amount total plus 10,000 preserved timespan tags; it cannot
+be replaced with a constant bag by the optimizer. It remains substantially
+more expensive than ordinary primitive operations. These measurements cover
+the current bounded decimal implementation, not full reference-engine
+decimal range/precision; see the compatibility contract.
+
+Term and CIDR matchers are warm: expression-local caches survive
+`reset_plan_states`. The fixtures contain four repeating messages/addresses,
+two repeating decimal strings, and small final aggregates, not unbounded
+dictionary/cardinality growth. They do not measure index-assisted search,
+persistent I/O, high-cardinality grouping, or arbitrary rich documents.
+No result implies an execution advantage over an equivalent native DataFusion
+plan. The numeric SQL/KQL physical-plan equality assertion still runs, and
+all workload result assertions execute even when the timing filter selects
+only some benchmarks.
 
 ## Measured 0.5 GUID workload
 
