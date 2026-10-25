@@ -88,7 +88,7 @@ cargo bench --locked --bench kql -j 2 -- \
 | Rich nested pack/access/aggregate, 10,000 rows | 95.49 ms | 93.10-98.01 ms | 104,700 |
 | Compiled term-set matching, 100,000 rows | 6.19 ms | 6.02-6.36 ms | 16.1 million |
 | Merged CIDR membership, 100,000 rows | 2.83 ms | 2.77-2.90 ms | 35.3 million |
-| UTF-8 base64 round trips, 100,000 rows | 6.09 ms | 6.00-6.18 ms | 16.4 million |
+| UTF-8 base64 round trips, 100,000 rows | 2.71 ms | 2.42-3.03 ms | 36.9 million |
 
 The decimal/rich rows above were remeasured after removing repeated scalar
 expansion/conversion and replacing linear decimal trailing-zero normalization
@@ -97,9 +97,17 @@ with a bounded binary search over cached powers of ten. At the original
 (106.23-109.87 ms) and 143.53 ms (136.80-151.33 ms), respectively. These
 shared-host runs indicate about 10.4 times faster decimal execution and
 1.5 times faster rich nested execution for these fixtures, not universal
-speedups or a controlled release-to-release comparison. The term/IP/encoding
+speedups or a controlled release-to-release comparison. The term/IP
 measurements use the original implementation; these decimal changes do not
 affect their kernels.
+
+The encoding row was remeasured at `f43cbba`, after the reference-backed
+base64 corrections also removed an unnecessary per-value compacting buffer.
+The original fixture at `85b8c34` measured 6.09 ms (6.00-6.18 ms), so the
+new estimate is about 2.25 times faster. All workload assertions and the
+numeric SQL/KQL plan-equivalence check ran during the measurement. The
+30-sample run reported three timing outliers, reflected in its wider interval;
+the same shared-host and workload-specific comparison limits apply.
 
 All five workloads assert their actual results before timing. The decimal
 total is exactly `450359962737049692500`, beyond binary64 integer precision.

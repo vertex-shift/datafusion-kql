@@ -356,6 +356,8 @@ loopback, or link-local addresses.
 `max`, and typed nulls; `todecimal` performs nullable runtime conversion. Values
 currently use a signed 96-bit coefficient and scale 0-28, a **bounded local
 profile, not full Kusto decimal parity**.
+Kusto's [decimal documentation](https://learn.microsoft.com/en-us/kusto/query/scalar-data-types/decimal)
+describes a 128-bit decimal number; it does not establish this narrower profile.
 The [public decimal literal reader](https://github.com/microsoft/Kusto-Query-Language/blob/328e05d10d6c73654e416675fc75af7ed0e05ffd/src/Kusto.Language/Syntax/SyntaxToken.cs#L622-L636)
 uses `System.Decimal`, but that frontend representation does not establish
 the engine's runtime range or precision.
