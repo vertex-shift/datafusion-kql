@@ -31,6 +31,8 @@ mod format_time;
 mod functions;
 mod grouped;
 mod guid;
+mod hll;
+mod hll_functions;
 mod ip;
 mod json_path;
 mod lexer;

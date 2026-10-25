@@ -841,6 +841,20 @@ impl Expressions<'_> {
         }
     }
 
+    pub(crate) fn hll_value(&self, value: Expr, schema: &DFSchema, span: Span) -> Result<Expr> {
+        let ty = value.get_type(schema)?;
+        if dynamic::is_dynamic(&ty) {
+            Ok(dynamic::call(Kernel::EncodeJson, vec![value]))
+        } else if is_string(&ty) || ty == DataType::Null {
+            Ok(cast(value, DataType::Utf8))
+        } else {
+            Err(Error::syntax(
+                "HLL functions require a sketch or its serialized JSON string",
+                span,
+            ))
+        }
+    }
+
     pub(crate) fn string_value(&self, value: Expr, schema: &DFSchema) -> Result<Expr> {
         Ok(if dynamic::is_dynamic(&value.get_type(schema)?) {
             dynamic::call(Kernel::Convert(DataType::Utf8), vec![value])
@@ -949,6 +963,29 @@ impl Expressions<'_> {
                 ))
             }
         };
+        if matches!(name, "dcount_hll" | "hll_merge") {
+            if name == "dcount_hll" {
+                arity(1)?;
+            } else if !(2..=64).contains(&values.len()) {
+                return Err(Error::syntax(
+                    "scalar hll_merge expects 2-64 sketches",
+                    span,
+                ));
+            }
+            let values = values
+                .into_iter()
+                .zip(args)
+                .map(|(value, argument)| self.hll_value(value, schema, argument.span))
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(crate::hll_functions::scalar(
+                if name == "dcount_hll" {
+                    crate::hll_functions::Scalar::Count
+                } else {
+                    crate::hll_functions::Scalar::Merge
+                },
+                values,
+            ));
+        }
         if name == "gettype" {
             arity(1)?;
             let (type_name, _) = crate::tabular::type_names(&values[0].get_type(schema)?);

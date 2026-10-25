@@ -37,6 +37,11 @@ const TERMS_QUERY: &str =
     "Telemetry | where Message has_any(dynamic(['error','warn'])) | summarize N=count()";
 const IP_QUERY: &str = "Telemetry | where ipv4_is_in_any_range(IP,dynamic(['10.0.0.0/8','192.168.0.0/16'])) | summarize N=count()";
 const ENCODING_QUERY: &str = "Telemetry | extend decoded=base64_decode_tostring(base64_encode_tostring(Message)) | summarize N=countif(decoded==Message)";
+const DCOUNT_QUERY: &str = "CardinalityEvents | summarize N=dcount(Id,2)";
+const NATIVE_DCOUNT_QUERY: &str = "CardinalityEvents | summarize N=approx_distinct(Id)";
+const GROUPED_DCOUNT_QUERY: &str =
+    "CardinalityEvents | summarize N=dcount(Id,4) by Group | summarize Total=sum(N),Groups=count()";
+const HLL_ROLLUP_QUERY: &str = "CardinalityEvents | summarize s=hll(Id,2) by Shard | summarize s=hll_merge(s) | project N=dcount_hll(s)";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -154,6 +159,38 @@ fn telemetry_context() -> SessionContext {
     ctx
 }
 
+fn cardinality_context() -> SessionContext {
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let batch = RecordBatch::try_from_iter(vec![
+        (
+            "Id",
+            Arc::new(Int64Array::from_iter_values((0..ROWS).map(|i| i as i64))) as _,
+        ),
+        (
+            "Group",
+            Arc::new(Int64Array::from_iter_values(
+                (0..ROWS).map(|i| (i % 100_000) as i64),
+            )) as _,
+        ),
+        (
+            "Shard",
+            Arc::new(Int64Array::from_iter_values(
+                (0..ROWS).map(|i| (i % 32) as i64),
+            )) as _,
+        ),
+    ])
+    .unwrap();
+    let partitions = (0..4)
+        .map(|i| vec![batch.slice(i * ROWS / 4, ROWS / 4)])
+        .collect();
+    ctx.register_table(
+        TableReference::bare("CardinalityEvents"),
+        Arc::new(MemTable::try_new(batch.schema(), partitions).unwrap()),
+    )
+    .unwrap();
+    ctx
+}
+
 fn benchmarks(c: &mut Criterion) {
     c.bench_function("parse/kql_pipeline", |b| {
         b.iter(|| parse(black_box(QUERY)).unwrap())
@@ -218,6 +255,8 @@ fn benchmarks(c: &mut Criterion) {
     let json = json_context();
     let guids = guid_context();
     let telemetry = telemetry_context();
+    let cardinality = cardinality_context();
+    let mut distinct_estimate = None;
     let mut workloads = c.benchmark_group("workloads");
     for (name, query, context, rows, expected_rows) in [
         ("json_expand", JSON_QUERY, &json, JSON_ROWS, 2),
@@ -237,6 +276,10 @@ fn benchmarks(c: &mut Criterion) {
         ("term_set", TERMS_QUERY, &telemetry, JSON_ROWS, 1),
         ("ip_ranges", IP_QUERY, &telemetry, JSON_ROWS, 1),
         ("encoding", ENCODING_QUERY, &telemetry, JSON_ROWS, 1),
+        ("dcount_accuracy", DCOUNT_QUERY, &cardinality, ROWS, 1),
+        ("dcount_native", NATIVE_DCOUNT_QUERY, &cardinality, ROWS, 1),
+        ("dcount_groups", GROUPED_DCOUNT_QUERY, &cardinality, ROWS, 1),
+        ("hll_rollup", HLL_ROLLUP_QUERY, &cardinality, ROWS, 1),
     ] {
         let plan = runtime.block_on(async {
             context
@@ -279,6 +322,40 @@ fn benchmarks(c: &mut Criterion) {
             expected_rows,
             "unexpected result cardinality for {name}",
         );
+        if matches!(name, "dcount_accuracy" | "dcount_native" | "hll_rollup") {
+            let value =
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap();
+            let estimate = match value {
+                datafusion::common::ScalarValue::Int64(Some(value)) => value as f64,
+                datafusion::common::ScalarValue::UInt64(Some(value)) => value as f64,
+                _ => panic!("distinct benchmark must return a numeric count"),
+            };
+            let precision = if name == "dcount_native" { 14 } else { 16 };
+            assert!(
+                (estimate / ROWS as f64 - 1.0).abs()
+                    <= 6.0 * 1.04 / ((1_u64 << precision) as f64).sqrt(),
+                "{name} exceeds its six-sigma error check: {estimate}"
+            );
+            if name == "dcount_accuracy" {
+                distinct_estimate = Some(value);
+            } else if name == "hll_rollup" {
+                assert_eq!(
+                    Some(value),
+                    distinct_estimate,
+                    "merged sketches must equal the one-pass estimate"
+                );
+            }
+        }
+        if name == "dcount_groups" {
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(ROWS as i64))
+            );
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(1), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(100_000))
+            );
+        }
         if matches!(name, "pivot" | "search") {
             let expected = if name == "pivot" {
                 ROWS as i64

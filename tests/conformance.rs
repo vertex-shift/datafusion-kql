@@ -659,6 +659,34 @@ const FIXTURES: &[Fixture] = &[
     },
 ];
 
+// Published-contract fixtures awaiting a live engine run, not captured results.
+const SOURCE_FIXTURES: &[Fixture] = &[
+    Fixture {
+        name: "source-hll-published-scalar-merge",
+        query: "range x from 1 to 10 step 1 | extend y=x+10 | summarize a=hll(x),b=hll(y) | project N=tostring(dcount_hll(hll_merge(a,b)))",
+        columns: &["N"],
+        rows: &[&["20"]],
+    },
+    Fixture {
+        name: "source-hll-exact-threshold",
+        query: "range x from 1 to 1000 step 1 | summarize N=dcount(x,1),s=hll(x,1) | project N=tostring(N),Restored=tostring(dcount_hll(s))",
+        columns: &["N", "Restored"],
+        rows: &[&["1000", "1000"]],
+    },
+    Fixture {
+        name: "source-hll-conditional-grouped-merge",
+        query: "range x from 1 to 20 step 1 | extend g=x%2 | summarize s=hll_if(x,x>10,2) by g | summarize s=hll_merge(s) | project N=tostring(dcount_hll(s))",
+        columns: &["N"],
+        rows: &[&["10"]],
+    },
+    Fixture {
+        name: "source-hll-empty-count",
+        query: "datatable(x:long)[] | summarize N=dcount(x,2),s=hll(x,2) | project N=tostring(N),Restored=tostring(dcount_hll(s))",
+        columns: &["N", "Restored"],
+        rows: &[&["0", "0"]],
+    },
+];
+
 fn endpoint(uri: &str) -> TestResult<(String, bool)> {
     let uri = uri.trim_end_matches('/');
     let (scheme, authority) = uri
@@ -915,7 +943,7 @@ async fn local(ctx: &SessionContext, fixture: &Fixture) -> TestResult<(Vec<Strin
     Ok((names, rows))
 }
 
-async fn captured(ctx: &SessionContext, fixture: &Fixture) -> TestResult<()> {
+async fn check_expected(ctx: &SessionContext, fixture: &Fixture) -> TestResult<()> {
     assert!(
         !fixture.columns.is_empty() && !fixture.rows.is_empty(),
         "empty reference fixture"
@@ -940,7 +968,7 @@ async fn captured(ctx: &SessionContext, fixture: &Fixture) -> TestResult<()> {
     expected.sort_unstable();
     assert_eq!(
         actual, expected,
-        "captured reference mismatch for '{}'",
+        "expected fixture mismatch for '{}'",
         fixture.name
     );
     Ok(())
@@ -952,7 +980,21 @@ async fn captured_reference_fixtures_match_locally() -> TestResult<()> {
     let ctx = SessionContext::new();
     for fixture in FIXTURES {
         assert!(names.insert(fixture.name), "duplicate reference fixture");
-        captured(&ctx, fixture).await?;
+        check_expected(&ctx, fixture).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn source_hll_fixtures_match_published_contracts_locally() -> TestResult<()> {
+    let ctx = SessionContext::new();
+    for fixture in SOURCE_FIXTURES {
+        assert!(
+            !FIXTURES
+                .iter()
+                .any(|captured| captured.name == fixture.name)
+        );
+        check_expected(&ctx, fixture).await?;
     }
     Ok(())
 }
@@ -1105,7 +1147,7 @@ fn reference_transport_local_http() -> TestResult<()> {
 async fn live_kusto_conformance() -> TestResult<()> {
     let client = Kusto::from_env()?;
     let ctx = SessionContext::new();
-    for fixture in FIXTURES {
+    for fixture in FIXTURES.iter().chain(SOURCE_FIXTURES) {
         let (columns, expected) = local(&ctx, fixture).await?;
         let actual = client
             .query(fixture.query, &columns)

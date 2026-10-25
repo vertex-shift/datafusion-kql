@@ -51,6 +51,10 @@ capacity estimates.
 | `workloads/term_set` | Case-insensitive compiled term-set matching over 100,000 telemetry strings |
 | `workloads/ip_ranges` | Cached merged-CIDR membership over 100,000 IPv4 strings, including invalid addresses |
 | `workloads/encoding` | UTF-8 base64 encode/decode over 100,000 strings and verify every round trip |
+| `workloads/dcount_accuracy` | Accuracy-2 HLL over 1,000,000 unique longs; assert its six-sigma error bound |
+| `workloads/dcount_native` | Native DataFusion `approx_distinct` over the same 1,000,000 longs, with its own precision/error check |
+| `workloads/dcount_groups` | Accuracy-4 distinct counts over 100,000 ten-value groups; assert the exact one-million total and group count |
+| `workloads/hll_rollup` | Build 32 accuracy-2 sketches over 1,000,000 rows, merge them, and assert equality with the one-pass HLL estimate |
 
 The fixture uses two non-null columns, four in-memory partitions, a filter,
 grouped sum, and top-k. Source data and physical planning are outside the
@@ -69,6 +73,44 @@ Each execution iteration uses DataFusion's `reset_plan_states` to create fresh
 operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
+
+## Measured 0.8 bounded distinct-count workloads
+
+The HLL workloads were measured on 2026-10-25 on the same Apple M4/arm64 host,
+Rust 1.95.0, DataFusion 55.2.0, optimized bench profile, and four target
+partitions:
+
+```bash
+cargo bench --locked --bench kql -j 2 -- \
+  'workloads/(dcount_accuracy|dcount_native|dcount_groups|hll_rollup)' \
+  --warm-up-time 1 --measurement-time 3 --sample-size 30
+```
+
+| Benchmark | Criterion estimate | 95% confidence interval | Input rows/second |
+| --- | --- | --- | --- |
+| Accuracy-2 distinct count, 1,000,000 unique longs | 1.93 ms | 1.90-1.97 ms | 517 million |
+| Native DataFusion approximate distinct, same input | 0.487 ms | 0.482-0.496 ms | 2.05 billion |
+| Accuracy-4 counts over 100,000 ten-value groups | 65.59 ms | 64.95-66.23 ms | 15.25 million |
+| Build/merge 32 accuracy-2 sketches, 1,000,000 rows | 41.24 ms | 40.03-42.53 ms | 24.25 million |
+
+The direct and rollup estimates must be identical. Both are checked against a
+six-sigma error interval using 65,536 registers; the native baseline has its own
+16,384-register error check. These are different precision/hashing/state paths,
+not identical physical plans or an execution-speed advantage over DataFusion.
+The native baseline is faster here. The ordinary numeric KQL/SQL benchmark still
+requires identical native plans before execution.
+
+The many-group fixture asserts exactly 100,000 groups and a one-million distinct
+total. Each group stays sparse, avoiding a 256 KiB register allocation per key.
+The rollup includes dynamic sketch serialization/decoding and merge costs; it is
+not just adding precomputed counts. Separate regressions force native aggregation
+to spill under a 2 MiB host pool and assert exact results plus nonzero spill
+metrics after replay. Materialized query snapshots still do not spill.
+
+The shared host varied materially between runs, including for unchanged native
+DataFusion code. The native baseline also reported timing outliers. These are
+memory-resident local measurements, not universal throughput or statistical
+accuracy guarantees, and the new HLL cases have not been run against Kusto.
 
 ## Measured 0.7 decimal128 workloads
 

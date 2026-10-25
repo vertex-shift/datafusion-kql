@@ -702,11 +702,12 @@ Timespan `sum`, `sumif`, `avg`, and `avgif` preserve duration output types.
 Other input overloads follow DataFusion's supported Arrow types.
 
 `count()` counts rows, including rows with nulls; `count(column)` also counts all
-rows. Native filters implement conditional aggregates. Counts are signed
-`long`. Sum, sample variance, and sample standard deviation default to zero for
+rows. Native filters implement conditional aggregates. KQL counts are signed
+`long`; separately registered native aggregates retain their declared types.
+Sum, sample variance, and sample standard deviation default to zero for
 empty/all-null inputs. Numeric `avg`/`avgif` return NaN for empty/all-null inputs, matching the published
 Kusto summarize example rather than SQL's null. Decimal/timespan averages
-retain typed null because their types cannot represent NaN. Group-less summarize
+retain their reference-backed typed-null defaults. Group-less summarize
 returns a row on empty input; grouped summarize returns none.
 
 Standard aggregate names such as `count_`, `sum_Value`, and grouping
@@ -741,10 +742,81 @@ than using Kusto's approximate t-digest. It therefore uses more memory for large
 groups. Ranks must be constant and within 0-100; at most 1024 ranks are allowed.
 Multi-column percentiles use generated output names; rename them afterward.
 
-`dcount` uses DataFusion's approximate-distinct algorithm, **not Kusto's
-accuracy-configurable HLL implementation**. Accuracy arguments are rejected.
-Use `count_distinct` for exact counts. Dynamic distinct counts use canonical JSON
-representations and continue to ignore nulls.
+### Accuracy-controlled distinct counts and sketches
+
+`dcount(value[, accuracy])` and `dcountif(value, predicate[, accuracy])` now
+use bounded native HLL accumulators. Accuracy is a constant integer from 0
+through 4, defaulting to 1; lexical bindings, functions, and typed query
+parameters can supply it. Null input values are ignored. Null/false predicates
+do not update conditional states. Counts have signed `long` output and default
+to zero for empty/all-null/all-filtered groups.
+
+| Accuracy | Dense registers | Nominal HLL standard error |
+| --- | --- | --- |
+| 0 | 4,096 bytes | 1.6% |
+| 1 | 16,384 bytes | 0.8% |
+| 2 | 65,536 bytes | 0.4% |
+| 3 | 131,072 bytes | 0.28% |
+| 4 | 262,144 bytes | 0.2% |
+
+These are the published Kusto register budgets, not hard error guarantees.
+The implementation retains unique 64-bit hashes before promoting to dense
+registers: accuracy 1 is exact through 1,000 distinct hashes and accuracy 2
+through 8,000; other accuracies retain up to 256 hashes. Hash collisions remain
+theoretical possibilities. Dense states use Ertl's histogram estimator.
+`count_distinct` remains the non-sketch option for exact native counting.
+Changing the default `dcount` implementation can change approximate results
+relative to 0.7; native `approx_distinct` remains separately callable.
+
+`hll(value[, accuracy])` and `hll_if(value, predicate[, accuracy])` return
+reusable dynamic sketches. `summarize hll_merge(sketch)` merges a sketch column;
+scalar `hll_merge(a,b,...)` accepts 2-64 sketches. `dcount_hll(sketch)` returns
+the estimate without re-reading source rows. Merges are idempotent and union
+overlapping sets, not sums of estimates. Accuracy must match across sketches;
+mixed accuracy, foreign/malformed states, unsupported versions, invalid
+register ranks, and exceeded byte budgets fail explicitly.
+
+Sketches round-trip through `tostring`/`parse_json`, tables, materialization,
+and query parameters. A dynamic null sketch is ignored when merging;
+`dcount_hll(null)` and an empty `hll_merge` return null. An empty `hll` retains
+its chosen accuracy and has estimate zero. Decimal identity uses the canonical
+numeric key, dynamic identity uses lossless typed encoding, and native inputs
+use logical Arrow values, not dictionary indices. Input types are tagged, so
+combining sketches of different logical types does not conflate equal-looking
+text with numeric values. Normalize input column types before building sketches
+when those values should count as the same type.
+The accepted native Arrow input overloads are broader than the public Kusto
+frontend's `hll`/`hll_if` signature restrictions on direct real/bool inputs;
+treat those overloads as extension behavior, not certified service parity.
+Scalar decoding caches one consecutive sketch per argument within each batch,
+including its estimate for `dcount_hll`, so frozen scalar-subquery sketches do
+not rescan dense registers for every source row.
+
+**Storage boundary:** output is an opaque, versioned `datafusion-kql` JSON
+envelope containing a bounded base64 payload. It is **not compatible with
+Kusto-service HLL blobs**, whose internal format is not a stable API.
+The current format identifies DataFusion 55.2's fixed-seed quality hash and
+native endianness; future hash/schema changes require a new format version.
+Do not edit sketch internals or merge states from different implementations.
+Each JSON input is limited to 1 MiB and binary payloads to 262,154 bytes.
+
+Both one-group and vectorized `GroupsAccumulator` paths support native
+partial/final merge, grouped filters, state emission/reindexing, and
+DataFusion's pre-aggregation bypass. Sparse states avoid allocating 256 KiB
+for every tiny accuracy-4 group. Retained buffers are reported to the host
+memory pool; native aggregation can spill intermediate states when configured.
+This does not add spilling to materialized query snapshots or generic grouped
+subquery buffers.
+
+The accuracy/budget semantics are grounded in the published
+[dcount](https://learn.microsoft.com/en-us/kusto/query/dcount-aggregation-function)
+and [HLL](https://learn.microsoft.com/en-us/kusto/query/hll-aggregation-function)
+contracts. Local regressions measure exact thresholds and six-sigma error
+checks across multiple deterministic hash populations. These new cases have
+not been compared to a live Kusto engine; they do not expand the captured
+49-fixture reference baseline or promise identical service estimates.
+Four published-contract HLL fixtures are separately labelled in the conformance
+suite and included in the opt-in live runner; they remain pending live execution.
 
 ## Type and execution boundaries
 
