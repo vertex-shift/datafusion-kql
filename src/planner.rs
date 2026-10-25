@@ -481,9 +481,69 @@ impl<'s> Planner<'s> {
                         | ExprKind::DeferredCall { .. }
                         | ExprKind::InTabular { .. }
                         | ExprKind::InList { .. }
+                        | ExprKind::TermSet { .. }
                 )
             }) {
                 return Ok(expr.clone());
+            }
+            if let ExprKind::TermSet {
+                expr: value,
+                values,
+                tabular,
+                all,
+            } = &expr.kind
+            {
+                let source = if let Some(query) = tabular {
+                    Some(self.query(query).await?)
+                } else if let [value] = values.as_slice()
+                    && let Some(source) = self.tabular_argument(value)?
+                {
+                    Some(self.source(&source).await?)
+                } else {
+                    None
+                };
+                if let Some(source) = source {
+                    let source = ordering::visible(source)?;
+                    if source.schema().fields().is_empty() {
+                        return Err(Error::syntax(
+                            "tabular term search requires a result column",
+                            expr.span,
+                        ));
+                    }
+                    let column = field_expr(&source, 0);
+                    let values = crate::aggregate_functions::collection(
+                        crate::aggregate_functions::CollectionKind::Set,
+                        if *all { 257 } else { 10_001 },
+                        column,
+                    )
+                    .alias("terms");
+                    let query = LogicalPlanBuilder::from(source)
+                        .aggregate(Vec::<Expr>::new(), vec![values])?
+                        .build()?;
+                    let name = self.temporary_name(&query);
+                    self.scalars.insert(
+                        name.clone(),
+                        Expr::ScalarSubquery(datafusion::logical_expr::Subquery {
+                            subquery: Arc::new(query),
+                            outer_ref_columns: Vec::new(),
+                            spans: datafusion::common::Spans::new(),
+                        }),
+                    );
+                    return Ok(ast::Expr {
+                        kind: ExprKind::TermSet {
+                            expr: Box::new(self.resolve_expression(value).await?),
+                            values: vec![ast::Expr {
+                                kind: ExprKind::BindingReference(name),
+                                span: expr.span,
+                                depth: 1,
+                            }],
+                            tabular: None,
+                            all: *all,
+                        },
+                        span: expr.span,
+                        depth: expr.depth,
+                    });
+                }
             }
             let membership = match &expr.kind {
                 ExprKind::InTabular {
@@ -935,6 +995,40 @@ impl<'s> Planner<'s> {
         Ok(result)
     }
 
+    fn tabular_argument(&self, expr: &ast::Expr) -> Result<Option<Source>> {
+        Ok(match &expr.kind {
+            ExprKind::Identifier(name) if !self.scalars.contains_key(&name[0]) => {
+                let reference = table_reference(name, expr.span)?;
+                let exists = self.tables.contains_key(&name[0])
+                    || self
+                        .functions
+                        .get(&name[0])
+                        .is_some_and(|function| function.tabular())
+                    || self
+                        .state
+                        .schema_for_ref(reference.clone())?
+                        .table_exist(reference.table());
+                exists.then(|| Source::Table {
+                    name: name.clone(),
+                    span: expr.span,
+                })
+            }
+            ExprKind::Call { name, args }
+                if self
+                    .functions
+                    .get(name)
+                    .is_some_and(|function| function.tabular()) =>
+            {
+                Some(Source::Call {
+                    name: name.clone(),
+                    args: scalar_arguments(args),
+                    span: expr.span,
+                })
+            }
+            _ => None,
+        })
+    }
+
     async fn resolve_operator(&mut self, operator: &Operator) -> Result<Operator> {
         if !operator.expression_refs().iter().any(|expr| {
             expr.any(|kind| {
@@ -944,6 +1038,7 @@ impl<'s> Planner<'s> {
                         | ExprKind::DeferredCall { .. }
                         | ExprKind::InTabular { .. }
                         | ExprKind::InList { .. }
+                        | ExprKind::TermSet { .. }
                 )
             })
         }) {

@@ -313,6 +313,22 @@ impl Expressions<'_> {
                 };
                 if *negated { result.not() } else { result }
             }
+            ExprKind::TermSet {
+                expr: value,
+                values,
+                tabular,
+                all,
+            } => {
+                if tabular.is_some() {
+                    return Err(Error::Plan("tabular term search was not prepared".into()));
+                }
+                let value = self.lower(value, schema, false)?;
+                let values = values
+                    .iter()
+                    .map(|value| self.lower(value, schema, false))
+                    .collect::<Result<Vec<_>>>()?;
+                crate::terms::plan(self, value, values, *all, schema, expr.span)?
+            }
             ExprKind::InPrepared {
                 expr,
                 binding,
@@ -436,32 +452,61 @@ impl Expressions<'_> {
                 self.arithmetic(left, op, right, schema, right_span)?
             }
             B::MatchesRegex => self.function("regexp_like", vec![left, right])?,
-            B::Has | B::NotHas | B::HasCs | B::NotHasCs => {
+            B::Has
+            | B::NotHas
+            | B::HasCs
+            | B::NotHasCs
+            | B::HasPrefix
+            | B::NotHasPrefix
+            | B::HasPrefixCs
+            | B::NotHasPrefixCs
+            | B::HasSuffix
+            | B::NotHasSuffix
+            | B::HasSuffixCs
+            | B::NotHasSuffixCs => {
                 let constant = self.constant(right, right_span)?;
                 let needle = constant.try_as_str().flatten().ok_or_else(|| {
                     Error::unsupported("has requires a constant string term", right_span)
                 })?;
-                if !needle.chars().all(char::is_alphanumeric) {
+                if matches!(op, B::Has | B::NotHas | B::HasCs | B::NotHasCs)
+                    && !needle.chars().all(char::is_alphanumeric)
+                {
                     return Err(Error::unsupported(
                         "has currently requires a single alphanumeric term",
                         right_span,
                     ));
                 }
-                let pattern = if needle.is_empty() {
-                    // An empty string is not a term.
-                    String::from(r"\b\B")
-                } else {
-                    format!(
-                        r"(?:^|[^\p{{L}}\p{{N}}]){}(?:$|[^\p{{L}}\p{{N}}])",
-                        regex::escape(needle)
-                    )
-                };
-                let mut args = vec![left, lit(pattern)];
-                if matches!(op, B::Has | B::NotHas) {
+                let prefix = matches!(
+                    op,
+                    B::HasPrefix | B::NotHasPrefix | B::HasPrefixCs | B::NotHasPrefixCs
+                );
+                let suffix = matches!(
+                    op,
+                    B::HasSuffix | B::NotHasSuffix | B::HasSuffixCs | B::NotHasSuffixCs
+                );
+                let pattern = crate::terms::pattern(needle, !suffix, !prefix);
+                let mut args = vec![self.string_value(left, schema)?, lit(pattern)];
+                if matches!(
+                    op,
+                    B::Has
+                        | B::NotHas
+                        | B::HasPrefix
+                        | B::NotHasPrefix
+                        | B::HasSuffix
+                        | B::NotHasSuffix
+                ) {
                     args.push(lit("i"));
                 }
                 let result = self.function("regexp_like", args)?;
-                if matches!(op, B::NotHas | B::NotHasCs) {
+                if matches!(
+                    op,
+                    B::NotHas
+                        | B::NotHasCs
+                        | B::NotHasPrefix
+                        | B::NotHasPrefixCs
+                        | B::NotHasSuffix
+                        | B::NotHasSuffixCs
+                ) {
                     result.not()
                 } else {
                     result
@@ -791,6 +836,9 @@ impl Expressions<'_> {
                 ))
             }
         };
+        if let Some(op) = crate::ip::Op::lookup(name) {
+            return crate::ip::plan(self, op, values, schema, span);
+        }
         if let Some(op) = crate::series_functions::Op::lookup(name) {
             return Ok(dynamic::call(Kernel::Series(op), values));
         }

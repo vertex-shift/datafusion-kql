@@ -378,6 +378,10 @@ fn fill(
         *op = match *op {
             BinaryOp::Has => BinaryOp::HasCs,
             BinaryOp::NotHas => BinaryOp::NotHasCs,
+            BinaryOp::HasPrefix => BinaryOp::HasPrefixCs,
+            BinaryOp::NotHasPrefix => BinaryOp::NotHasPrefixCs,
+            BinaryOp::HasSuffix => BinaryOp::HasSuffixCs,
+            BinaryOp::NotHasSuffix => BinaryOp::NotHasSuffixCs,
             BinaryOp::Contains => BinaryOp::ContainsCs,
             BinaryOp::NotContains => BinaryOp::NotContainsCs,
             BinaryOp::StartsWith => BinaryOp::StartsWithCs,

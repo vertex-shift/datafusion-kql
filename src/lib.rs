@@ -29,6 +29,7 @@ mod format_time;
 mod functions;
 mod grouped;
 mod guid;
+mod ip;
 mod json_path;
 mod lexer;
 mod literals;
@@ -46,6 +47,7 @@ mod search;
 mod series_functions;
 mod tabular;
 mod temporal;
+mod terms;
 mod top;
 mod windows;
 

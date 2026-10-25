@@ -181,6 +181,16 @@ fn any_expression(expression: &ast::Expr, predicate: fn(&str) -> bool) -> bool {
         ExprKind::InList { expr, values, .. } => {
             any_expression(expr, predicate) || values.iter().any(|e| any_expression(e, predicate))
         }
+        ExprKind::TermSet {
+            expr,
+            values,
+            tabular,
+            ..
+        } => {
+            any_expression(expr, predicate)
+                || values.iter().any(|value| any_expression(value, predicate))
+                || tabular.as_ref().is_some_and(|query| needed(query))
+        }
         ExprKind::InTabular { expr, query, .. } => any_expression(expr, predicate) || needed(query),
         ExprKind::InPrepared { expr, .. } => any_expression(expr, predicate),
         ExprKind::Between {

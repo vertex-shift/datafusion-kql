@@ -219,6 +219,13 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
   constant single alphanumeric right-hand term. Multi-term/punctuated needles
   are rejected. `matches regex` uses DataFusion's Rust-regex
   dialect, not every .NET regex construct supported by Kusto.
+- `hasprefix`, `hassuffix`, their `_cs` variants, and negations match literal
+  term prefixes/suffixes with Unicode alphanumeric boundaries. `has_any` and
+  `has_all` accept constant scalar/dynamic term lists and lazy tabular term
+  sources; table sources use the first column. Compiled matcher caches retain
+  at most one runtime term set. Distinct-term budgets are 10,000 and 256
+  respectively, with a 1 MiB total term-text budget; excess input errors rather
+  than silently truncating. These are batch scans, not an inverted index.
 - `now([offset])`, `ago(offset)`: one consistent instant per planning call,
   folded into timestamp literals for predicate pushdown.
 - `bin(value,size)` / two-argument `floor`: numeric, timespan, and timestamp
@@ -312,6 +319,25 @@ row offsets, and scalar expansion. The GUID tag is appended after existing tags;
 older dense-union input schemas remain readable and normalize during union.
 GUIDs nested inside typed arrays/bags retain GUID tags; only explicit external
 JSON serialization represents them as strings.
+
+## IP address functions
+
+`parse_ipv4`, `parse_ipv4_mask`, `format_ipv4`, `format_ipv4_mask`, and
+`ipv4_netmask_suffix` support dotted-quad/CIDR inputs and explicit prefix masks.
+Numeric formatting accepts unsigned 32-bit values in a KQL long. Comparisons
+(`ipv4_compare`/`ipv4_is_match`, `ipv6_compare`/`ipv6_is_match`) combine the least
+specific supplied prefixes. `parse_ipv6` produces eight zero-padded lowercase
+hexadecimal groups and maps ordinary IPv4 inputs to IPv4-mapped IPv6 addresses.
+IPv6 text uses IPv6 prefix lengths; bare IPv4 text uses IPv4 prefix lengths.
+
+`ipv4_is_in_range`, `ipv4_is_in_any_range`, and their IPv6 counterparts accept
+host/CIDR strings and range arrays. Overlapping intervals are merged once per
+range set, with binary-search membership and a bounded one-entry cache for
+row-varying sets. Range JSON is bounded to 1 MiB. Invalid addresses, masks, or
+range entries yield nullable numeric/bool results; string formatters yield
+empty strings. Invalid ranges are not silently discarded just because another
+range matched. `ipv4_is_private` checks RFC-1918 ranges, not all reserved,
+loopback, or link-local addresses.
 
 ## Decimal values
 

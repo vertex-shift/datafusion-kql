@@ -262,6 +262,38 @@ impl<'a> Expander<'a> {
                 return self.call(Arc::clone(function), args, scope, expr.span, depth + 1);
             }
         }
+        if let ExprKind::TermSet {
+            expr: value,
+            values,
+            tabular,
+            all,
+        } = &expr.kind
+        {
+            let tabular_values = values.len() == 1
+                && match &values[0].kind {
+                    ExprKind::Call { name, .. } => scope
+                        .map_or(self.functions, |scope| &scope.functions)
+                        .get(name)
+                        .is_some_and(|function| function.tabular()),
+                    ExprKind::Identifier(name) if name.len() == 1 => scope
+                        .map_or(self.functions, |scope| &scope.functions)
+                        .get(&name[0])
+                        .is_some_and(|function| function.tabular()),
+                    _ => false,
+                };
+            if tabular.is_some() || tabular_values {
+                return Ok(ast::Expr {
+                    kind: ExprKind::TermSet {
+                        expr: Box::new(self.expand(value, scope, depth + 1)?),
+                        values: values.clone(),
+                        tabular: tabular.clone(),
+                        all: *all,
+                    },
+                    span: expr.span,
+                    depth: expr.depth,
+                });
+            }
+        }
         if let ExprKind::InList {
             expr: value,
             values,
@@ -479,7 +511,12 @@ fn query_planning(
     ) -> bool {
         if matches!(
             expr.kind,
-            ExprKind::ToScalar(_) | ExprKind::InTabular { .. }
+            ExprKind::ToScalar(_)
+                | ExprKind::InTabular { .. }
+                | ExprKind::TermSet {
+                    tabular: Some(_),
+                    ..
+                }
         ) {
             return true;
         }
@@ -490,7 +527,7 @@ fn query_planning(
         {
             return true;
         }
-        if let ExprKind::InList { values, .. } = &expr.kind
+        if let ExprKind::InList { values, .. } | ExprKind::TermSet { values, .. } = &expr.kind
             && values.len() == 1
             && matches!(&values[0].kind,ExprKind::Identifier(name) if symbols.get(&name[0])==Some(&true))
         {
