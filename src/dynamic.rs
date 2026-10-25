@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 use datafusion::arrow::array::{
-    Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBuilder, DurationNanosecondArray,
-    FixedSizeBinaryArray, FixedSizeBinaryBuilder, Float64Array, Float64Builder, Int64Array,
-    Int64Builder, ListArray, NullArray, StringArray, StringBuilder, StructArray,
-    TimestampNanosecondArray, UnionArray, new_null_array,
+    Array, ArrayBuilder, ArrayRef, BooleanArray, BooleanBuilder, Decimal256Array,
+    Decimal256Builder, DurationNanosecondArray, FixedSizeBinaryArray, FixedSizeBinaryBuilder,
+    Float64Array, Float64Builder, Int64Array, Int64Builder, ListArray, NullArray, StringArray,
+    StringBuilder, StructArray, TimestampNanosecondArray, UnionArray, new_null_array,
 };
 use datafusion::arrow::buffer::OffsetBuffer;
 use datafusion::arrow::compute::{can_cast_types, cast_with_options, interleave};
@@ -26,6 +26,7 @@ const BAG: i8 = 6;
 const DATETIME: i8 = 7;
 const TIMESPAN: i8 = 8;
 const GUID: i8 = 9;
+const DECIMAL: i8 = 10;
 pub(crate) const MAX_COLLECTION_SIZE: usize = 1_048_576;
 
 static FIELDS: LazyLock<UnionFields> = LazyLock::new(|| {
@@ -72,6 +73,10 @@ static FIELDS: LazyLock<UnionFields> = LazyLock::new(|| {
             GUID,
             Arc::new(Field::new("guid", crate::guid::data_type(), false)),
         ),
+        (
+            DECIMAL,
+            Arc::new(Field::new("decimal", crate::decimal::data_type(), false)),
+        ),
     ])
 });
 
@@ -114,6 +119,7 @@ enum Value<'a> {
     Datetime(i64),
     Timespan(i64),
     Guid([u8; 16]),
+    Decimal(rust_decimal::Decimal),
 }
 
 impl Value<'_> {
@@ -127,6 +133,7 @@ impl Value<'_> {
                 .unwrap_or_else(|| Json::String(value.to_string())),
             Self::String(value) => value.into(),
             Self::Guid(value) => crate::guid::format(&value).into(),
+            Self::Decimal(value) => crate::decimal::format(value).into(),
             Self::Array(value) | Self::Bag(value) => serde_json::from_str(value)
                 .map_err(|e| failure(format!("corrupt dynamic JSON: {e}")))?,
             Self::Datetime(value) => chrono::DateTime::from_timestamp_nanos(value)
@@ -163,6 +170,7 @@ impl Value<'_> {
             Self::Datetime(_) => "datetime",
             Self::Timespan(_) => "timespan",
             Self::Guid(_) => "guid",
+            Self::Decimal(_) => "decimal",
         }
     }
 }
@@ -180,6 +188,7 @@ struct Builder {
     datetimes: datafusion::arrow::array::TimestampNanosecondBuilder,
     timespans: datafusion::arrow::array::DurationNanosecondBuilder,
     guids: FixedSizeBinaryBuilder,
+    decimals: Decimal256Builder,
 }
 
 impl Builder {
@@ -197,6 +206,7 @@ impl Builder {
             datetimes: datafusion::arrow::array::TimestampNanosecondBuilder::new(),
             timespans: datafusion::arrow::array::DurationNanosecondBuilder::new(),
             guids: FixedSizeBinaryBuilder::new(16),
+            decimals: Decimal256Builder::new().with_data_type(crate::decimal::data_type()),
         }
     }
 
@@ -242,6 +252,10 @@ impl Builder {
                 self.guids.append_value(value)?;
                 (GUID, self.guids.len() - 1)
             }
+            Value::Decimal(value) => {
+                self.decimals.append_value(crate::decimal::encode(value));
+                (DECIMAL, self.decimals.len() - 1)
+            }
         };
         self.ids.push(id);
         self.offsets.push(
@@ -283,6 +297,7 @@ impl Builder {
             Arc::new(self.datetimes.finish()),
             Arc::new(self.timespans.finish()),
             Arc::new(self.guids.finish()),
+            Arc::new(self.decimals.finish()),
         ];
         Ok(Arc::new(UnionArray::try_new(
             FIELDS.clone(),
@@ -321,6 +336,8 @@ impl Input {
         };
         if let Some(ty) = normalized {
             array = cast_with_options(&array, &ty, &Default::default())?;
+        } else if crate::decimal::is_decimal(array.data_type()) {
+            array = crate::decimal::convert_array(&array)?;
         }
         Ok(Self { array, scalar })
     }
@@ -354,6 +371,13 @@ impl Input {
                     .try_into()
                     .map_err(|_| failure("invalid guid width"))?,
             ),
+            DataType::Decimal256(_, scale) => {
+                let value = downcast::<Decimal256Array>(&self.array)?.value(row);
+                Value::Decimal(
+                    crate::decimal::decode(value, *scale as u32)
+                        .ok_or_else(|| failure("invalid native decimal dynamic value"))?,
+                )
+            }
             ty => {
                 return Err(failure(format!(
                     "cannot use Arrow {ty} as a dynamic scalar"
@@ -387,6 +411,13 @@ fn child_value(array: &ArrayRef, row: usize, id: i8) -> Result<Value<'_>> {
                 .try_into()
                 .map_err(|_| failure("invalid guid width"))?,
         ),
+        DECIMAL => {
+            let value = downcast::<Decimal256Array>(array)?.value(row);
+            Value::Decimal(
+                crate::decimal::decode(value, 28)
+                    .ok_or_else(|| failure("invalid dynamic decimal value"))?,
+            )
+        }
         _ => return Err(failure("unknown KQL dynamic type id")),
     })
 }
@@ -526,6 +557,7 @@ impl Kernel {
                 Self::Convert(DataType::Timestamp(_, _)) => "dynamic_todatetime",
                 Self::Convert(DataType::Duration(_)) => "dynamic_totimespan",
                 Self::Convert(DataType::FixedSizeBinary(16)) => "dynamic_toguid",
+                Self::Convert(DataType::Decimal256(_, _)) => "dynamic_todecimal",
                 Self::Convert(_) => "dynamic_cast",
                 Self::TypeOnly(_) => "dynamic_type_only",
                 Self::Expand { .. } => "mv_expand_values",
@@ -703,7 +735,7 @@ impl ScalarUDFImpl for Function {
             let mut builder = Builder::new(count);
             for row in 0..count {
                 let value = inputs[0].value(row)?;
-                if matches!(value, Value::Guid(_)) {
+                if matches!(value, Value::Guid(_) | Value::Decimal(_)) {
                     builder.append(value)?;
                 } else {
                     builder.append_json(&evaluate(&self.kernel, &[value])?)?;
@@ -767,6 +799,14 @@ impl ScalarUDFImpl for Function {
                                     .filter(|(_, end)| *end == text.len())
                                     .ok_or_else(|| failure("invalid guid window payload"))?;
                                 builder.append(Value::Guid(value))?;
+                            }
+                            Some("decimal") => {
+                                let text = encoded[1]
+                                    .as_str()
+                                    .ok_or_else(|| failure("invalid decimal window payload"))?;
+                                let value = crate::decimal::parse(text)
+                                    .ok_or_else(|| failure("invalid decimal window payload"))?;
+                                builder.append(Value::Decimal(value))?;
                             }
                             Some(_) => builder.append_json(&encoded[1])?,
                             None => return Err(failure("invalid dynamic window type")),
@@ -844,6 +884,15 @@ fn convert(input: &Input, ty: &DataType, type_only: bool) -> Result<ArrayRef> {
         ..Default::default()
     };
     if !is_dynamic(input.array.data_type()) {
+        if crate::decimal::is_decimal(ty) {
+            return crate::decimal::convert_array(&input.array);
+        }
+        if crate::decimal::is_decimal(input.array.data_type())
+            && *ty == DataType::Utf8
+            && !type_only
+        {
+            return crate::decimal::format_array(&input.array);
+        }
         if *ty == crate::guid::data_type() {
             return crate::guid::parse_array(&input.array);
         }
@@ -862,6 +911,14 @@ fn convert(input: &Input, ty: &DataType, type_only: bool) -> Result<ArrayRef> {
     };
     for (id, _) in fields.iter() {
         let source = union.child(id);
+        if *ty == DataType::Utf8 && id == DECIMAL && !type_only {
+            casted.push(crate::decimal::format_array(source)?);
+            continue;
+        }
+        if crate::decimal::is_decimal(ty) && !type_only {
+            casted.push(crate::decimal::convert_array(source)?);
+            continue;
+        }
         if *ty == DataType::Utf8 && id == GUID && !type_only {
             casted.push(crate::guid::format_array(source)?);
             continue;
@@ -908,6 +965,7 @@ fn convert(input: &Input, ty: &DataType, type_only: bool) -> Result<ArrayRef> {
             DataType::Timestamp(_, _) => id == DATETIME,
             DataType::Duration(_) => id == TIMESPAN,
             DataType::FixedSizeBinary(16) => id == GUID,
+            DataType::Decimal256(_, _) => id == DECIMAL,
             _ => false,
         };
         let array =
@@ -991,7 +1049,10 @@ fn expand(kernel: &Kernel, inputs: &[Input], count: usize) -> Result<ArrayRef> {
             // Pad real dynamic nulls before Unnest. Arrow union take kernels
             // cannot represent the null indices used by zipped-list padding.
             for index in 0..len {
-                if index == 0 && !values.is_empty() && matches!(root, Value::Guid(_)) {
+                if index == 0
+                    && !values.is_empty()
+                    && matches!(root, Value::Guid(_) | Value::Decimal(_))
+                {
                     builder.append(root)?;
                 } else {
                     builder.append_json(values.get(index).unwrap_or(&Json::Null))?;

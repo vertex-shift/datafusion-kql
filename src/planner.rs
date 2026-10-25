@@ -2148,7 +2148,16 @@ impl<'s> Planner<'s> {
                 .map(|expr| {
                     let lowered = expressions.scalar(expr, &DFSchema::empty())?;
                     let scalar = expressions.constant(lowered, expr.span)?;
-                    let scalar = if ty == crate::guid::data_type()
+                    let scalar = if ty == crate::decimal::data_type() && !scalar.is_null() {
+                        let value = expressions.constant(
+                            crate::decimal::call(crate::decimal::Op::Convert, vec![lit(scalar)]),
+                            expr.span,
+                        )?;
+                        if value.is_null() {
+                            return Err(Error::syntax("invalid decimal in datatable", expr.span));
+                        }
+                        value
+                    } else if ty == crate::guid::data_type()
                         && scalar.data_type() != ty
                         && !scalar.is_null()
                     {

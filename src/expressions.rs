@@ -33,6 +33,12 @@ pub(crate) fn parameter_cast(
     if ty == ScalarType::Dynamic {
         return Ok(dynamic::call(Kernel::IntoDynamic, vec![value]));
     }
+    if ty == ScalarType::Decimal && (actual.is_numeric() || actual == DataType::Null) {
+        return Ok(crate::decimal::call(
+            crate::decimal::Op::Convert,
+            vec![value],
+        ));
+    }
     let integer_literal = match &value {
         Expr::Literal(ScalarValue::Int64(value), _) => *value,
         Expr::Negative(expr) => match expr.as_ref() {
@@ -561,6 +567,29 @@ impl Expressions<'_> {
     ) -> Result<Expr> {
         let left_type = left.get_type(schema)?;
         let right_type = right.get_type(schema)?;
+        if crate::decimal::is_decimal(&left_type) || crate::decimal::is_decimal(&right_type) {
+            if left_type.is_floating() || right_type.is_floating() {
+                return self.arithmetic(
+                    cast(left, DataType::Float64),
+                    op,
+                    cast(right, DataType::Float64),
+                    schema,
+                    span,
+                );
+            }
+            if !(left_type.is_numeric() || left_type == DataType::Null)
+                || !(right_type.is_numeric() || right_type == DataType::Null)
+            {
+                return Err(Error::syntax(
+                    "decimal arithmetic requires numeric operands",
+                    span,
+                ));
+            }
+            return Ok(crate::decimal::call(
+                crate::decimal::arithmetic(op),
+                vec![left, right],
+            ));
+        }
         let duration_type = DataType::Duration(TimeUnit::Nanosecond);
         if let DataType::Timestamp(_, zone) = &left_type {
             let timestamp_type = DataType::Timestamp(TimeUnit::Nanosecond, zone.clone());
@@ -662,6 +691,8 @@ impl Expressions<'_> {
     pub(crate) fn string_value(&self, value: Expr, schema: &DFSchema) -> Result<Expr> {
         Ok(if dynamic::is_dynamic(&value.get_type(schema)?) {
             dynamic::call(Kernel::Convert(DataType::Utf8), vec![value])
+        } else if crate::decimal::is_decimal(&value.get_type(schema)?) {
+            crate::decimal::call(crate::decimal::Op::Format, vec![value])
         } else if value.get_type(schema)? == crate::guid::data_type() {
             crate::guid::call(value, true)
         } else {
@@ -775,6 +806,14 @@ impl Expressions<'_> {
             return Ok(dynamic::call(kernel, values));
         }
         Ok(match name {
+            "todecimal" => {
+                arity(1)?;
+                if dynamic::is_dynamic(&values[0].get_type(schema)?) {
+                    dynamic::call(Kernel::Convert(crate::decimal::data_type()), values)
+                } else {
+                    crate::decimal::call(crate::decimal::Op::Convert, values)
+                }
+            }
             "toguid" => {
                 arity(1)?;
                 if dynamic::is_dynamic(&values[0].get_type(schema)?) {
@@ -1148,6 +1187,19 @@ impl Expressions<'_> {
                 )?
             }
             "bin" => return Err(Error::syntax("bin expects two arguments", span)),
+            "floor" | "ceiling" | "ceil"
+                if values.len() == 1
+                    && crate::decimal::is_decimal(&values[0].get_type(schema)?) =>
+            {
+                crate::decimal::call(
+                    if name == "floor" {
+                        crate::decimal::Op::Floor
+                    } else {
+                        crate::decimal::Op::Ceiling
+                    },
+                    values,
+                )
+            }
             "iff" | "iif" => {
                 arity(3)?;
                 when(values[0].clone(), values[1].clone()).otherwise(values[2].clone())?
@@ -1191,6 +1243,9 @@ impl Expressions<'_> {
                 arity(1)?;
                 if dynamic::is_dynamic(&values[0].get_type(schema)?) {
                     return Ok(dynamic::call(Kernel::Convert(DataType::Utf8), values));
+                }
+                if crate::decimal::is_decimal(&values[0].get_type(schema)?) {
+                    return Ok(crate::decimal::call(crate::decimal::Op::Format, values));
                 }
                 if values[0].get_type(schema)? == crate::guid::data_type() {
                     return Ok(crate::guid::call(values[0].clone(), true));
@@ -1236,6 +1291,9 @@ impl Expressions<'_> {
                     return Ok(dynamic::call(Kernel::Convert(ty), values));
                 }
                 if name == "string" {
+                    if crate::decimal::is_decimal(&values[0].get_type(schema)?) {
+                        return Ok(crate::decimal::call(crate::decimal::Op::Format, values));
+                    }
                     if values[0].get_type(schema)? == crate::guid::data_type() {
                         return Ok(crate::guid::call(values[0].clone(), true));
                     }
@@ -1369,6 +1427,7 @@ impl Expressions<'_> {
                 crate::temporal::parse(crate::temporal::Target::Timespan, value)
             }
             ScalarType::Guid => crate::guid::call(value, false),
+            ScalarType::Decimal => crate::decimal::call(crate::decimal::Op::Convert, vec![value]),
             ScalarType::Dynamic => dynamic::call(Kernel::ParseJson, vec![value]),
             _ => try_cast(value, data_type(ty)),
         })
@@ -1394,6 +1453,12 @@ impl Expressions<'_> {
         span: Span,
     ) -> Result<Expr> {
         let ty = value.get_type(schema)?;
+        if crate::decimal::is_decimal(&ty) {
+            return Ok(crate::decimal::call(
+                crate::decimal::Op::BinAt,
+                vec![value, size, origin],
+            ));
+        }
         let temporal = matches!(ty, DataType::Timestamp(_, _) | DataType::Duration(_));
         let (value, origin, size, output) = if temporal {
             let output = if matches!(ty, DataType::Timestamp(_, _)) {
@@ -1474,6 +1539,12 @@ impl Expressions<'_> {
 
     fn bin(&self, value: Expr, size: Expr, schema: &DFSchema, span: Span) -> Result<Expr> {
         let ty = value.get_type(schema)?;
+        if crate::decimal::is_decimal(&ty) {
+            return Ok(crate::decimal::call(
+                crate::decimal::Op::Bin,
+                vec![value, size],
+            ));
+        }
         if let DataType::Timestamp(_, zone) = &ty {
             let output = DataType::Timestamp(TimeUnit::Nanosecond, zone.clone());
             let nanos = self.duration_constant(size, span)?;

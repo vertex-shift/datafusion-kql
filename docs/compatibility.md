@@ -301,6 +301,30 @@ older dense-union input schemas remain readable and normalize during union.
 As with datetime/timespan, GUIDs nested inside JSON-backed arrays/bags currently
 serialize as strings, not fully rich nested Kusto scalar values.
 
+## Decimal values
+
+`decimal(...)` supports exact base-ten literals, scientific notation, `min`,
+`max`, and typed nulls; `todecimal` performs nullable runtime conversion. Values
+use a signed 96-bit coefficient and scale 0-28, consistent with the decimal
+constant representation in Microsoft's public Kusto language frontend.
+Arithmetic uses checked decimal operations, not an intermediate `f64`.
+Overflow and division by zero produce typed decimal nulls.
+
+The Arrow representation is `Decimal256(57,28)`. The wider native storage lets
+one column retain both the full integer range and the smallest decimal fraction
+without a per-row custom numeric object; it does not expand the accepted KQL
+value range. Sorting, equality, hashing, joins, and grouped states remain native
+DataFusion operations. Sum/average results normalize to the decimal range, with
+single midpoint-to-even rounding when reducing excess native scale.
+`tostring` uses normalized non-exponential formatting.
+
+Typed datatables/parameters/functions, nullable parsing/extraction, numeric
+arithmetic, exact binning/floor/ceiling, native decimal inputs, unions, root
+dynamic tags, and serialized offsets are supported. Mixed decimal/real
+arithmetic promotes to real. Complete decimal edge-case parity still requires
+an authorized Kusto reference run; the documented local implementation and
+source evidence are not represented as a completed live comparison.
+
 ## Grouped tabular subqueries
 
 `mv-apply ... on (...)` expands each original row into an independent subtable,

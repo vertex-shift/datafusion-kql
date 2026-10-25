@@ -185,6 +185,9 @@ pub(crate) fn plan(
                 value = dynamic::call(Kernel::DecodeList { limit }, vec![value]);
             }
         }
+        if crate::decimal::is_decimal(&value.get_type(result.schema())?) {
+            value = crate::decimal::call(crate::decimal::Op::Convert, vec![value]);
+        }
         bindings.insert(reference.name, value);
     }
     let expressions = Expressions {

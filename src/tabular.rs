@@ -18,6 +18,9 @@ pub(crate) fn canonical(ty: &DataType) -> DataType {
     if dynamic::is_dynamic(ty) {
         return dynamic::data_type();
     }
+    if crate::decimal::is_decimal(ty) {
+        return crate::decimal::data_type();
+    }
     match ty {
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => DataType::Utf8,
         DataType::Int8 | DataType::Int16 => DataType::Int32,
@@ -137,6 +140,8 @@ pub(crate) fn union(
                 let value = Expr::Column(Column::from(plan.schema().qualified_field(index)));
                 if dynamic::is_dynamic(ty) && plan.schema().field(index).data_type() != ty {
                     dynamic::call(dynamic::Kernel::IntoDynamic, vec![value])
+                } else if crate::decimal::is_decimal(ty) {
+                    crate::decimal::call(crate::decimal::Op::Convert, vec![value])
                 } else {
                     cast(value, ty.clone())
                 }

@@ -147,6 +147,7 @@ pub enum ScalarType {
     Datetime,
     Timespan,
     Guid,
+    Decimal,
     Dynamic,
 }
 
@@ -161,6 +162,7 @@ impl ScalarType {
             "datetime" | "date" => Self::Datetime,
             "timespan" | "time" => Self::Timespan,
             "guid" | "uuid" | "uniqueid" => Self::Guid,
+            "decimal" => Self::Decimal,
             "dynamic" => Self::Dynamic,
             _ => return None,
         })

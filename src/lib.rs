@@ -18,6 +18,7 @@ mod aggregate_functions;
 mod aggregation;
 pub mod ast;
 mod calendar;
+mod decimal;
 mod dynamic;
 mod error;
 mod evaluate;
