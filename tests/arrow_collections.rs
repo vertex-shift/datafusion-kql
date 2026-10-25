@@ -437,11 +437,57 @@ async fn native_collection_limits_are_checked_before_constructing_unbounded_node
     list.append(true);
     failure(Arc::new(list.finish()), "1048576").await;
     let mut array: ArrayRef = Arc::new(Int64Array::from(vec![1]));
-    for _ in 0..130 {
+    for _ in 0..65 {
         array = Arc::new(StructArray::from(vec![(
             Arc::new(Field::new("x", array.data_type().clone(), true)),
             array,
         )]));
     }
     failure(array, "nesting limit").await;
+}
+
+#[tokio::test]
+async fn native_schema_depth_limit_accepts_its_exact_boundary() {
+    for depth in [16, 32, 64] {
+        let mut array: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+        for _ in 0..depth {
+            array = Arc::new(StructArray::from(vec![(
+                Arc::new(Field::new("x", array.data_type().clone(), true)),
+                array,
+            )]));
+        }
+        let ctx = context(array);
+        let frame = ctx
+            .kql("T | extend d=todynamic(v) | project kind=gettype(d)")
+            .await
+            .unwrap();
+        let batches = frame.collect().await.unwrap();
+        assert_eq!(
+            array_value_to_string(batches[0].column(0), 0).unwrap(),
+            "dictionary"
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_parameter_schemas_obey_the_same_early_depth_guard() {
+    use datafusion::common::ScalarValue;
+    use datafusion_kql::QueryParameters;
+    let mut array: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+    for _ in 0..65 {
+        array = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new("x", array.data_type().clone(), true)),
+            array,
+        )]));
+    }
+    let parameter = ScalarValue::try_from_array(&array, 0).unwrap();
+    let error = SessionContext::new()
+        .kql_with_parameters(
+            "declare query_parameters(p:dynamic); print kind=gettype(p)",
+            &QueryParameters::from([("p".into(), parameter)]),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("nesting limit"), "{error}");
 }

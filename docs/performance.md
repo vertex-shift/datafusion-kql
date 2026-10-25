@@ -81,7 +81,7 @@ repeatedly by simply cloning their `Arc`.
 
 ## Measured 0.9 interoperability workloads
 
-The new Arrow/string paths were measured on 2026-10-25 on the same Apple
+The new Arrow/string paths at `8ba286f` were measured on 2026-10-25 on the same Apple
 M4/arm64 host, Rust 1.95.0, DataFusion 55.2.0, optimized bench profile, and four
 target partitions:
 
@@ -93,15 +93,15 @@ cargo bench --locked --bench kql -j 2 -- \
 
 | Benchmark | Criterion estimate | 95% confidence interval |
 | --- | --- | --- |
-| Typed Arrow list expansion/sum, 100,000 lists | 1.03 ms | 1.01-1.05 ms |
-| Native SQL Unnest/sum, same lists | 0.804 ms | 0.794-0.814 ms |
-| Explicit dynamic conversion/expansion, same lists | 23.67 ms | 23.38-23.98 ms |
-| Optional-index search, 100,000 strings | 2.04 ms | 1.99-2.09 ms |
-| Repeat/regex rewrite/search, 100,000 strings | 32.77 ms | 31.30-34.38 ms |
+| Typed Arrow list expansion/sum, 100,000 lists | 1.10 ms | 1.09-1.12 ms |
+| Native SQL Unnest/sum, same lists | 0.872 ms | 0.859-0.890 ms |
+| Explicit dynamic conversion/expansion, same lists | 25.15 ms | 24.90-25.41 ms |
+| Optional-index search, 100,000 strings | 1.75 ms | 1.74-1.77 ms |
+| Repeat/regex rewrite/search, 100,000 strings | 35.59 ms | 33.37-37.88 ms |
 
 Each list contains three longs; all three expansion plans assert the exact
 600,000 total, so throughput counts original lists, not expanded rows. The
-typed KQL path processes about 97 million lists/second on this fixture while
+typed KQL path processes about 91 million lists/second on this fixture while
 retaining checked collection bounds. The untyped/general dynamic route supports
 broader mixed/rich data but is much more expensive. SQL is faster here, and these
 three plans are not identical: do not attribute an execution advantage to KQL.
@@ -113,6 +113,10 @@ Every benchmark preflight still executes, including the original numeric
 KQL/SQL physical-plan equality assertion. Some runs reported timing outliers
 on the shared host. These are local memory-resident workload measurements,
 not production capacity guarantees or new live Kusto conformance evidence.
+An earlier implementation sample measured 1.03 ms for typed expansion and
+23.67 ms for the explicit dynamic path; the difference reinforces the shared-host
+comparison limits. The final source also avoids repeatedly rescanning ASCII
+classification during occurrence searches.
 
 ## Measured 0.8 bounded distinct-count workloads
 

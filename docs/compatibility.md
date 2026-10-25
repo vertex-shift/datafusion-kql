@@ -320,8 +320,11 @@ unsigned integers above signed-long range, and unrepresentable temporal values
 error instead of silently dropping information.
 
 The bridge checks collection/node/depth budgets and a cumulative 16 MiB text
-budget per value. Schema nesting is validated before constructing scan plans,
-so pathological host schemas fail before recursive DataFusion planning.
+budget per value. Physical Arrow schema nesting is capped at 64 levels and is
+validated before constructing scan plans: recursive DataFusion processing can
+otherwise exhaust a small executor-thread stack before our kernels run. The
+separate typed dynamic value limit remains 128. Both the accepted schema
+boundary and the first rejected depth have regressions.
 A single explicitly typed primitive list expansion without item indices or
 serialized-order tracking uses checked native Arrow buffers and native Unnest,
 avoiding JSON conversion. More complex/zipped/rich cases use the shared dynamic

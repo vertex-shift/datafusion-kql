@@ -18,6 +18,10 @@ use datafusion::logical_expr::{
 
 use crate::dynamic_value::{MAX_DEPTH, MAX_NODES, Node, check_size};
 
+// DataFusion's recursive schema processing precedes our execution kernels.
+// Keep physical Arrow nesting below its small-thread-stack failure boundary.
+const MAX_SCHEMA_DEPTH: usize = 64;
+
 fn error(message: impl Into<String>) -> DataFusionError {
     DataFusionError::Execution(message.into())
 }
@@ -54,7 +58,7 @@ pub(crate) fn validate_nesting(ty: &DataType) -> Result<()> {
     let mut visited = 0;
     while let Some((ty, depth)) = pending.pop() {
         visited += 1;
-        if depth > MAX_DEPTH {
+        if depth > MAX_SCHEMA_DEPTH {
             return Err(error("native Arrow schema exceeds nesting limit"));
         }
         if visited > MAX_NODES {

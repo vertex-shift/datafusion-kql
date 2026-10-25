@@ -84,6 +84,9 @@ impl<'s> Planner<'s> {
         track_order: bool,
         parameters: &QueryParameters,
     ) -> Result<Self> {
+        for value in parameters.values() {
+            crate::arrow_dynamic::validate_nesting(&value.data_type())?;
+        }
         let now = state
             .execution_props()
             .query_execution_start_time
