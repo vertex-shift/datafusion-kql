@@ -204,7 +204,7 @@ async fn native_decimal128_inputs_normalize_losslessly_in_unions_and_dynamics() 
     );
     assert_eq!(
         rows(&ctx, "T | project kind=gettype(x),x=tostring(todynamic(x))").await,
-        vec![vec!["decimal", "1.25"], vec!["null", ""]]
+        vec![vec!["decimal", "1.25"], vec!["decimal", ""]]
     );
 }
 

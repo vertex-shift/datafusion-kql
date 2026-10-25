@@ -217,7 +217,7 @@ optimizer behavior, Arrow integration, and Parquet. SQL is enabled only by the
 development dependency for comparison; the frontend does not require
 DataFusion's SQL feature at runtime.
 
-`tests/conformance.rs` compares 28 synthetic fixtures with captured public Kusto
+`tests/conformance.rs` compares 30 synthetic fixtures with captured public Kusto
 help-cluster results by default, and provides an opt-in live suite for a
 configured emulator or ADX test database. Two known decimal disagreements are
 explicitly ignored, not counted as passing parity. CI also exercises curl

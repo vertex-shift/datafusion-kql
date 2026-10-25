@@ -358,6 +358,48 @@ const FIXTURES: &[Fixture] = &[
         ],
         rows: &[&["f", "f", "[102]", "", "", "", ""]],
     },
+    Fixture {
+        name: "native-and-dynamic-floating-type-names",
+        query: r#"
+        print NativeType=gettype(1.5),LiteralType=gettype(dynamic(1.5)),
+            ParsedType=gettype(parse_json('1.5')),PackedType=gettype(pack_array(1.5)[0]),
+            NativeText=tostring(1.0),DynamicText=tostring(dynamic(1.0))
+    "#,
+        columns: &[
+            "NativeType",
+            "LiteralType",
+            "ParsedType",
+            "PackedType",
+            "NativeText",
+            "DynamicText",
+        ],
+        rows: &[&["real", "double", "double", "double", "1.0", "1.0"]],
+    },
+    Fixture {
+        name: "native-typed-nulls-and-integer-type-names",
+        query: r#"
+        print LongNull=gettype(long(null)),RealNull=gettype(real(null)),
+            BoolNull=gettype(bool(null)),EmptyString=gettype(''),
+            DateNull=gettype(datetime(null)),GuidNull=gettype(guid(null)),
+            DecimalNull=gettype(decimal(null)),NativeInt=gettype(int(1)),
+            DynamicInt=gettype(pack_array(int(1))[0]),DynamicNull=gettype(dynamic(null))
+    "#,
+        columns: &[
+            "LongNull",
+            "RealNull",
+            "BoolNull",
+            "EmptyString",
+            "DateNull",
+            "GuidNull",
+            "DecimalNull",
+            "NativeInt",
+            "DynamicInt",
+            "DynamicNull",
+        ],
+        rows: &[&[
+            "long", "real", "bool", "string", "datetime", "guid", "decimal", "int", "long", "null",
+        ]],
+    },
 ];
 
 fn endpoint(uri: &str) -> TestResult<(String, bool)> {

@@ -33,6 +33,7 @@ pub(crate) fn canonical(ty: &DataType) -> DataType {
 
 pub(crate) fn type_names(ty: &DataType) -> (String, String) {
     let (name, system) = match ty {
+        DataType::Dictionary(_, value) => return type_names(value),
         DataType::Boolean => ("bool", "System.Boolean"),
         DataType::Int8 | DataType::Int16 | DataType::Int32 => ("int", "System.Int32"),
         DataType::Int64 => ("long", "System.Int64"),

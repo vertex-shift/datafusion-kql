@@ -49,8 +49,53 @@ async fn check(query: &str, expected: &[&[&str]]) {
 async fn dynamic_literals_preserve_distinct_primitive_types() {
     check(
         "print a=gettype(dynamic(1)), b=gettype(dynamic(1.5)), c=gettype(dynamic(true)), d=gettype(dynamic('1')), e=gettype(dynamic([])), f=gettype(dynamic({})), g=gettype(dynamic(null)), h=gettype(dynamic(datetime(2025-01-01))), i=gettype(dynamic(1h))",
-        &[&["long","real","bool","string","array","dictionary","null","datetime","timespan"]],
+        &[&["long","double","bool","string","array","dictionary","null","datetime","timespan"]],
     ).await;
+}
+
+#[tokio::test]
+async fn native_type_reporting_uses_logical_dictionary_types_even_for_nulls() {
+    use datafusion::arrow::array::{DictionaryArray, Int8Array, Int32Array};
+    use datafusion::arrow::datatypes::Int8Type;
+    let ctx = SessionContext::new();
+    let dictionary = DictionaryArray::<Int8Type>::try_new(
+        Int8Array::from(vec![Some(0), Some(1), None]),
+        Arc::new(Int32Array::from(vec![Some(10), None])),
+    )
+    .unwrap();
+    ctx.register_batch(
+        TableReference::bare("T"),
+        RecordBatch::try_from_iter(vec![("x", Arc::new(dictionary) as _)]).unwrap(),
+    )
+    .unwrap();
+    let batches = ctx
+        .kql("T | project TypeName=gettype(x)")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+    for batch in batches {
+        for row in 0..batch.num_rows() {
+            assert_eq!(array_value_to_string(batch.column(0), row).unwrap(), "int");
+        }
+    }
+    let batches = ctx
+        .kql("T | getschema")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        array_value_to_string(batches[0].column(2), 0).unwrap(),
+        "System.Int32"
+    );
+    assert_eq!(
+        array_value_to_string(batches[0].column(3), 0).unwrap(),
+        "int"
+    );
 }
 
 #[tokio::test]

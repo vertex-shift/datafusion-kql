@@ -278,6 +278,12 @@ dynamic string holding the original text. Missing properties/indices produce
 dynamic nulls. `dynamic(...)` itself must be a constant expression; use
 `parse_json`, `pack_array`, or `bag_pack` for runtime values.
 
+`gettype` reports the declared type for native scalars, including typed nulls
+(`gettype(real(null))` is `"real"`). Dynamic values are inspected at runtime:
+floating elements report `"double"` and a dynamic null reports `"null"`.
+Native 32-bit integers report `"int"`; packed dynamic integers report `"long"`.
+Arrow dictionary encoding does not change a native column's logical type.
+
 The local constant evaluator also accepts decimal expressions inside
 `dynamic(...)`, and explicit `todynamic` conversions from native non-string
 scalars. These are **frontend extensions**, not portable Kusto syntax: the
@@ -387,8 +393,11 @@ The local `min`/`max`, overflow boundary, precision, and non-exponential
 formatting therefore differ. The measured exact decimal workloads do not
 certify these unsupported boundaries.
 The exact raw-number JSON extraction is also a deliberate current difference:
-the reference query for `9007199254740993.123456789` returns `9007199254740992`
-through binary64 conversion, while this extension retains the exact token.
+the scalar reference query for `9007199254740993.123456789` returns
+`9007199254740992`, while this extension retains the exact token. Runtime
+extraction from a string column instead returned `9007199254740993.123` in
+the reference probe. Scalar constant folding and vector conversion must
+therefore be checked separately, not approximated with one blanket `f64` cast.
 Quoted JSON decimal strings agree in the captured baseline. Two explicitly
 ignored reference regression tests preserve the wider-decimal and raw-JSON
 disagreements; they are not counted as passing conformance.
@@ -761,7 +770,7 @@ representations and continue to ignore nulls.
 
 ## Opt-in Kusto reference checks
 
-The conformance suite in `tests/conformance.rs` runs 28 synthetic inline-data
+The conformance suite in `tests/conformance.rs` runs 30 synthetic inline-data
 fixtures locally by default, comparing exact column names and row multisets
 against results captured from the public Kusto help cluster (`Samples`) through
 Azure MCP on 2026-10-25. It covers counts/nulls, expansion, per-row/per-key
@@ -769,7 +778,8 @@ queries, scans, hierarchical tops, schema-declared plugins, scalar subqueries,
 ranges, GUIDs, parsing, bounded decimal arithmetic, rich nested tags,
 term/IP/encoding helpers, documented NaN defaults, and series shape. The
 captured baseline exposed and corrected boolean text casing, raw URL/query
-semantics, regex edge matching, and base64/percent-decoding differences.
+semantics, regex edge matching, base64/percent-decoding differences, and native
+versus dynamic type names/null reporting.
 Engine build metadata was not available through the query router.
 
 This is a finite historical reference baseline, **not full Kusto certification**

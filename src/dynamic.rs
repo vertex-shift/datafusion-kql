@@ -189,7 +189,7 @@ impl Value<'_> {
             Self::Null => "null",
             Self::Bool(_) => "bool",
             Self::Long(_) => "long",
-            Self::Real(_) => "real",
+            Self::Real(_) => "double",
             Self::String(_) => "string",
             Self::Array(_) | Self::RichArray(_) => "array",
             Self::Bag(_) | Self::RichBag(_) => "dictionary",

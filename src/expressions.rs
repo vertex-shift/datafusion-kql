@@ -841,6 +841,13 @@ impl Expressions<'_> {
                 ))
             }
         };
+        if name == "gettype" {
+            arity(1)?;
+            let (type_name, _) = crate::tabular::type_names(&values[0].get_type(schema)?);
+            if type_name != "dynamic" {
+                return Ok(lit(type_name));
+            }
+        }
         if let Some(op) = crate::ip::Op::lookup(name) {
             return crate::ip::plan(self, op, values, schema, span);
         }

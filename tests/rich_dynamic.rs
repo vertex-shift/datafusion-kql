@@ -98,7 +98,7 @@ async fn equality_set_functions_and_membership_distinguish_typed_scalars_from_st
 #[tokio::test]
 async fn expanded_nested_values_have_cast_only_scalar_types_and_real_null_padding() {
     check(&format!("print a=pack_array(guid({GUID})),b=dynamic([1,2]) | mv-expand a to typeof(guid),b to typeof(long) | project a=tostring(a),b,kind=gettype(a)"),
-        &[&[GUID,"1","guid"],&["","2","null"]]).await;
+        &[&[GUID,"1","guid"],&["","2","guid"]]).await;
     check("print a=pack_array(decimal(1.25),decimal(2.5)) | mv-expand a to typeof(decimal) | project a=tostring(a)", &[&["1.25"],&["2.5"]]).await;
 }
 
@@ -149,7 +149,7 @@ async fn temporal_make_series_axes_expose_typed_elements() {
 #[tokio::test]
 async fn nested_real_values_keep_real_tags_and_nonfinite_values() {
     check("print a=pack_array(real(nan),real(inf),1.0) | project a=gettype(a[0]),b=gettype(a[1]),c=gettype(a[2]),nan=isnan(toreal(a[0]))",
-        &[&["real","real","real","true"]]).await;
+        &[&["double","double","double","true"]]).await;
 }
 
 #[tokio::test]
