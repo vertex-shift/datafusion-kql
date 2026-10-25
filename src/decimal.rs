@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
@@ -27,11 +28,18 @@ pub(crate) fn is_decimal(ty: &DataType) -> bool {
 
 pub(crate) fn parse(text: &str) -> Option<Decimal> {
     let text = text.trim();
+    if text.contains(['e', 'E']) {
+        Decimal::from_scientific(text).ok()
+    } else {
+        Decimal::from_str_exact(text).ok()
+    }
+}
+
+pub(crate) fn literal(text: &str) -> Option<Decimal> {
     match text {
         "max" => Some(Decimal::MAX),
         "min" => Some(Decimal::MIN),
-        _ if text.contains(['e', 'E']) => Decimal::from_scientific(text).ok(),
-        _ => Decimal::from_str_exact(text).ok(),
+        _ => parse(text),
     }
 }
 
@@ -171,6 +179,89 @@ pub(crate) fn call(op: Op, args: Vec<Expr>) -> Expr {
         signature: Signature::any(args.len(), Volatility::Immutable),
     })
     .call(args)
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct JsonDecimal {
+    path: Vec<crate::json_path::Segment>,
+    signature: Signature,
+}
+
+pub(crate) fn extract_json(source: Expr, path: Vec<crate::json_path::Segment>) -> Expr {
+    ScalarUDF::from(JsonDecimal {
+        path,
+        signature: Signature::exact(vec![DataType::Utf8], Volatility::Immutable),
+    })
+    .call(vec![source])
+}
+
+fn json_decimal(text: &str, path: &[crate::json_path::Segment]) -> Option<Decimal> {
+    use serde_json::value::RawValue;
+    let mut value = serde_json::from_str::<&RawValue>(text).ok()?;
+    for segment in path {
+        value = match segment {
+            crate::json_path::Segment::Key(key) => {
+                let values =
+                    serde_json::from_str::<BTreeMap<String, &RawValue>>(value.get()).ok()?;
+                *values.get(key)?
+            }
+            crate::json_path::Segment::Index(index) => {
+                let values = serde_json::from_str::<Vec<&RawValue>>(value.get()).ok()?;
+                let index = if *index < 0 {
+                    values.len() as i128 + i128::from(*index)
+                } else {
+                    i128::from(*index)
+                };
+                *values.get(usize::try_from(index).ok()?)?
+            }
+        };
+    }
+    let text = value.get();
+    if text.starts_with('"') {
+        parse(&serde_json::from_str::<String>(text).ok()?)
+    } else {
+        parse(text)
+    }
+}
+
+impl ScalarUDFImpl for JsonDecimal {
+    fn name(&self) -> &str {
+        "__kql_extract_json_decimal"
+    }
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(data_type())
+    }
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        let scalar = matches!(args.args[0], ColumnarValue::Scalar(_));
+        let array = args.args[0].to_array(1)?;
+        let strings = array
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                DataFusionError::Execution("decimal JSON extraction requires UTF-8 input".into())
+            })?;
+        let mut output =
+            Decimal256Builder::with_capacity(strings.len()).with_data_type(data_type());
+        for value in strings {
+            output.append_option(
+                value
+                    .and_then(|text| json_decimal(text, &self.path))
+                    .map(encode),
+            );
+        }
+        let output = Arc::new(output.finish());
+        if scalar {
+            Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(
+                output.as_ref(),
+                0,
+            )?))
+        } else {
+            Ok(ColumnarValue::Array(output))
+        }
+    }
 }
 
 impl ScalarUDFImpl for Function {

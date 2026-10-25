@@ -839,6 +839,16 @@ impl Expressions<'_> {
         if let Some(op) = crate::ip::Op::lookup(name) {
             return crate::ip::plan(self, op, values, schema, span);
         }
+        if let Some(op) = crate::telemetry_text::Op::lookup(name) {
+            arity(1)?;
+            return Ok(crate::telemetry_text::call(
+                op,
+                cast(
+                    self.string_value(values[0].clone(), schema)?,
+                    DataType::Utf8,
+                ),
+            ));
+        }
         if let Some(op) = crate::series_functions::Op::lookup(name) {
             return Ok(dynamic::call(Kernel::Series(op), values));
         }
@@ -873,6 +883,30 @@ impl Expressions<'_> {
             return Ok(dynamic::call(kernel, values));
         }
         Ok(match name {
+            "trim" | "trim_start" | "trim_end" => {
+                arity(2)?;
+                let pattern = self.constant_string(values[0].clone(), args[0].span)?;
+                regex::Regex::new(&pattern).map_err(|error| {
+                    Error::syntax(
+                        format!("invalid trim regular expression: {error}"),
+                        args[0].span,
+                    )
+                })?;
+                let mut value = self.string_value(values[1].clone(), schema)?;
+                if name != "trim_end" {
+                    value = self.function(
+                        "regexp_replace",
+                        vec![value, lit(format!("^(?:{pattern})+")), lit("")],
+                    )?;
+                }
+                if name != "trim_start" {
+                    value = self.function(
+                        "regexp_replace",
+                        vec![value, lit(format!("(?:{pattern})+$")), lit("")],
+                    )?;
+                }
+                value
+            }
             "todecimal" => {
                 arity(1)?;
                 if dynamic::is_dynamic(&values[0].get_type(schema)?) {
@@ -1172,6 +1206,16 @@ impl Expressions<'_> {
                 }
                 let path = self.constant_string(values[0].clone(), args[0].span)?;
                 let path = crate::json_path::parse(&path, args[0].span)?;
+                if matches!(
+                    args.get(2).map(|value| &value.kind),
+                    Some(ExprKind::Type(ScalarType::Decimal))
+                ) {
+                    let source = cast(
+                        self.string_value(values[1].clone(), schema)?,
+                        DataType::Utf8,
+                    );
+                    return Ok(crate::decimal::extract_json(source, path));
+                }
                 let mut value = dynamic::call(Kernel::ParseJsonStrict, vec![values[1].clone()]);
                 for segment in path {
                     let index = match segment {

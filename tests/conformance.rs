@@ -18,6 +18,79 @@ struct Fixture {
 }
 const FIXTURES: &[Fixture] = &[
     Fixture {
+        name: "exact-decimal-arithmetic",
+        query: r#"
+        print total=tostring(decimal(0.1)+decimal(0.2)),
+            wide=tostring(decimal(9007199254740993)+1),
+            overflow=tostring(isnull(decimal(max)+1))
+    "#,
+    },
+    Fixture {
+        name: "decimal-json-extraction-without-double-rounding",
+        query: r#"
+        print value=tostring(extract_json('$.amount',
+            '{"amount":9007199254740993.123456789}',typeof(decimal)))
+    "#,
+    },
+    Fixture {
+        name: "rich-nested-scalar-tags",
+        query: r#"
+        print value=dynamic({'items':[datetime(2025-01-01),1h,
+            guid(74be27de-1e4e-49d9-b579-fe0b331d3642),decimal(1.25)]})
+        | project date=gettype(value.items[0]),span=gettype(value.items[1]),
+            id=gettype(value.items[2]),amount=gettype(value.items[3])
+    "#,
+    },
+    Fixture {
+        name: "term-set-boundaries",
+        query: r#"
+        print any=tostring("North America" has_any("north","south")),
+            all=tostring("North America" has_all("north","america")),
+            prefix=tostring("North America" hasprefix "ame"),
+            suffix=tostring("North America" hassuffix "ica")
+    "#,
+    },
+    Fixture {
+        name: "ipv4-cidr-parsing-and-matching",
+        query: r#"
+        print ip=tostring(parse_ipv4("192.168.1.1/24")),
+            prefix=tostring(ipv4_netmask_suffix("192.168.1.1/24")),
+            match=tostring(ipv4_is_in_any_range("192.168.1.6",
+                dynamic(["10.0.0.0/8","192.168.1.0/24"])))
+    "#,
+    },
+    Fixture {
+        name: "canonical-ipv6-and-mapped-ipv4",
+        query: r#"
+        print ip=parse_ipv6("192.168.255.255/24"),
+            same=tostring(ipv6_compare("192.168.1.1","::ffff:c0a8:0101"))
+    "#,
+    },
+    Fixture {
+        name: "base64-and-url-encoding",
+        query: r#"
+        print encoded=base64_encode_tostring("Kusto"),
+            decoded=base64_decode_tostring("S3VzdG8="),
+            url=url_encode_component("hello world"),
+            parameter=tostring(parse_urlquery("x=hello+world")["Query Parameters"].x)
+    "#,
+    },
+    Fixture {
+        name: "regex-trimming",
+        query: r#"
+        print value=trim(@"\s+","  Hello, world!  "),
+            start=trim_start("--","----text----"),
+            end=trim_end("--","----text----")
+    "#,
+    },
+    Fixture {
+        name: "empty-numeric-average-nan",
+        query: r#"
+        datatable(x:long)[] | summarize value=avg(x)
+        | project nan=tostring(isnan(value)),is_null=tostring(isnull(value))
+    "#,
+    },
+    Fixture {
         name: "grouped-count-and-null-sum",
         query: r#"
         datatable(g:string,x:long)['a',1,'a',long(null),'b',3]

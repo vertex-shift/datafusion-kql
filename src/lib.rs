@@ -46,6 +46,7 @@ mod scan;
 mod search;
 mod series_functions;
 mod tabular;
+mod telemetry_text;
 mod temporal;
 mod terms;
 mod top;

@@ -16,6 +16,10 @@ fn field(plan: &LogicalPlan, index: usize) -> Expr {
 }
 
 fn columns(expr: &ast::Expr, names: &mut HashSet<String>) {
+    if let ExprKind::TermSet { expr, .. } = &expr.kind {
+        columns(expr, names);
+        return;
+    }
     if let ExprKind::Identifier(parts) = &expr.kind {
         names.insert(parts[0].clone());
     }

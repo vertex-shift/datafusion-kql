@@ -33,3 +33,4 @@ jobs:
       - run: cargo run --locked --example functions
       - run: cargo run --locked --example grouped_scan
       - run: cargo run --locked --example schema_plugins
+      - run: cargo run --locked --example telemetry_functions

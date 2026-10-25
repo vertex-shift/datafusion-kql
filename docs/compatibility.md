@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.5 implements the typed tabular and dynamic subset below. Keywords, function
+0.6 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -15,7 +15,7 @@ syntax/functions return an error; there is no SQL fallback.
 | `let` | Scalar expressions, tabular plans, aliases, nested lexical scopes |
 | Parenthesized queries | Nested pipelines and scoped `let` statements |
 | `print` | One row of scalar expressions |
-| `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan`, `guid`/`uuid`/`uniqueid`, `dynamic` columns |
+| `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan`, `guid`/`uuid`/`uniqueid`, `decimal`, `dynamic` columns |
 | `range` | Inclusive lazy native `generate_series`; integer, real, datetime, and timespan sequences, including descending ranges |
 | `union` | Source form and pipe form |
 | `materialize(...)` | Lazy shared Arrow snapshot, usable directly or in a tabular binding |
@@ -204,6 +204,8 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
   `datetime(...)`, and `timespan(...)`.
 - GUID literals (`guid(...)`, `uuid(...)`, `uniqueid(...)`) and typed nulls;
   nullable `toguid`, volatile `new_guid`, and canonical `tostring` formatting.
+- Exact `decimal(...)` literals/conversion and nonfinite real literals
+  `real(nan)`, `real(inf)`, and `real(-inf)`.
 - Timespans: `d`, `h`, `m`, `s`, `ms`, `us`, `ns`, `tick`/`ticks`,
   `microsecond(s)`, decimal quantities, and `[d.]hh:mm:ss[.fraction]`.
   Bare numbers inside `timespan(...)` represent days. Conversion uses integer
@@ -355,6 +357,10 @@ value range. Sorting, equality, hashing, joins, and grouped states remain native
 DataFusion operations. Sum/average results normalize to the decimal range, with
 single midpoint-to-even rounding when reducing excess native scale.
 `tostring` uses normalized non-exponential formatting.
+`extract_json(..., typeof(decimal))` reads the selected raw JSON token directly,
+so exact decimal text is not first rounded through a JSON `f64`. The `min` and
+`max` names are literal constructors only, not accepted numeric strings by
+`todecimal`.
 
 Typed datatables/parameters/functions, nullable parsing/extraction, numeric
 arithmetic, exact binning/floor/ceiling, native decimal inputs, unions, root
@@ -362,6 +368,37 @@ dynamic tags, and serialized offsets are supported. Mixed decimal/real
 arithmetic promotes to real. Complete decimal edge-case parity still requires
 an authorized Kusto reference run; the documented local implementation and
 source evidence are not represented as a completed live comparison.
+Decimal table ranges currently error rather than silently casting their bounds
+and steps to real.
+
+## URL, encoding, and trimming helpers
+
+`parse_url`/`parseurl` and `parse_urlquery`/`parseurlquery` return dynamic bags
+with documented component names, including `"Query Parameters"`. Parsing never
+fetches a URL. Hosted absolute URLs support explicit/default ports and IPv6;
+nonabsolute/nonhierarchical inputs return dynamic null. Query keys/values are
+form-decoded, with the last duplicate value retained. The URL parser's
+normalization and repeated-key policy are documented behavior pending live
+Kusto verification for edge cases.
+
+`url_encode` and `url_encode_component` use lowercase percent escapes; spaces
+become `+` and `%20` respectively. `url_decode` accepts either case of escapes,
+decodes `+` as space, retains malformed escape sequences literally, and replaces
+invalid decoded UTF-8 with U+FFFD. Userinfo decoding preserves literal plus signs.
+Text conversions have a 16 MiB per-value input/encoding-output budget.
+
+`base64_encode_tostring`/`base64_encodestring`,
+`base64_decode_tostring`/`base64_decodestring`, and `base64_decode_toarray`
+operate on UTF-8 strings or byte arrays as documented. ASCII whitespace is
+ignored while decoding standard padded base64. Invalid input and invalid
+decoded UTF-8 produce null, not an empty successful decode; this follows the
+function-specific nullable return contract. Byte arrays also obey the dynamic
+collection limit.
+
+`trim`, `trim_start`, and `trim_end` take a constant regex followed by the source,
+not SQL-style character sets. Compiled native regex replacements remove all
+matching edge runs. Regex syntax follows the same Rust-regex boundary as the
+other extraction functions.
 
 ## Grouped tabular subqueries
 
@@ -611,8 +648,9 @@ Other input overloads follow DataFusion's supported Arrow types.
 `count()` counts rows, including rows with nulls; `count(column)` also counts all
 rows. Native filters implement conditional aggregates. Counts are signed
 `long`. Sum, sample variance, and sample standard deviation default to zero for
-empty/all-null inputs. Other numeric aggregates use DataFusion defaults; notably
-empty `avg` is null (some Kusto workloads expose NaN here). Group-less summarize
+empty/all-null inputs. Numeric `avg`/`avgif` return NaN for empty/all-null inputs, matching the published
+Kusto summarize example rather than SQL's null. Decimal/timespan averages
+retain typed null because their types cannot represent NaN. Group-less summarize
 returns a row on empty input; grouped summarize returns none.
 
 Standard aggregate names such as `count_`, `sum_Value`, and grouping

@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.5 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.6 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -20,6 +20,7 @@ cargo run --example time_series
 cargo run --example functions
 cargo run --example grouped_scan
 cargo run --example schema_plugins
+cargo run --example telemetry_functions
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -168,6 +169,9 @@ GUID tags. Decimal arithmetic is exact base-ten, and nested dynamic
 datetime/timespan/GUID/decimal values retain their types across access,
 collections, expansion, aggregation, and serialized offsets. Existing dynamic
 tag numbers and previous input schemas remain compatible.
+Term-list/prefix/suffix searches, IPv4/IPv6 and CIDR functions, URL/query
+parsing, percent/base64 encodings, and regex trimming cover common telemetry
+queries. Compiled matchers and network range caches are bounded.
 
 Advanced signal processing, management commands, additional hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.

@@ -77,6 +77,8 @@ async fn term_sets_support_unicode_short_terms_and_literal_regex_characters() {
 
 #[tokio::test]
 async fn table_sources_are_lazy_and_use_only_the_first_column() {
+    check("let T=datatable(term:string)['north']; datatable(s:string)['North East','other'] | search s has_any(T) | project s",
+        &[&["North East"]]).await;
     check("let T=datatable(term:string,ignored:long)['north',1,'south',2]; datatable(s:string)['North East','South West','other'] | where s has_any(T) | project s | sort by s asc",
         &[&["North East"],&["South West"]]).await;
     check("print a='north south' has_all((datatable(term:string)['north','south'])),b='north' has_all((datatable(term:string)['north','south']))",

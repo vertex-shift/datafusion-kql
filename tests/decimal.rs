@@ -151,6 +151,8 @@ async fn typed_decimal_parameters_functions_and_schema_reporting_are_supported()
 
 #[tokio::test]
 async fn decimal_extraction_and_parse_use_nullable_conversions() {
+    check("print d=tostring(extract_json('$.amount','{\"amount\":9007199254740993.123456789}',typeof(decimal))),q=tostring(extract_json('$[\"a.b\"][-1]','{\"a.b\":[0,1.0000000000000000000000000001]}',typeof(decimal)))",
+        &[&["9007199254740993.123456789","1.0000000000000000000000000001"]]).await;
     check(
         "print d=tostring(extract('value=(.*)',1,'value=1.25',typeof(decimal)))",
         &[&["1.25"]],
@@ -235,7 +237,13 @@ async fn invalid_decimal_literals_and_datatable_values_fail_during_planning() {
         "print d=decimal(invalid)",
         "print d=decimal(79228162514264337593543950336)",
         "datatable(d:decimal)['invalid']",
+        "range d from decimal(9007199254740993) to decimal(9007199254740994) step decimal(0.1)",
     ] {
         assert!(ctx.kql(query).await.is_err(), "{query}");
     }
+    check(
+        "print d=isnull(todecimal('max')),m=tostring(decimal(max))",
+        &[&["true", "79228162514264337593543950335"]],
+    )
+    .await;
 }

@@ -18,6 +18,7 @@ use crate::expressions::Expressions;
 enum Post {
     Direct,
     Zero,
+    Nan,
     Signed,
     Duration(bool),
     Field(String),
@@ -163,6 +164,18 @@ pub(crate) fn plan(
                         cast(lit(0_i64), result.schema().field(index).data_type().clone()),
                     ],
                 )?
+            }
+            Post::Nan => {
+                value = collector.expressions.function(
+                    "coalesce",
+                    vec![
+                        value,
+                        cast(
+                            lit(f64::NAN),
+                            result.schema().field(index).data_type().clone(),
+                        ),
+                    ],
+                )?;
             }
             Post::Signed => value = cast(value, DataType::Int64),
             Post::Duration(zero) => {
@@ -470,6 +483,8 @@ impl Collector<'_> {
         }
         let post = if duration {
             Post::Duration(zero)
+        } else if native == "avg" && root.get_type(self.schema.as_ref())?.is_floating() {
+            Post::Nan
         } else if zero {
             Post::Zero
         } else if signed {

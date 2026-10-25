@@ -47,7 +47,7 @@ pub(crate) fn literal_value(literal: &Literal, span: Span) -> Result<ScalarValue
                         ScalarValue::FixedSizeBinary(16, Some(bytes.to_vec()))
                     }
                     ScalarType::Decimal => {
-                        let value = crate::decimal::parse(value).ok_or_else(|| {
+                        let value = crate::decimal::literal(value).ok_or_else(|| {
                             Error::syntax("invalid or out-of-range decimal literal", span)
                         })?;
                         ScalarValue::Decimal256(
