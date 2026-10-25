@@ -16,6 +16,7 @@
 
 mod aggregate_functions;
 mod aggregation;
+mod arrow_dynamic;
 pub mod ast;
 mod calendar;
 mod decimal;

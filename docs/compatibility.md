@@ -289,6 +289,24 @@ ordinary user JSON. Typed collections enforce depth 128, per-collection element
 limits, and a total-node budget; malformed references and reused child nodes
 fail explicitly.
 
+Native Arrow `List`, `LargeList`, `FixedSizeList`, list-view layouts, structs,
+and string-keyed maps are accepted by dynamic operations, `pack_all`,
+`todynamic`/`parse_json`, collection aggregates, and `mv-expand`/`mv-apply`.
+Sliced offsets, parent nulls, dictionary-encoded children, nested decimals,
+GUIDs, timestamps and durations retain their logical values and scalar tags.
+Native arrays become dynamic arrays; structs/maps become property bags.
+Duplicate/null map keys, duplicate struct names, unsupported binary values,
+unsigned integers above signed-long range, and unrepresentable temporal values
+error instead of silently dropping information.
+
+The bridge checks collection/node/depth budgets and a cumulative 16 MiB text
+budget per value. Schema nesting is validated before constructing scan plans,
+so pathological host schemas fail before recursive DataFusion planning.
+A single explicitly typed primitive list expansion without item indices or
+serialized-order tracking uses checked native Arrow buffers and native Unnest,
+avoiding JSON conversion. More complex/zipped/rich cases use the shared dynamic
+batch path. Type-only expansion still does not parse strings into numeric values.
+
 `parse_json`/`todynamic`, dotted properties, arbitrary string-key subscripts,
 zero-based and negative array indices, `gettype`, and scalar conversion
 functions are implemented. As in KQL, malformed JSON deliberately becomes a

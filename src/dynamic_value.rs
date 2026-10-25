@@ -6,8 +6,8 @@ use serde_json::{Map, Number, Value as Json, json};
 
 use crate::dynamic::MAX_COLLECTION_SIZE;
 
-const MAX_DEPTH: usize = 128;
-const MAX_NODES: usize = MAX_COLLECTION_SIZE * 2 + 1;
+pub(crate) const MAX_DEPTH: usize = 128;
+pub(crate) const MAX_NODES: usize = MAX_COLLECTION_SIZE * 2 + 1;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Node {

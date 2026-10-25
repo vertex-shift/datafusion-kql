@@ -461,7 +461,8 @@ impl Collector<'_> {
             );
         }
         if (native == "approx_distinct" || native == "count" && distinct)
-            && dynamic::is_dynamic(&values[0].get_type(self.schema.as_ref())?)
+            && (dynamic::is_dynamic(&values[0].get_type(self.schema.as_ref())?)
+                || crate::arrow_dynamic::is_collection(&values[0].get_type(self.schema.as_ref())?))
         {
             values[0] = when(values[0].clone().is_null(), lit(ScalarValue::Utf8(None)))
                 .otherwise(dynamic::call(Kernel::EncodeWire, vec![values[0].clone()]))?;
@@ -585,7 +586,7 @@ impl Collector<'_> {
         let mut value = self.expressions.scalar(&args[0], &self.schema)?;
         let ty = value.get_type(self.schema.as_ref())?;
         let domain = crate::tabular::type_names(&ty).0;
-        if dynamic::is_dynamic(&ty) {
+        if dynamic::is_dynamic(&ty) || crate::arrow_dynamic::is_collection(&ty) {
             value = when(value.clone().is_null(), lit(ScalarValue::Utf8(None)))
                 .otherwise(dynamic::call(Kernel::EncodeWire, vec![value]))?;
         } else if crate::decimal::is_decimal(&ty) {

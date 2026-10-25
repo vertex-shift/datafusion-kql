@@ -835,6 +835,9 @@ impl Expressions<'_> {
                     .otherwise(index + lit(1_i64))?;
                 self.function("array_element", vec![value, index])
             }
+            ty if crate::arrow_dynamic::is_collection(&ty) => {
+                Ok(dynamic::call(Kernel::Get, vec![value, index]))
+            }
             ty => Err(Error::Plan(format!(
                 "cannot subscript {ty}; parse JSON or use a dynamic value"
             ))),
@@ -856,20 +859,24 @@ impl Expressions<'_> {
     }
 
     pub(crate) fn string_value(&self, value: Expr, schema: &DFSchema) -> Result<Expr> {
-        Ok(if dynamic::is_dynamic(&value.get_type(schema)?) {
-            dynamic::call(Kernel::Convert(DataType::Utf8), vec![value])
-        } else if value.get_type(schema)? == DataType::Boolean {
-            datafusion::logical_expr::expr_fn::case(value)
-                .when(lit(true), lit("True"))
-                .when(lit(false), lit("False"))
-                .otherwise(lit(ScalarValue::Utf8(None)))?
-        } else if crate::decimal::is_decimal(&value.get_type(schema)?) {
-            crate::decimal::call(crate::decimal::Op::Format, vec![value])
-        } else if value.get_type(schema)? == crate::guid::data_type() {
-            crate::guid::call(value, true)
-        } else {
-            value
-        })
+        Ok(
+            if dynamic::is_dynamic(&value.get_type(schema)?)
+                || crate::arrow_dynamic::is_collection(&value.get_type(schema)?)
+            {
+                dynamic::call(Kernel::Convert(DataType::Utf8), vec![value])
+            } else if value.get_type(schema)? == DataType::Boolean {
+                datafusion::logical_expr::expr_fn::case(value)
+                    .when(lit(true), lit("True"))
+                    .when(lit(false), lit("False"))
+                    .otherwise(lit(ScalarValue::Utf8(None)))?
+            } else if crate::decimal::is_decimal(&value.get_type(schema)?) {
+                crate::decimal::call(crate::decimal::Op::Format, vec![value])
+            } else if value.get_type(schema)? == crate::guid::data_type() {
+                crate::guid::call(value, true)
+            } else {
+                value
+            },
+        )
     }
 
     fn call(&self, name: &str, args: &[ast::Expr], span: Span, schema: &DFSchema) -> Result<Expr> {
