@@ -49,7 +49,7 @@ async fn scalar_expressions_over_aggregates_lower_to_native_projection() {
     ).await;
     check(
         "datatable(x:long)[] | summarize Ratio=todouble(sum(x))/count(), Default=coalesce(avg(x),0.0)",
-        &[&["NaN","0.0"]],
+        &[&["NaN","NaN"]],
     ).await;
 }
 
@@ -68,6 +68,21 @@ async fn aggregate_arithmetic_resolves_group_keys_but_not_input_rows() {
     );
 }
 
+#[tokio::test]
+async fn empty_and_all_null_numeric_averages_follow_kusto_nan_defaults() {
+    check("datatable(x:long)[] | summarize A=avg(x),B=avgif(x,x>0) | project a=isnan(A),b=isnan(B),null=isnull(A)",
+        &[&["true","true","false"]]).await;
+    check(
+        "datatable(x:real)[real(null),real(null)] | summarize A=avg(x) | project n=isnan(A)",
+        &[&["true"]],
+    )
+    .await;
+    check(
+        "datatable(x:long)[1,2] | summarize A=avgif(x,x>10) | project n=isnan(A)",
+        &[&["true"]],
+    )
+    .await;
+}
 #[tokio::test]
 async fn timespan_sum_and_average_keep_the_duration_type() {
     check(

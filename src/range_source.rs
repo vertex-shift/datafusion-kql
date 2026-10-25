@@ -34,6 +34,12 @@ pub(crate) fn plan(
         .iter()
         .map(|expr| expr.get_type(&DFSchema::empty()))
         .collect::<Result<Vec<_>>>()?;
+    if types.iter().any(crate::decimal::is_decimal) {
+        return Err(crate::Error::unsupported(
+            "decimal range bounds must not be implicitly rounded to real",
+            span,
+        ));
+    }
     let ty = if matches!(types[0], DataType::Timestamp(_, _))
         && matches!(types[1], DataType::Timestamp(_, _))
         && matches!(types[2], DataType::Duration(_))

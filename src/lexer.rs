@@ -89,7 +89,14 @@ pub(crate) fn lex(query: &str) -> Result<Vec<Token<'_>>> {
             }
             if matches!(
                 name,
-                "datetime" | "date" | "timespan" | "time" | "guid" | "uuid" | "uniqueid"
+                "datetime"
+                    | "date"
+                    | "timespan"
+                    | "time"
+                    | "guid"
+                    | "uuid"
+                    | "uniqueid"
+                    | "decimal"
             ) && query.as_bytes().get(after) == Some(&b'(')
             {
                 let end = query[after + 1..].find(')').ok_or_else(|| {

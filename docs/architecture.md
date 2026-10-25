@@ -96,8 +96,13 @@ errors rather than silently execute with different semantics.
   range and richer dynamic scalar types remain compatibility milestones.
 - Native 128-bit GUIDs, nullable conversion, UUID-v4 generation, typed query
   integration, and root dynamic GUID tags are implemented. Existing dynamic
-  tag numbers and older dense-union inputs remain compatible. Full decimal
-  coverage and rich nested non-JSON scalar values remain milestones.
+  tag numbers and older dense-union inputs remain compatible. Decimal
+  values now use a 34-digit decimal128 runtime, opaque native Arrow storage,
+  batch numeric kernels, and native aggregate states. Scalar/vector conversions
+  and special values have actual reference fixtures. Rich nested non-JSON values use appended typed collection
+  tags and a bounded nonrecursive wire representation; ordinary JSON retains
+  its lightweight path. Complete reference certification and full temporal
+  ranges remain milestones.
 - Lookup, schema introspection, projection reordering, sampling, wildcard table
   discovery, source-labelled unions and conflicting-type schema splitting are
   implemented. Cross-table search/find, smart row packing, hierarchical
@@ -118,6 +123,12 @@ errors rather than silently execute with different semantics.
   Snapshots are scoped to planned queries, including DataFrame clones.
 - Management commands, remote Kusto connectors, visualization metadata,
   CLI/Python bindings, and language tooling.
+- Common telemetry functions now include bounded compiled term-set search,
+  term prefixes/suffixes, native IP/CIDR parsing and range membership, URL/query
+  parsing, percent/base64 encoding, and KQL regex trimming. Source fixtures cover
+  their documented examples. A finite public-help reference baseline is captured
+  in ordinary tests, including the former decimal precision/JSON disagreements.
+  Full live certification is separate from this bounded baseline.
 - Conformance fixtures against a real Kusto cluster and production workload
   benchmarks before claiming complete compatibility.
 

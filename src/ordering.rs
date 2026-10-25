@@ -17,6 +17,14 @@ use crate::ast::{self, BindingValue, ExprKind, Operator, Source};
 const HIDDEN: &str = "datafusion_kql:hidden";
 const ORDINAL: &str = "datafusion_kql:ordinal";
 
+pub(crate) fn sort_value(value: Expr, schema: &DFSchema) -> Result<Expr> {
+    Ok(if crate::decimal::is_decimal(&value.get_type(schema)?) {
+        crate::decimal::call(crate::decimal::Op::SortKey, vec![value])
+    } else {
+        value
+    })
+}
+
 pub(crate) fn hidden(field: &Field) -> bool {
     field
         .metadata()
@@ -180,6 +188,16 @@ fn any_expression(expression: &ast::Expr, predicate: fn(&str) -> bool) -> bool {
         ExprKind::Object(items) => items.iter().any(|(_, e)| any_expression(e, predicate)),
         ExprKind::InList { expr, values, .. } => {
             any_expression(expr, predicate) || values.iter().any(|e| any_expression(e, predicate))
+        }
+        ExprKind::TermSet {
+            expr,
+            values,
+            tabular,
+            ..
+        } => {
+            any_expression(expr, predicate)
+                || values.iter().any(|value| any_expression(value, predicate))
+                || tabular.as_ref().is_some_and(|query| needed(query))
         }
         ExprKind::InTabular { expr, query, .. } => any_expression(expr, predicate) || needed(query),
         ExprKind::InPrepared { expr, .. } => any_expression(expr, predicate),

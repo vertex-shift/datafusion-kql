@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.5 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.7 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -20,6 +20,7 @@ cargo run --example time_series
 cargo run --example functions
 cargo run --example grouped_scan
 cargo run --example schema_plugins
+cargo run --example telemetry_functions
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -164,8 +165,14 @@ and hierarchical `top-nested` selection are supported. Schema-declared
 aggregation lazy and native.
 GUID/UUID values use native 128-bit Arrow storage, with literals, nullable
 conversion, generation, canonical formatting, typed parameters, and root dynamic
-GUID tags. Existing dynamic tag numbers and previous input schemas remain
-compatible.
+GUID tags. Decimal arithmetic uses a 34-digit decimal128 runtime with
+reference-backed scalar/vector conversion semantics, and nested dynamic
+datetime/timespan/GUID/decimal values retain their types across access,
+collections, expansion, aggregation, and serialized offsets. Existing dynamic
+tag numbers and previous input schemas remain compatible.
+Term-list/prefix/suffix searches, IPv4/IPv6 and CIDR functions, URL/query
+parsing, percent/base64 encodings, and regex trimming cover common telemetry
+queries. Compiled matchers and network range caches are bounded.
 
 Advanced signal processing, management commands, additional hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.
@@ -210,11 +217,18 @@ optimizer behavior, Arrow integration, and Parquet. SQL is enabled only by the
 development dependency for comparison; the frontend does not require
 DataFusion's SQL feature at runtime.
 
-`tests/conformance.rs` also provides an opt-in reference suite for a configured
-Kusto emulator or ADX test database. Default tests validate its synthetic
-fixtures/protocol locally; CI exercises its curl transport against a self-owned
-loopback fixture, **not a Kusto reference engine**. See the compatibility
-contract for explicit live-test setup and remaining conformance boundaries.
+`tests/conformance.rs` compares 49 synthetic fixtures with captured public Kusto
+help-cluster results by default, and provides an opt-in live suite for a
+configured emulator or ADX test database. The formerly ignored decimal
+precision and JSON conversion cases are now ordinary regressions. CI also exercises curl
+transport against a self-owned loopback fixture, **not a Kusto engine**.
+See the compatibility contract for capture provenance, live-test setup, and
+remaining conformance boundaries.
+
+Building the decimal128 runtime requires a C compiler for the bundled
+`libdecnumber` dependency. Decimal output uses an opaque Arrow struct rather
+than a fixed-scale Arrow decimal; use KQL `tostring` for display and see the
+compatibility contract before migrating persisted 0.6 schemas.
 
 ## License
 

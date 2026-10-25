@@ -15,8 +15,102 @@ type Rows = Vec<Vec<Option<String>>>;
 struct Fixture {
     name: &'static str,
     query: &'static str,
+    columns: &'static [&'static str],
+    rows: &'static [&'static [&'static str]],
 }
+// Captured through Azure MCP from help.kusto.windows.net/Samples on 2026-10-25.
 const FIXTURES: &[Fixture] = &[
+    Fixture {
+        name: "exact-decimal-arithmetic",
+        query: r#"
+        print total=tostring(decimal(0.1)+decimal(0.2)),
+            wide=tostring(decimal(9007199254740993)+1),
+            invalid=tostring(isnull(decimal(1)/decimal(0)))
+    "#,
+        columns: &["total", "wide", "invalid"],
+        rows: &[&["0.3", "9007199254740994", "True"]],
+    },
+    Fixture {
+        name: "decimal-json-string-extraction",
+        query: r#"
+        print value=tostring(extract_json('$.amount',
+            '{"amount":"9007199254740993.123456789"}',typeof(decimal)))
+    "#,
+        columns: &["value"],
+        rows: &[&["9007199254740993.123456789"]],
+    },
+    Fixture {
+        name: "rich-nested-scalar-tags",
+        query: r#"
+        print value=bag_pack('items',pack_array(datetime(2025-01-01),1h,
+            guid(74be27de-1e4e-49d9-b579-fe0b331d3642),decimal(1.25)))
+        | project dateValue=gettype(value.items[0]),span=gettype(value.items[1]),
+            id=gettype(value.items[2]),amount=gettype(value.items[3])
+    "#,
+        columns: &["dateValue", "span", "id", "amount"],
+        rows: &[&["datetime", "timespan", "guid", "decimal"]],
+    },
+    Fixture {
+        name: "term-set-boundaries",
+        query: r#"
+        print any=tostring("North America" has_any("north","south")),
+            all=tostring("North America" has_all("north","america")),
+            prefix=tostring("North America" hasprefix "ame"),
+            suffix=tostring("North America" hassuffix "ica")
+    "#,
+        columns: &["any", "all", "prefix", "suffix"],
+        rows: &[&["True", "True", "True", "True"]],
+    },
+    Fixture {
+        name: "ipv4-cidr-parsing-and-matching",
+        query: r#"
+        print ip=tostring(parse_ipv4("192.168.1.1/24")),
+            prefix=tostring(ipv4_netmask_suffix("192.168.1.1/24")),
+            match=tostring(ipv4_is_in_any_range("192.168.1.6",
+                dynamic(["10.0.0.0/8","192.168.1.0/24"])))
+    "#,
+        columns: &["ip", "prefix", "match"],
+        rows: &[&["3232235776", "24", "True"]],
+    },
+    Fixture {
+        name: "canonical-ipv6-and-mapped-ipv4",
+        query: r#"
+        print ip=parse_ipv6("192.168.255.255/24"),
+            same=tostring(ipv6_compare("192.168.1.1","::ffff:c0a8:0101"))
+    "#,
+        columns: &["ip", "same"],
+        rows: &[&["0000:0000:0000:0000:0000:ffff:c0a8:ff00", "0"]],
+    },
+    Fixture {
+        name: "base64-and-url-encoding",
+        query: r#"
+        print encoded=base64_encode_tostring("Kusto"),
+            decoded=base64_decode_tostring("S3VzdG8="),
+            url=url_encode_component("hello world"),
+            parameter=tostring(parse_urlquery("x=hello+world")["Query Parameters"].x)
+    "#,
+        columns: &["encoded", "decoded", "url", "parameter"],
+        rows: &[&["S3VzdG8=", "Kusto", "hello%20world", "hello+world"]],
+    },
+    Fixture {
+        name: "regex-trimming",
+        query: r#"
+        print value=trim(@"\s+","  Hello, world!  "),
+            start=trim_start("--","----text----"),
+            end=trim_end("--","----text----")
+    "#,
+        columns: &["value", "start", "end"],
+        rows: &[&["Hello, world!", "--text----", "----text--"]],
+    },
+    Fixture {
+        name: "empty-numeric-average-nan",
+        query: r#"
+        datatable(x:long)[] | summarize value=avg(x)
+        | project nan=tostring(isnan(value)),is_null=tostring(isnull(value))
+    "#,
+        columns: &["nan", "is_null"],
+        rows: &[&["True", "False"]],
+    },
     Fixture {
         name: "grouped-count-and-null-sum",
         query: r#"
@@ -24,6 +118,8 @@ const FIXTURES: &[Fixture] = &[
         | summarize N=count(),Total=sum(x) by g
         | project g,N=tostring(N),Total=tostring(Total)
     "#,
+        columns: &["g", "N", "Total"],
+        rows: &[&["a", "2", "1"], &["b", "1", "3"]],
     },
     Fixture {
         name: "nullable-equality",
@@ -31,6 +127,8 @@ const FIXTURES: &[Fixture] = &[
         print a=tostring(long(null)==long(1)),
             b=tostring(long(null)!=long(1)),c=tostring(long(null)==long(null))
     "#,
+        columns: &["a", "b", "c"],
+        rows: &[&["False", "True", ""]],
     },
     Fixture {
         name: "zipped-expansion",
@@ -39,6 +137,8 @@ const FIXTURES: &[Fixture] = &[
         | mv-expand a to typeof(long),b to typeof(long)
         | project id=tostring(id),a=tostring(a),b=tostring(b)
     "#,
+        columns: &["id", "a", "b"],
+        rows: &[&["1", "1", "5"], &["1", "2", ""]],
     },
     Fixture {
         name: "per-row-top-and-aggregation",
@@ -47,6 +147,8 @@ const FIXTURES: &[Fixture] = &[
         | mv-apply v=a to typeof(long) on(top 2 by v | summarize Total=sum(v))
         | project id=tostring(id),Total=tostring(Total)
     "#,
+        columns: &["id", "Total"],
+        rows: &[&["1", "8"], &["2", "15"]],
     },
     Fixture {
         name: "partitioned-row-windows",
@@ -56,6 +158,13 @@ const FIXTURES: &[Fixture] = &[
             sort by x asc | extend N=row_number(),Previous=prev(x,1,0))
         | project g,x=tostring(x),N=tostring(N),Previous=tostring(Previous)
     "#,
+        columns: &["g", "x", "N", "Previous"],
+        rows: &[
+            &["a", "1", "1", "0"],
+            &["a", "2", "2", "1"],
+            &["b", "3", "1", "0"],
+            &["b", "4", "2", "3"],
+        ],
     },
     Fixture {
         name: "stateful-scan-promotion",
@@ -63,11 +172,18 @@ const FIXTURES: &[Fixture] = &[
         datatable(t:timespan,event:string)[0m,'Start',1m,'A',2m,'Stop',5m,'Start',6m,'Stop']
         | sort by t asc
         | scan with_match_id=id with(
-            step first:event=='Start';
-            step middle:event!='Start' and event!='Stop' and t-first.t<=3m;
-            step last:event=='Stop' and t-first.t<=3m;)
+            step s1:event=='Start';
+            step s2:event!='Start' and event!='Stop' and t-s1.t<=3m;
+            step s3:event=='Stop' and t-s1.t<=3m;)
         | project event,id=tostring(id)
     "#,
+        columns: &["event", "id"],
+        rows: &[
+            &["Start", "0"],
+            &["A", "0"],
+            &["Stop", "0"],
+            &["Start", "1"],
+        ],
     },
     Fixture {
         name: "hierarchical-parent-totals",
@@ -76,6 +192,8 @@ const FIXTURES: &[Fixture] = &[
         | top-nested 1 of r by sum(v),top-nested 1 of c by sum(v)
         | project r,c,parent=tostring(aggregated_r),child=tostring(aggregated_c)
     "#,
+        columns: &["r", "c", "parent", "child"],
+        rows: &[&["P2", "b", "20", "15"]],
     },
     Fixture {
         name: "schema-declared-bag-unpack",
@@ -84,6 +202,8 @@ const FIXTURES: &[Fixture] = &[
         | evaluate bag_unpack(d):(name:string,n:long)
         | project name,n=tostring(n)
     "#,
+        columns: &["name", "n"],
+        rows: &[&["a", "2"], &["b", "3"]],
     },
     Fixture {
         name: "schema-declared-pivot",
@@ -92,6 +212,8 @@ const FIXTURES: &[Fixture] = &[
         | evaluate pivot(k,sum(v),g):(g:string,A:long,B:long)
         | project g,A=tostring(A),B=tostring(B)
     "#,
+        columns: &["g", "A", "B"],
+        rows: &[&["x", "2", "3"], &["y", "4", "0"]],
     },
     Fixture {
         name: "column-restricted-search",
@@ -100,6 +222,8 @@ const FIXTURES: &[Fixture] = &[
         | search message:'error' and n>1
         | project message,n=tostring(n)
     "#,
+        columns: &["message", "n"],
+        rows: &[&["error network", "3"]],
     },
     Fixture {
         name: "lexical-scalar-subquery-function",
@@ -108,6 +232,8 @@ const FIXTURES: &[Fixture] = &[
         let f=(n:long){toscalar(T | where x>n | count)};
         print N=tostring(f(2))
     "#,
+        columns: &["N"],
+        rows: &[&["3"]],
     },
     Fixture {
         name: "staged-native-range",
@@ -115,6 +241,8 @@ const FIXTURES: &[Fixture] = &[
         let End=toscalar(range x from 1 to 5 step 1 | count);
         range x from 1 to End step 2 | project x=tostring(x)
     "#,
+        columns: &["x"],
+        rows: &[&["1"], &["3"], &["5"]],
     },
     Fixture {
         name: "typed-guid-conversion",
@@ -122,6 +250,8 @@ const FIXTURES: &[Fixture] = &[
         datatable(s:string)['0123456789abcdef0123456789abcdef','not-a-guid']
         | project id=tostring(toguid(s))
     "#,
+        columns: &["id"],
+        rows: &[&["01234567-89ab-cdef-0123-456789abcdef"], &[""]],
     },
     Fixture {
         name: "frozen-guid-generation",
@@ -130,6 +260,8 @@ const FIXTURES: &[Fixture] = &[
         range x from 1 to 5 step 1 | summarize N=count_distinct(id)
         | project N=tostring(N)
     "#,
+        columns: &["N"],
+        rows: &[&["1"]],
     },
     Fixture {
         name: "typed-parse-filter",
@@ -138,15 +270,392 @@ const FIXTURES: &[Fixture] = &[
         | parse-where s with 'id=' id:long ' value=' value:long
         | project id=tostring(id),value=tostring(value)
     "#,
+        columns: &["id", "value"],
+        rows: &[&["3", "10"], &["4", "20"]],
     },
     Fixture {
         name: "series-shape-and-default-bins",
         query: r#"
         datatable(x:long,v:long)[0,2,2,4]
         | make-series Total=sum(v) on x from 0 to 3 step 1
-        | project N=tostring(array_length(Total)),first=tostring(tolong(Total[0])),
-            missing=tostring(tolong(Total[1])),last=tostring(tolong(Total[2]))
+        | project N=tostring(array_length(Total)),firstValue=tostring(tolong(Total[0])),
+            missingValue=tostring(tolong(Total[1])),lastValue=tostring(tolong(Total[2]))
     "#,
+        columns: &["N", "firstValue", "missingValue", "lastValue"],
+        rows: &[&["3", "2", "0", "4"]],
+    },
+    Fixture {
+        name: "encoding-and-decoding-edge-semantics",
+        query: r#"
+        print Ordinary=url_encode("!'()*~_-. /:&"),
+            Component=url_encode_component("!'()*~_-. /:&"),
+            BadEscape=url_decode('a%ZZ+b%2'),BadUtf=url_decode('%ff'),
+            Bytes=tostring(base64_decode_toarray('////')),
+            BadBase64=tostring(isnull(base64_decode_tostring('invalid!'))),
+            BadText=tostring(isnull(base64_decode_tostring('////'))),
+            Whitespace=base64_decode_tostring(' S3Vz\tdG8=\n')
+    "#,
+        columns: &[
+            "Ordinary",
+            "Component",
+            "BadEscape",
+            "BadUtf",
+            "Bytes",
+            "BadBase64",
+            "BadText",
+            "Whitespace",
+        ],
+        rows: &[&[
+            "!'()*~%5f%2d.+%2f%3a%26",
+            "!'()*~%5f%2d.%20%2f%3a%26",
+            "a%ZZ b%2",
+            "%ff",
+            "[255,255,255]",
+            "False",
+            "False",
+            "",
+        ]],
+    },
+    Fixture {
+        name: "raw-url-component-semantics",
+        query: r#"
+        print u=parse_url('https://Example.COM/a%20b/../c?a=hello+world&b=%20#x%20y')
+        | project scheme=tostring(u.Scheme),host=tostring(u.Host),
+            port=tostring(u.Port),path=tostring(u.Path),
+            a=tostring(u['Query Parameters'].a),b=tostring(u['Query Parameters'].b),
+            fragment=tostring(u.Fragment)
+    "#,
+        columns: &["scheme", "host", "port", "path", "a", "b", "fragment"],
+        rows: &[&[
+            "https",
+            "Example.COM",
+            "",
+            "/a%20b/../c",
+            "hello+world",
+            "%20",
+            "x%20y",
+        ]],
+    },
+    Fixture {
+        name: "base64-unused-bits-and-padding",
+        query: r#"
+        print Canonical=base64_decode_tostring('Zg=='),
+            UnusedBits=base64_decode_tostring('Zh=='),
+            Array=tostring(base64_decode_toarray('Zh==')),
+            Missing=base64_decode_tostring('Zg='),Excess=base64_decode_tostring('Zg==='),
+            InteriorSpace=base64_decode_tostring('S3Vz dG8='),
+            InvalidUtf=base64_decode_tostring('////')
+    "#,
+        columns: &[
+            "Canonical",
+            "UnusedBits",
+            "Array",
+            "Missing",
+            "Excess",
+            "InteriorSpace",
+            "InvalidUtf",
+        ],
+        rows: &[&["f", "f", "[102]", "", "", "", ""]],
+    },
+    Fixture {
+        name: "native-and-dynamic-floating-type-names",
+        query: r#"
+        print NativeType=gettype(1.5),LiteralType=gettype(dynamic(1.5)),
+            ParsedType=gettype(parse_json('1.5')),PackedType=gettype(pack_array(1.5)[0]),
+            NativeText=tostring(1.0),DynamicText=tostring(dynamic(1.0))
+    "#,
+        columns: &[
+            "NativeType",
+            "LiteralType",
+            "ParsedType",
+            "PackedType",
+            "NativeText",
+            "DynamicText",
+        ],
+        rows: &[&["real", "double", "double", "double", "1.0", "1.0"]],
+    },
+    Fixture {
+        name: "native-typed-nulls-and-integer-type-names",
+        query: r#"
+        print LongNull=gettype(long(null)),RealNull=gettype(real(null)),
+            BoolNull=gettype(bool(null)),EmptyString=gettype(''),
+            DateNull=gettype(datetime(null)),GuidNull=gettype(guid(null)),
+            DecimalNull=gettype(decimal(null)),NativeInt=gettype(int(1)),
+            DynamicInt=gettype(pack_array(int(1))[0]),DynamicNull=gettype(dynamic(null))
+    "#,
+        columns: &[
+            "LongNull",
+            "RealNull",
+            "BoolNull",
+            "EmptyString",
+            "DateNull",
+            "GuidNull",
+            "DecimalNull",
+            "NativeInt",
+            "DynamicInt",
+            "DynamicNull",
+        ],
+        rows: &[&[
+            "long", "real", "bool", "string", "datetime", "guid", "decimal", "int", "long", "null",
+        ]],
+    },
+    Fixture {
+        name: "decimal-runtime-range-and-precision",
+        query: "print maximum=tostring(decimal(max)),third=tostring(decimal(1)/decimal(3)),overflow=tostring(isnull(decimal(max)+1))",
+        columns: &["maximum", "third", "overflow"],
+        rows: &[&["1E+38", "0.3333333333333333333333333333333333", "False"]],
+    },
+    Fixture {
+        name: "decimal-json-number-rounding",
+        query: r#"print value=tostring(extract_json('$.amount','{"amount":9007199254740993.123456789}',typeof(decimal)))"#,
+        columns: &["value"],
+        rows: &[&["9007199254740992"]],
+    },
+    Fixture {
+        name: "decimal-runtime-string-conversion",
+        query: r#"datatable(s:string)['1e38','1e100','1e-38','1e-100',
+            '99999999999999999999999999999999999999',
+            '1.123456789012345678901234567890123456789',
+            '0.00000000000000000000000000000000000001']
+            | project s,value=tostring(todecimal(s)),TypeName=gettype(todecimal(s))"#,
+        columns: &["s", "value", "TypeName"],
+        rows: &[
+            &["1e38", "1E+38", "decimal"],
+            &["1e100", "1E+100", "decimal"],
+            &["1e-38", "1E-38", "decimal"],
+            &["1e-100", "1E-100", "decimal"],
+            &["99999999999999999999999999999999999999", "1E+38", "decimal"],
+            &[
+                "1.123456789012345678901234567890123456789",
+                "1.123456789012345678901234567890123",
+                "decimal",
+            ],
+            &[
+                "0.00000000000000000000000000000000000001",
+                "1E-38",
+                "decimal",
+            ],
+        ],
+    },
+    Fixture {
+        name: "decimal-scalar-json-precision-matrix",
+        query: r#"print A=tostring(extract_json('$','9007199254740993',typeof(decimal))),
+            B=tostring(extract_json('$','9007199254740993.123456789',typeof(decimal))),
+            C=tostring(extract_json('$','9007199254740993.9',typeof(decimal))),
+            D=tostring(extract_json('$','9007199254740994.25',typeof(decimal))),
+            E=tostring(extract_json('$','-9007199254740993.123456789',typeof(decimal))),
+            F=tostring(extract_json('$','0.12345678901234567890123456789',typeof(decimal))),
+            G=tostring(extract_json('$','1.0000000000000000000000000001',typeof(decimal))),
+            H=tostring(extract_json('$','1.25e2',typeof(decimal)))"#,
+        columns: &["A", "B", "C", "D", "E", "F", "G", "H"],
+        rows: &[&[
+            "9007199254740993",
+            "9007199254740992",
+            "9007199254740994",
+            "9007199254740994",
+            "-9007199254740992",
+            "0.12345678901234568",
+            "1",
+            "125",
+        ]],
+    },
+    Fixture {
+        name: "decimal-vector-json-precision-matrix",
+        query: r#"datatable(s:string)['{"amount":9007199254740993.123456789}',
+            '{"amount":"9007199254740993.123456789"}','{"amount":9007199254740993}',
+            '{"amount":9007199254740995}','{"amount":0.12345678901234567890123456789}']
+            | project s,value=tostring(extract_json('$.amount',s,typeof(decimal))),
+                jsonValue=tostring(parse_json(s).amount),TypeName=gettype(parse_json(s).amount)"#,
+        columns: &["s", "value", "jsonValue", "TypeName"],
+        rows: &[
+            &[
+                r#"{"amount":9007199254740993.123456789}"#,
+                "9007199254740993.123",
+                "9007199254740994.0",
+                "double",
+            ],
+            &[
+                r#"{"amount":"9007199254740993.123456789"}"#,
+                "9007199254740993.123456789",
+                "9007199254740993.123456789",
+                "string",
+            ],
+            &[
+                r#"{"amount":9007199254740993}"#,
+                "9007199254740993",
+                "9007199254740993",
+                "long",
+            ],
+            &[
+                r#"{"amount":9007199254740995}"#,
+                "9007199254740995",
+                "9007199254740995",
+                "long",
+            ],
+            &[
+                r#"{"amount":0.12345678901234567890123456789}"#,
+                "0.1234567890123456789",
+                "0.12345678901234568",
+                "double",
+            ],
+        ],
+    },
+    Fixture {
+        name: "decimal-formatting-and-normalization",
+        query: "print A=tostring(decimal(1.0)),B=tostring(decimal(1.2300)),C=tostring(decimal(1.25)*decimal(2.4)),D=tostring(decimal(0.0000001)),E=tostring(decimal(0.000001)),F=tostring(decimal(1e5)),G=tostring(decimal(1)/decimal(3)),H=tostring(decimal(100000)+decimal(0))",
+        columns: &["A", "B", "C", "D", "E", "F", "G", "H"],
+        rows: &[&[
+            "1",
+            "1.23",
+            "3",
+            "1E-7",
+            "0.000001",
+            "100000",
+            "0.3333333333333333333333333333333333",
+            "100000",
+        ]],
+    },
+    Fixture {
+        name: "decimal-scientific-frontend-conversion",
+        query: "print A=tostring(decimal(1e-38)),B=tostring(decimal(1e-100)),C=tostring(decimal(9e28))",
+        columns: &["A", "B", "C"],
+        rows: &[&["0", "0", "90000000000000000000000000000"]],
+    },
+    Fixture {
+        name: "decimal-real-arithmetic-promotion",
+        query: "print A=gettype(decimal(1.5)+real(0.25)),B=tostring(decimal(1.5)+real(0.25)),C=tostring(decimal(0.1)+real(0.2)),D=tostring(todecimal(real(0.1))),G=gettype(decimal(1)/real(3))",
+        columns: &["A", "B", "C", "D", "G"],
+        rows: &[&["decimal", "1.75", "0.3", "0.1", "decimal"]],
+    },
+    Fixture {
+        name: "decimal-math-coercion-and-rounding",
+        query: "print A=tostring(round(decimal(2.5))),B=tostring(round(decimal(-2.5))),C=tostring(round(decimal(1.25),1)),D=gettype(round(decimal(1.25),1)),E=gettype(abs(decimal(-1.25))),F=gettype(sign(decimal(-1.25))),G=tostring(round(decimal(9007199254740993.25),0))",
+        columns: &["A", "B", "C", "D", "E", "F", "G"],
+        rows: &[&[
+            "3.0",
+            "-3.0",
+            "1.3",
+            "real",
+            "decimal",
+            "real",
+            "9007199254740992.0",
+        ]],
+    },
+    Fixture {
+        name: "decimal-runtime-exponent-boundaries",
+        query: "datatable(s:string)['1e6144','9.999999999999999999999999999999999e6144','1e6145','1e-6176','1e-6177'] | project s,value=tostring(todecimal(s)),Missing=tostring(isnull(todecimal(s)))",
+        columns: &["s", "value", "Missing"],
+        rows: &[
+            &["1e6144", "1E+6144", "False"],
+            &[
+                "9.999999999999999999999999999999999e6144",
+                "9.999999999999999999999999999999999E+6144",
+                "False",
+            ],
+            &["1e6145", "Infinity", "False"],
+            &["1e-6176", "1E-6176", "False"],
+            &["1e-6177", "0", "False"],
+        ],
+    },
+    Fixture {
+        name: "decimal-vector-special-value-conversion",
+        query: "datatable(s:string)['NaN','nan','Infinity','-Infinity','inf','invalid'] | extend d=todecimal(s) | project s,value=tostring(d),Missing=tostring(isnull(d)),SelfEqual=tostring(d==d),Zero=tostring(d*decimal(0))",
+        columns: &["s", "value", "Missing", "SelfEqual", "Zero"],
+        rows: &[
+            &["NaN", "", "True", "", ""],
+            &["nan", "", "True", "", ""],
+            &["Infinity", "Infinity", "False", "True", "NaN"],
+            &["-Infinity", "-Infinity", "False", "True", "NaN"],
+            &["inf", "Infinity", "False", "True", "NaN"],
+            &["invalid", "", "True", "", ""],
+        ],
+    },
+    Fixture {
+        name: "decimal-vector-nan-comparisons",
+        query: "datatable(s:string)['Infinity','-Infinity'] | extend d=todecimal(s) | extend N=d*decimal(0) | project s,Text=tostring(N),Missing=tostring(isnull(N)),Eq=tostring(N==N),Ne=tostring(N!=N),Lt=tostring(N<decimal(0)),Gt=tostring(N>decimal(0)),ZeroDivision=tostring(decimal(0)/decimal(0))",
+        columns: &[
+            "s",
+            "Text",
+            "Missing",
+            "Eq",
+            "Ne",
+            "Lt",
+            "Gt",
+            "ZeroDivision",
+        ],
+        rows: &[
+            &[
+                "Infinity", "NaN", "False", "False", "True", "False", "False", "",
+            ],
+            &[
+                "-Infinity",
+                "NaN",
+                "False",
+                "False",
+                "True",
+                "False",
+                "False",
+                "",
+            ],
+        ],
+    },
+    Fixture {
+        name: "decimal-signed-zero-and-membership",
+        query: "datatable(s:string)['-0','0','Infinity','-Infinity'] | extend d=todecimal(s) | project s,Text=tostring(d),Eq=tostring(d==decimal(0)),Membership=tostring(d in(decimal(0))),Bool=tostring(tobool(d))",
+        columns: &["s", "Text", "Eq", "Membership", "Bool"],
+        rows: &[
+            &["-0", "-0", "True", "True", "False"],
+            &["0", "0", "True", "True", "False"],
+            &["Infinity", "Infinity", "False", "False", ""],
+            &["-Infinity", "-Infinity", "False", "False", ""],
+        ],
+    },
+    Fixture {
+        name: "decimal-nan-aggregate-propagation",
+        query: "datatable(s:string)['Infinity','1','0','-1'] | extend d=todecimal(s) | extend N=d*decimal(0) | summarize S=sum(N),A=avg(N),Lo=min(N),Hi=max(N),C=count_distinct(N) | project S=tostring(S),A=tostring(A),Lo=tostring(Lo),Hi=tostring(Hi),C=tostring(C)",
+        columns: &["S", "A", "Lo", "Hi", "C"],
+        rows: &[&["NaN", "NaN", "NaN", "NaN", "3"]],
+    },
+    Fixture {
+        name: "decimal-scalar-subquery-conversion",
+        query: r#"let T=datatable(s:string,j:string)['1e100','{"amount":9007199254740993.123456789}']; print Constant=tostring(todecimal('1e100')),Runtime=tostring(todecimal(toscalar(T | project s))),Json=tostring(extract_json('$.amount',toscalar(T | project j),typeof(decimal))),RealValue=tostring(toreal(decimal(9007199254740993.25)))"#,
+        columns: &["Constant", "Runtime", "Json", "RealValue"],
+        rows: &[&["", "", "9007199254740992", "9007199254740994.0"]],
+    },
+    Fixture {
+        name: "decimal-wide-frontend-literals",
+        query: "print A=tostring(decimal(99999999999999999999999999999999999999)),B=tostring(decimal(1.123456789012345678901234567890123456789))",
+        columns: &["A", "B"],
+        rows: &[&["1E+38", "1.123456789012345678901234567890123"]],
+    },
+    Fixture {
+        name: "decimal-scalar-scientific-resolution",
+        query: "print A=tostring(decimal(6e-29)),B=tostring(decimal(9.9e-29)),C=tostring(decimal(1.234567890123456789012345678901234e-28)),D=tostring(decimal(1.123456789012345678901234567890123e0))",
+        columns: &["A", "B", "C", "D"],
+        rows: &[&[
+            "6E-29",
+            "9.9E-29",
+            "1.23456789E-28",
+            "1.123456789012345678901234567890123",
+        ]],
+    },
+    Fixture {
+        name: "decimal-scalar-scientific-truncation",
+        query: "print A=tostring(decimal(6e-38)),B=tostring(decimal(9.9e-38)),C=tostring(decimal(5e-38)),D=tostring(decimal(1.5e-37))",
+        columns: &["A", "B", "C", "D"],
+        rows: &[&["0", "0", "0", "1E-37"]],
+    },
+    Fixture {
+        name: "decimal-scientific-mantissa-normalization",
+        query: "print A=tostring(decimal(100000000000000e-30)),B=tostring(decimal(1.123456789012345678901234567890123e0)),C=tostring(todecimal('100000000000000e-30')),D=tostring(todecimal('1e29')),E=tostring(decimal(1000000000e28))",
+        columns: &["A", "B", "C", "D", "E"],
+        rows: &[&[
+            "1E-16",
+            "1.123456789012345678901234567890123",
+            "1E-16",
+            "100000000000000000000000000000",
+            "1E+37",
+        ]],
     },
 ];
 
@@ -406,16 +915,44 @@ async fn local(ctx: &SessionContext, fixture: &Fixture) -> TestResult<(Vec<Strin
     Ok((names, rows))
 }
 
+async fn captured(ctx: &SessionContext, fixture: &Fixture) -> TestResult<()> {
+    assert!(
+        !fixture.columns.is_empty() && !fixture.rows.is_empty(),
+        "empty reference fixture"
+    );
+    let (columns, actual) = local(ctx, fixture).await?;
+    assert_eq!(
+        columns.iter().map(String::as_str).collect::<Vec<_>>(),
+        fixture.columns,
+        "reference schema for '{}'",
+        fixture.name
+    );
+    let mut expected = fixture
+        .rows
+        .iter()
+        .map(|row| {
+            assert_eq!(row.len(), fixture.columns.len());
+            row.iter()
+                .map(|value| Some((*value).to_owned()))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Rows>();
+    expected.sort_unstable();
+    assert_eq!(
+        actual, expected,
+        "captured reference mismatch for '{}'",
+        fixture.name
+    );
+    Ok(())
+}
+
 #[tokio::test]
-async fn conformance_fixtures_are_valid_locally_and_have_string_outputs() -> TestResult<()> {
+async fn captured_reference_fixtures_match_locally() -> TestResult<()> {
+    let mut names = std::collections::HashSet::new();
     let ctx = SessionContext::new();
     for fixture in FIXTURES {
-        let (columns, rows) = local(&ctx, fixture).await?;
-        assert!(
-            !columns.is_empty() && !rows.is_empty(),
-            "empty conformance fixture '{}'",
-            fixture.name
-        );
+        assert!(names.insert(fixture.name), "duplicate reference fixture");
+        captured(&ctx, fixture).await?;
     }
     Ok(())
 }

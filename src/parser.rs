@@ -1580,6 +1580,55 @@ impl<'a> Parser<'a, '_> {
                 Some(Kind::Ident(word)) => Some(*word),
                 _ => None,
             };
+            if minimum <= 3 && matches!(keyword, Some("has_any" | "has_all")) {
+                if negated {
+                    self.advance();
+                }
+                let all = self.eat_keyword("has_all");
+                if !all {
+                    self.expect_keyword("has_any")?;
+                }
+                self.expect(Kind::LParen)?;
+                let mut values = Vec::new();
+                let tabular = if self.looks_tabular() {
+                    Some(Box::new(self.query()?))
+                } else {
+                    loop {
+                        values.push(self.expr(0)?);
+                        if !self.eat(Kind::Comma) {
+                            break;
+                        }
+                    }
+                    None
+                };
+                self.expect(Kind::RParen)?;
+                let span = Span::new(left.span.start, self.tokens[self.pos - 1].span.end);
+                let depth = left
+                    .depth
+                    .max(values.iter().map(|v| v.depth).max().unwrap_or(0))
+                    + 1;
+                left = self.node(
+                    ExprKind::TermSet {
+                        expr: Box::new(left),
+                        values,
+                        tabular,
+                        all,
+                    },
+                    span,
+                    depth,
+                )?;
+                if negated {
+                    left = self.node(
+                        ExprKind::Unary {
+                            op: UnaryOp::Not,
+                            expr: Box::new(left),
+                        },
+                        span,
+                        depth + 1,
+                    )?;
+                }
+                continue;
+            }
             if minimum <= 3 && matches!(keyword, Some("in" | "between")) {
                 if negated {
                     self.advance();
@@ -1939,6 +1988,14 @@ impl<'a> Parser<'a, '_> {
             ("has", false) => B::Has,
             ("has", true) => B::NotHas,
             ("has_cs", false) => B::HasCs,
+            ("hasprefix", false) => B::HasPrefix,
+            ("hasprefix", true) => B::NotHasPrefix,
+            ("hasprefix_cs", false) => B::HasPrefixCs,
+            ("hasprefix_cs", true) => B::NotHasPrefixCs,
+            ("hassuffix", false) => B::HasSuffix,
+            ("hassuffix", true) => B::NotHasSuffix,
+            ("hassuffix_cs", false) => B::HasSuffixCs,
+            ("hassuffix_cs", true) => B::NotHasSuffixCs,
             ("has_cs", true) => B::NotHasCs,
             ("startswith", false) => B::StartsWith,
             ("startswith", true) => B::NotStartsWith,

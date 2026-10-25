@@ -49,6 +49,15 @@ pub(crate) fn value_plan(
     values: Vec<ScalarValue>,
     span: ast::Span,
 ) -> Result<LogicalPlan> {
+    if values
+        .iter()
+        .any(|value| crate::decimal::is_decimal(&value.data_type()))
+    {
+        return Err(Error::unsupported(
+            "decimal tabular ranges require exact decimal generation; cast explicitly to real if approximate range steps are intended",
+            span,
+        ));
+    }
     let mut projection = None;
     let arguments = if matches!(values[0].data_type(), DataType::Timestamp(_, _)) {
         if !matches!(values[1].data_type(), DataType::Timestamp(_, _))

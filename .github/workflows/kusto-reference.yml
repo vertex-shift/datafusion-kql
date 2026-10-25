@@ -1,0 +1,95 @@
+name: Kusto reference conformance
+
+on:
+  workflow_dispatch:
+    inputs:
+      accept_emulator_license:
+        description: "Accept https://aka.ms/adx.emulator.license for this development-only run"
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  reference:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      KUSTO_CLUSTER_URI: http://127.0.0.1:18080
+      KUSTO_DATABASE: KqlConformance
+    steps:
+      - name: Require explicit emulator license acceptance
+        env:
+          ACCEPT_EMULATOR_LICENSE: ${{ inputs.accept_emulator_license }}
+        run: |
+          if [ "$ACCEPT_EMULATOR_LICENSE" != true ]; then
+            echo "::error::Explicit acceptance of https://aka.ms/adx.emulator.license is required."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: kusto-reference
+      - name: Start pinned x64 reference engine
+        id: start
+        run: |
+          id=$(docker run --detach --platform linux/amd64 \
+            --name "kql-reference-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --memory 4g --cpus 2 --security-opt no-new-privileges \
+            --publish 127.0.0.1:18080:8080 \
+            --env ACCEPT_EULA=Y \
+            mcr.microsoft.com/azuredataexplorer/kustainer-linux@sha256:230588624dbd95b8575f2493c0a7599d42d099b01b5875c239704f7cdfc65192)
+          echo "container_id=$id" >> "$GITHUB_OUTPUT"
+      - name: Verify reference readiness and create an isolated database
+        env:
+          CONTAINER_ID: ${{ steps.start.outputs.container_id }}
+        run: |
+          ready=false
+          deadline=$((SECONDS + 180))
+          while (( SECONDS < deadline )); do
+            if [ "$(docker inspect --format '{{.State.Running}}' "$CONTAINER_ID")" != true ]; then
+              echo "::error::The reference engine exited during startup."
+              exit 1
+            fi
+            if curl --disable --silent --show-error --fail-with-body \
+              --connect-timeout 2 --max-time 5 --noproxy '*' \
+              --header 'Content-Type: application/json; charset=utf-8' \
+              --data-binary '{"csl":".show cluster"}' \
+              "$KUSTO_CLUSTER_URI/v1/rest/mgmt" \
+              > "$RUNNER_TEMP/kusto-readiness.json" 2> "$RUNNER_TEMP/kusto-readiness.err" \
+              && jq --exit-status 'has("Tables") and (has("error") | not)' \
+                "$RUNNER_TEMP/kusto-readiness.json" > /dev/null; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then
+            echo "::error::The reference engine did not become ready within 180 seconds."
+            cat "$RUNNER_TEMP/kusto-readiness.err"
+            cat "$RUNNER_TEMP/kusto-readiness.json"
+            exit 1
+          fi
+          curl --disable --silent --show-error --fail-with-body \
+            --connect-timeout 5 --max-time 30 --noproxy '*' \
+            --header 'Content-Type: application/json; charset=utf-8' \
+            --data-binary '{"csl":".create database KqlConformance persist (@\"/kustodata/dbs/KqlConformance/md\", @\"/kustodata/dbs/KqlConformance/data\")"}' \
+            "$KUSTO_CLUSTER_URI/v1/rest/mgmt" > "$RUNNER_TEMP/kusto-database.json"
+          jq --exit-status 'has("Tables") and (has("error") | not)' \
+            "$RUNNER_TEMP/kusto-database.json" > /dev/null
+      - name: Compare native KQL results with the reference engine
+        run: cargo test --locked --no-default-features --test conformance -j 2 live_kusto_conformance -- --ignored --nocapture
+      - name: Capture engine logs and remove the isolated container
+        if: ${{ always() && steps.start.outputs.container_id != '' }}
+        env:
+          CONTAINER_ID: ${{ steps.start.outputs.container_id }}
+        run: |
+          trap 'docker rm --force "$CONTAINER_ID"' EXIT
+          docker logs "$CONTAINER_ID"

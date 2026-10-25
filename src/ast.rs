@@ -147,6 +147,7 @@ pub enum ScalarType {
     Datetime,
     Timespan,
     Guid,
+    Decimal,
     Dynamic,
 }
 
@@ -161,6 +162,7 @@ impl ScalarType {
             "datetime" | "date" => Self::Datetime,
             "timespan" | "time" => Self::Timespan,
             "guid" | "uuid" | "uniqueid" => Self::Guid,
+            "decimal" => Self::Decimal,
             "dynamic" => Self::Dynamic,
             _ => return None,
         })
@@ -457,6 +459,12 @@ pub enum ExprKind {
         negated: bool,
         case_insensitive: bool,
     },
+    TermSet {
+        expr: Box<Expr>,
+        values: Vec<Expr>,
+        tabular: Option<Box<Query>>,
+        all: bool,
+    },
     InTabular {
         expr: Box<Expr>,
         query: Box<Query>,
@@ -497,7 +505,7 @@ pub enum UnaryOp {
     Plus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryOp {
     Or,
     And,
@@ -522,6 +530,14 @@ pub enum BinaryOp {
     NotHas,
     HasCs,
     NotHasCs,
+    HasPrefix,
+    NotHasPrefix,
+    HasPrefixCs,
+    NotHasPrefixCs,
+    HasSuffix,
+    NotHasSuffix,
+    HasSuffixCs,
+    NotHasSuffixCs,
     StartsWith,
     NotStartsWith,
     StartsWithCs,
@@ -558,7 +574,7 @@ impl Expr {
                 ArgumentValue::Scalar(expr) => expr.any(predicate),
                 ArgumentValue::Tabular(_) => false,
             },
-            ExprKind::InList { expr, values, .. } => {
+            ExprKind::InList { expr, values, .. } | ExprKind::TermSet { expr, values, .. } => {
                 expr.any(predicate) || values.iter().any(|expr| expr.any(predicate))
             }
             ExprKind::Between {
@@ -626,6 +642,17 @@ impl Expr {
                 values: values.iter().map(&mut map).collect::<crate::Result<_>>()?,
                 negated: *negated,
                 case_insensitive: *case_insensitive,
+            },
+            ExprKind::TermSet {
+                expr,
+                values,
+                tabular,
+                all,
+            } => ExprKind::TermSet {
+                expr: Box::new(map(expr)?),
+                values: values.iter().map(&mut map).collect::<crate::Result<_>>()?,
+                tabular: tabular.clone(),
+                all: *all,
             },
             ExprKind::InTabular {
                 expr,

@@ -1084,12 +1084,14 @@ dependencies = [
 
 [[package]]
 name = "datafusion-kql"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "criterion",
  "datafusion",
+ "dec",
  "futures",
  "regex",
  "serde_json",
@@ -1289,6 +1291,28 @@ dependencies = [
  "regex",
  "sqlparser",
  "stacker",
+]
+
+[[package]]
+name = "dec"
+version = "0.4.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09ae126ef80702bd514a66279b6dac1e58ff1dbcb12024f7110de95608348fd7"
+dependencies = [
+ "decnumber-sys",
+ "libc",
+ "paste",
+ "static_assertions",
+]
+
+[[package]]
+name = "decnumber-sys"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23b4bc33814bd5bcd46dd13f9471a29ab1a22c4701ae0c4a182e45e8336d1a5b"
+dependencies = [
+ "cc",
+ "libc",
 ]
 
 [[package]]
@@ -2026,6 +2050,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2466,6 +2496,12 @@ dependencies = [
  "psm",
  "windows-sys",
 ]
+
+[[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "syn"

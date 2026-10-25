@@ -15,6 +15,7 @@ pub(crate) fn data_type(ty: ScalarType) -> DataType {
         ScalarType::Datetime => DataType::Timestamp(TimeUnit::Nanosecond, None),
         ScalarType::Timespan => DataType::Duration(TimeUnit::Nanosecond),
         ScalarType::Guid => crate::guid::data_type(),
+        ScalarType::Decimal => crate::decimal::data_type(),
         ScalarType::Dynamic => crate::dynamic::data_type(),
     }
 }
@@ -44,6 +45,12 @@ pub(crate) fn literal_value(literal: &Literal, span: Span) -> Result<ScalarValue
                             .filter(|(_, end)| *end == value.len())
                             .ok_or_else(|| Error::syntax("invalid guid literal", span))?;
                         ScalarValue::FixedSizeBinary(16, Some(bytes.to_vec()))
+                    }
+                    ScalarType::Decimal => {
+                        let value = crate::decimal::literal(value).ok_or_else(|| {
+                            Error::syntax("invalid or out-of-range decimal literal", span)
+                        })?;
+                        crate::decimal::scalar(Some(value))?
                     }
                     _ => ScalarValue::try_from_string(value.to_owned(), &data_type(*ty))?,
                 }

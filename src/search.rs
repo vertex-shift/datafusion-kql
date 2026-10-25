@@ -16,6 +16,10 @@ fn field(plan: &LogicalPlan, index: usize) -> Expr {
 }
 
 fn columns(expr: &ast::Expr, names: &mut HashSet<String>) {
+    if let ExprKind::TermSet { expr, .. } = &expr.kind {
+        columns(expr, names);
+        return;
+    }
     if let ExprKind::Identifier(parts) = &expr.kind {
         names.insert(parts[0].clone());
     }
@@ -378,6 +382,10 @@ fn fill(
         *op = match *op {
             BinaryOp::Has => BinaryOp::HasCs,
             BinaryOp::NotHas => BinaryOp::NotHasCs,
+            BinaryOp::HasPrefix => BinaryOp::HasPrefixCs,
+            BinaryOp::NotHasPrefix => BinaryOp::NotHasPrefixCs,
+            BinaryOp::HasSuffix => BinaryOp::HasSuffixCs,
+            BinaryOp::NotHasSuffix => BinaryOp::NotHasSuffixCs,
             BinaryOp::Contains => BinaryOp::ContainsCs,
             BinaryOp::NotContains => BinaryOp::NotContainsCs,
             BinaryOp::StartsWith => BinaryOp::StartsWithCs,

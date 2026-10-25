@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.5 implements the typed tabular and dynamic subset below. Keywords, function
+0.6 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -15,7 +15,7 @@ syntax/functions return an error; there is no SQL fallback.
 | `let` | Scalar expressions, tabular plans, aliases, nested lexical scopes |
 | Parenthesized queries | Nested pipelines and scoped `let` statements |
 | `print` | One row of scalar expressions |
-| `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan`, `guid`/`uuid`/`uniqueid`, `dynamic` columns |
+| `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan`, `guid`/`uuid`/`uniqueid`, `decimal`, `dynamic` columns |
 | `range` | Inclusive lazy native `generate_series`; integer, real, datetime, and timespan sequences, including descending ranges |
 | `union` | Source form and pipe form |
 | `materialize(...)` | Lazy shared Arrow snapshot, usable directly or in a tabular binding |
@@ -204,6 +204,8 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
   `datetime(...)`, and `timespan(...)`.
 - GUID literals (`guid(...)`, `uuid(...)`, `uniqueid(...)`) and typed nulls;
   nullable `toguid`, volatile `new_guid`, and canonical `tostring` formatting.
+- Exact `decimal(...)` literals/conversion and nonfinite real literals
+  `real(nan)`, `real(inf)`, and `real(-inf)`.
 - Timespans: `d`, `h`, `m`, `s`, `ms`, `us`, `ns`, `tick`/`ticks`,
   `microsecond(s)`, decimal quantities, and `[d.]hh:mm:ss[.fraction]`.
   Bare numbers inside `timespan(...)` represent days. Conversion uses integer
@@ -219,6 +221,13 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
   constant single alphanumeric right-hand term. Multi-term/punctuated needles
   are rejected. `matches regex` uses DataFusion's Rust-regex
   dialect, not every .NET regex construct supported by Kusto.
+- `hasprefix`, `hassuffix`, their `_cs` variants, and negations match literal
+  term prefixes/suffixes with Unicode alphanumeric boundaries. `has_any` and
+  `has_all` accept constant scalar/dynamic term lists and lazy tabular term
+  sources; table sources use the first column. Compiled matcher caches retain
+  at most one runtime term set. Distinct-term budgets are 10,000 and 256
+  respectively, with a 1 MiB total term-text budget; excess input errors rather
+  than silently truncating. These are batch scans, not an inverted index.
 - `now([offset])`, `ago(offset)`: one consistent instant per planning call,
   folded into timestamp literals for predicate pushdown.
 - `bin(value,size)` / two-argument `floor`: numeric, timespan, and timestamp
@@ -231,6 +240,8 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
   internal helper columns are not packed, and unused fallbacks are not resolved.
 - `tostring`, `tolong`, `toint`, `toreal`/`todouble`, `tobool`, `todatetime`,
   scalar type constructors; failed conversions use Arrow `TRY_CAST` semantics.
+  Native boolean string conversion uses `True`/`False`; dynamic JSON boolean
+  string conversion uses `true`/`false`. Null string conversion yields `""`.
 - `strcat`, `strlen`, `tolower`, `toupper`, `substring` (zero-based),
   `replace_string`, `extract`, `extract_all`/`extractall`, `extract_json`/`extractjson`,
   `totimespan`/`totime`, and `todate`.
@@ -244,9 +255,21 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
 `dynamic(...)` supports nested arrays and property bags with single- or
 double-quoted strings, scalar literals, and nulls. Dynamic values are real
 Arrow **dense unions**, distinguishing null, bool, long, real, string, array,
-bag, datetime, timespan, and guid. Arrays and bags use JSON-marked UTF-8 child buffers;
-they are not confused with ordinary string columns or normalized to empty
-strings. Nested non-JSON scalar types serialize as strings inside collections.
+bag, datetime, timespan, guid, and decimal. Ordinary arrays/bags keep JSON-marked
+UTF-8 child buffers. Collections containing richer scalars use appended typed
+array/bag tags and a versioned, bounded internal encoding; old tag numbers and
+older dense-union input schemas remain readable. They are not confused with
+ordinary strings or with user JSON objects that resemble internal encodings.
+
+Nested datetimes, timespans, GUIDs, decimals, real tags, and nonfinite reals
+retain their types through property/index access, packing, collection updates,
+set operations, expansion, materialization, aggregation/merge states, and
+serialized row offsets. External JSON formatting still serializes non-JSON
+scalar types as strings; explicitly reparsing that JSON does not recover the
+lost type information. Internal typed encodings are never recognized from
+ordinary user JSON. Typed collections enforce depth 128, per-collection element
+limits, and a total-node budget; malformed references and reused child nodes
+fail explicitly.
 
 `parse_json`/`todynamic`, dotted properties, arbitrary string-key subscripts,
 zero-based and negative array indices, `gettype`, and scalar conversion
@@ -254,6 +277,19 @@ functions are implemented. As in KQL, malformed JSON deliberately becomes a
 dynamic string holding the original text. Missing properties/indices produce
 dynamic nulls. `dynamic(...)` itself must be a constant expression; use
 `parse_json`, `pack_array`, or `bag_pack` for runtime values.
+
+`gettype` reports the declared type for native scalars, including typed nulls
+(`gettype(real(null))` is `"real"`). Dynamic values are inspected at runtime:
+floating elements report `"double"` and a dynamic null reports `"null"`.
+Native 32-bit integers report `"int"`; packed dynamic integers report `"long"`.
+Arrow dictionary encoding does not change a native column's logical type.
+
+The local constant evaluator also accepts decimal expressions inside
+`dynamic(...)`, and explicit `todynamic` conversions from native non-string
+scalars. These are **frontend extensions**, not portable Kusto syntax: the
+reference engine rejects decimal literals inside dynamic objects and rejects
+`todynamic(decimal(...))`. Use runtime `bag_pack`/`pack_array` when constructing
+portable dynamic collections containing computed decimals.
 
 Functions: `array_length`, `pack_array`, `bag_pack`/`pack`/`pack_dictionary`,
 `bag_keys`, `bag_has_key`, `bag_merge` (leftmost wins), root-key `bag_set_key`
@@ -298,8 +334,127 @@ generator without overwriting or depending on a host registry override.
 Dynamic GUID roots retain their own tag through conversion, null-padding-safe
 row offsets, and scalar expansion. The GUID tag is appended after existing tags;
 older dense-union input schemas remain readable and normalize during union.
-As with datetime/timespan, GUIDs nested inside JSON-backed arrays/bags currently
-serialize as strings, not fully rich nested Kusto scalar values.
+GUIDs nested inside typed arrays/bags retain GUID tags; only explicit external
+JSON serialization represents them as strings.
+
+## IP address functions
+
+`parse_ipv4`, `parse_ipv4_mask`, `format_ipv4`, `format_ipv4_mask`, and
+`ipv4_netmask_suffix` support dotted-quad/CIDR inputs and explicit prefix masks.
+Numeric formatting accepts unsigned 32-bit values in a KQL long. Comparisons
+(`ipv4_compare`/`ipv4_is_match`, `ipv6_compare`/`ipv6_is_match`) combine the least
+specific supplied prefixes. `parse_ipv6` produces eight zero-padded lowercase
+hexadecimal groups and maps ordinary IPv4 inputs to IPv4-mapped IPv6 addresses.
+IPv6 text uses IPv6 prefix lengths; bare IPv4 text uses IPv4 prefix lengths.
+
+`ipv4_is_in_range`, `ipv4_is_in_any_range`, and their IPv6 counterparts accept
+host/CIDR strings and range arrays. Overlapping intervals are merged once per
+range set, with binary-search membership and a bounded one-entry cache for
+row-varying sets. Range JSON is bounded to 1 MiB. Invalid addresses, masks, or
+range entries yield nullable numeric/bool results; string formatters yield
+empty strings. Invalid ranges are not silently discarded just because another
+range matched. `ipv4_is_private` checks RFC-1918 ranges, not all reserved,
+loopback, or link-local addresses.
+
+## Decimal values
+
+`decimal(...)` supports exact base-ten literals, scientific notation, `min`,
+`max`, and typed nulls; `todecimal` performs nullable runtime conversion. Values
+use decimal128 arithmetic with **34 significant digits**, not an intermediate
+binary64 value or the previous 96-bit/scale-28 profile.
+Kusto's [decimal documentation](https://learn.microsoft.com/en-us/kusto/query/scalar-data-types/decimal)
+describes a 128-bit number; the runtime precision/range and conversion details
+here are backed by captured public-help queries, not inferred from the public
+C# frontend's `System.Decimal` constant type.
+
+Runtime string columns support values through
+`9.999999999999999999999999999999999E+6144` and subnormals down to `1E-6176`.
+Overflow can produce decimal infinity; still smaller magnitudes underflow to
+signed zero. `decimal(max)` and `decimal(min)` are the reference sentinels
+`1E+38` and `-1E+38`, **not** the largest finite arithmetic values. Division or
+modulo by zero yields typed null. Runtime invalid operations such as infinity
+times zero can produce decimal NaN; scalar evaluation instead yields null.
+NaN string conversion is invalid, while runtime `"Infinity"`/`"-Infinity"`
+strings are accepted. Comparisons follow numeric NaN/zero semantics; exact
+distinct counting preserves the reference's signed-zero distinction.
+
+DataFusion has no native floating-decimal Arrow type. The extension uses an
+opaque two-field Arrow struct: a canonical ordered 16-byte key and a 16-byte
+decimal128 payload. Native DataFusion grouping, sorting, joins, and hash states
+operate on that representation; arithmetic/comparison batch expressions and
+constant-size sum/avg/min/max accumulator states remain native extension points.
+NaNs follow requested null placement in sort/top keys and propagate through
+decimal numeric aggregates. Empty sum is zero; empty average/min/max is null.
+Use `tostring` for numeric display rather than Arrow's generic struct formatter.
+
+**0.7 representation change:** callers must treat the struct fields as opaque.
+Standard Arrow `Decimal128`/`Decimal256` inputs and typed request values are
+converted into the new representation. Persisted 0.6 dense unions remain
+readable: tag 10 retains its `Decimal256(57,28)` field, and the new runtime
+decimal field is appended at tag 13. Existing tag numbers and typed-collection
+wire versions are not repurposed.
+
+Typed datatables/parameters/functions, nullable parsing/extraction, numeric
+arithmetic, exact binning/floor/ceiling, native decimal inputs, unions, root
+dynamic tags, and serialized offsets are supported. Decimal dominates real
+in arithmetic and numeric comparisons. Conditional/coalesce decimal branches
+must have matching types; implicit widening of those branches is not silently
+invented. `abs`, binning, floor, and ceiling retain decimals; real-valued math
+functions use the reference's numeric conversion path.
+
+Scalar and vector conversion are intentionally distinct. Scalar scientific
+constants are bounded below `1E+38` and truncate fractional resolution beyond
+`1E-37`; vector string conversion retains the full exponent range.
+`extract_json(..., typeof(decimal))` preserves quoted decimal strings and exact
+long tokens. Fractional scalar tokens use a 17-digit binary64 accumulator,
+while vector tokens use 19 decimal significant digits. Thus the captured
+`9007199254740993.123456789` example yields `9007199254740992` in scalar
+evaluation and `9007199254740993.123` from a string column. Scalar subqueries
+retain scalar semantics even when their physical values arrive as Arrow arrays.
+These previously ignored disagreements are now regular conformance fixtures.
+Decimal table ranges currently error rather than silently casting their bounds
+and steps to real.
+
+## URL, encoding, and trimming helpers
+
+`parse_url`/`parseurl` and `parse_urlquery`/`parseurlquery` return dynamic bags
+with documented component names, including `"Query Parameters"`. Parsing never
+fetches a URL. Its raw component semantics follow captured Kusto results, not
+a browser URL normalizer. Scheme/host case, leading path slashes, dot segments, percent
+escapes, and explicit ports are preserved; default ports are not inserted.
+Inputs without `://` return a component bag with empty values. The reference
+parser splits host/port at the last colon even for bracketed IPv6, so this is
+not an IPv6 validator or a network-connection URI parser.
+
+Query keys/values are not URL-decoded: `+` and percent escapes remain literal,
+and an initial `?` is part of the first key. Missing/empty keys or values are
+omitted. Repeated keys produce ordered arrays rather than discarding earlier
+values. Use `url_decode` explicitly when decoded parameter text is required.
+
+`url_encode` and `url_encode_component` use lowercase percent escapes; spaces
+become `+` and `%20` respectively. Their captured safe punctuation is
+`.!'()*~`; notably `-` and `_` are escaped. `url_decode` accepts either case of
+escapes, decodes `+` as space, and retains malformed escape sequences literally.
+If the decoded bytes are not valid UTF-8, it returns the original input.
+URL parsing itself does not decode userinfo.
+Text conversions have a 16 MiB per-value input/encoding-output budget.
+
+`base64_encode_tostring`/`base64_encodestring`,
+`base64_decode_tostring`/`base64_decodestring`, and `base64_decode_toarray`
+operate on UTF-8 strings or byte arrays as documented. Decoding requires
+standard padded base64 without whitespace, accepting nonzero unused trailing
+bits as the reference does. Invalid string input or invalid
+decoded UTF-8 returns the KQL string default `""` (therefore `isnull` is false);
+invalid byte-array input returns dynamic null. Use `isempty` for string-result
+failure checks, noting that a valid empty input also yields an empty string.
+Byte arrays also obey the dynamic collection limit.
+
+`trim`, `trim_start`, and `trim_end` take a constant regex followed by the source,
+not SQL-style character sets. Compiled native regex replacements remove one
+anchored match at each requested edge. Repetition belongs to the regex itself:
+`trim("--","----text----")` produces `"--text--"`, while a quantified pattern can
+remove whole runs. Regex syntax follows the same Rust-regex boundary as the
+other extraction functions.
 
 ## Grouped tabular subqueries
 
@@ -513,9 +668,11 @@ Arrays are limited to 1,048,576 points. Integer axes retain precision beyond
 
 Explicit starting bounds avoid the extra per-group minimum window needed for
 automatic origins. Filter inputs early and configure host memory budgets.
-Datetime/timespan array elements use lossless JSON strings, consistent with the
-collection representation; cast accessed elements back with `todatetime` or
-`totimespan`.
+Datetime/timespan axis elements retain typed scalar values. `todatetime` and
+`totimespan` remain valid for explicit conversion, but `gettype` now reports the
+actual type rather than `string`. JSON rendering uses the same canonical
+RFC-3339 datetime formatter as other typed dynamic values, so zero fractions
+are no longer padded solely for make-series axes.
 
 Series processors include element-wise arithmetic and numeric comparisons;
 absolute value, trigonometric/exponential/logarithmic functions, square root,
@@ -547,8 +704,9 @@ Other input overloads follow DataFusion's supported Arrow types.
 `count()` counts rows, including rows with nulls; `count(column)` also counts all
 rows. Native filters implement conditional aggregates. Counts are signed
 `long`. Sum, sample variance, and sample standard deviation default to zero for
-empty/all-null inputs. Other numeric aggregates use DataFusion defaults; notably
-empty `avg` is null (some Kusto workloads expose NaN here). Group-less summarize
+empty/all-null inputs. Numeric `avg`/`avgif` return NaN for empty/all-null inputs, matching the published
+Kusto summarize example rather than SQL's null. Decimal/timespan averages
+retain typed null because their types cannot represent NaN. Group-less summarize
 returns a row on empty input; grouped summarize returns none.
 
 Standard aggregate names such as `count_`, `sum_Value`, and grouping
@@ -612,8 +770,7 @@ representations and continue to ignore nulls.
   Operators/functions not listed in this contract are not covered merely
   because they exist in Kusto. Additional areas include other `evaluate`
   plugins, implicit plugin schema discovery, graph operators,
-  external-data syntax, richer decimal literals, fully rich nested dynamic
-  scalar values, and full scalar-function
+  external-data syntax, full datetime/timespan ranges, and full scalar-function
   conformance. See [the delivery plan](architecture.md).
 - Default parsing limits: 1 MiB of query text, nesting/expression depth 64,
   and 128 operators per pipeline. `parse_with_options` permits changing these
@@ -624,11 +781,25 @@ representations and continue to ignore nulls.
 
 ## Opt-in Kusto reference checks
 
-The conformance suite in `tests/conformance.rs` runs synthetic inline-data
-fixtures locally by default. It covers counts/nulls, expansion, per-row/per-key
+The conformance suite in `tests/conformance.rs` runs 49 synthetic inline-data
+fixtures locally by default, comparing exact column names and row multisets
+against results captured from the public Kusto help cluster (`Samples`) through
+Azure MCP on 2026-10-25. It covers counts/nulls, expansion, per-row/per-key
 queries, scans, hierarchical tops, schema-declared plugins, scalar subqueries,
-ranges, GUIDs, parsing, and series shape. Local fixture checks are **not**
-evidence that those fixtures have passed against a Kusto engine.
+ranges, GUIDs, parsing, decimal128 arithmetic/conversion/special values, rich nested tags,
+term/IP/encoding helpers, documented NaN defaults, and series shape. The
+captured baseline exposed and corrected boolean text casing, raw URL/query
+semantics, regex edge matching, base64/percent-decoding differences, and native
+versus dynamic type names/null reporting.
+Engine build metadata was not available through the query router.
+
+This is a finite historical reference baseline, **not full Kusto certification**
+or a new remote execution on every CI run. The two formerly ignored decimal
+precision/JSON regressions are now included in ordinary comparisons. Quoted
+and numeric JSON, scalar and vector evaluation, exponent boundaries, NaNs,
+infinities, signed zero, and arithmetic promotion have explicit fixtures.
+The rich-value fixture uses runtime packing rather than decimal syntax inside
+`dynamic(...)`. Fixture aliases and scan-step names avoid reserved keywords.
 
 To compare the same fixtures against an explicitly configured reference:
 
@@ -659,3 +830,12 @@ HTTP fixture and verifies serialized request properties, read-only headers, and
 the client parser. It does not emulate KQL or certify reference parity. CI runs
 this transport check explicitly; the actual live Kusto test remains ignored
 until a caller configures and requests it.
+
+The manual **Kusto reference conformance** workflow provides a Linux/x64
+reference environment without needing an Azure cluster or host Docker daemon.
+It uses a pinned Microsoft emulator digest, a loopback-only port, a 4 GB/2 CPU
+container, an isolated disposable database, and unconditional container cleanup.
+It never runs on pushes or pull requests. Its `accept_emulator_license` input
+defaults to false and must be explicitly set to true by a caller who accepts
+the linked Microsoft terms. This workflow is prepared but has not been run or
+represented as passing merely because ordinary CI succeeds.

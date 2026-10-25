@@ -66,7 +66,7 @@ async fn automatic_bounds_are_computed_per_group_and_keep_nonzero_origins() {
 async fn datetime_axes_are_dynamic_arrays_and_use_anchored_time_buckets() {
     check(
         "datatable(t:datetime)[datetime(2025-01-01T00:01:00Z),datetime(2025-01-01T02:20:00Z)] | make-series N=count() on t from datetime(2025-01-01) to datetime(2025-01-01T03:00:00Z) step 1h | project N=tostring(N),t=tostring(t)",
-        &[&["[1,0,1]","[\"2025-01-01T00:00:00.0000000Z\",\"2025-01-01T01:00:00.0000000Z\",\"2025-01-01T02:00:00.0000000Z\"]"]],
+        &[&["[1,0,1]","[\"2025-01-01T00:00:00Z\",\"2025-01-01T01:00:00Z\",\"2025-01-01T02:00:00Z\"]"]],
     ).await;
 }
 

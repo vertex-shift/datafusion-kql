@@ -285,7 +285,7 @@ async fn aggregation_defaults_names_and_conditional_functions() {
     );
     assert_eq!(
         rows(&frame.collect().await.unwrap()),
-        vec![vec!["0", "0", "<null>", "0", "0", "0.0", "0.0"]]
+        vec![vec!["0", "0", "NaN", "0", "0", "0.0", "0.0"]]
     );
     check(
         "datatable(x:long)[1,2,2,long(null)] | summarize sumif(x,x>1), avgif(x,x>1), minif(x,x>1), maxif(x,x>1), count_distinct(x), count(x)",

@@ -18,6 +18,7 @@ use crate::expressions::Expressions;
 enum Post {
     Direct,
     Zero,
+    Nan,
     Signed,
     Duration(bool),
     Field(String),
@@ -164,6 +165,18 @@ pub(crate) fn plan(
                     ],
                 )?
             }
+            Post::Nan => {
+                value = collector.expressions.function(
+                    "coalesce",
+                    vec![
+                        value,
+                        cast(
+                            lit(f64::NAN),
+                            result.schema().field(index).data_type().clone(),
+                        ),
+                    ],
+                )?;
+            }
             Post::Signed => value = cast(value, DataType::Int64),
             Post::Duration(zero) => {
                 if zero {
@@ -184,6 +197,9 @@ pub(crate) fn plan(
             Post::OrderedList(limit) => {
                 value = dynamic::call(Kernel::DecodeList { limit }, vec![value]);
             }
+        }
+        if crate::decimal::is_decimal(&value.get_type(result.schema())?) {
+            value = crate::decimal::call(crate::decimal::Op::Convert, vec![value]);
         }
         bindings.insert(reference.name, value);
     }
@@ -316,7 +332,7 @@ impl Collector<'_> {
                 self.expressions
                     .state
                     .udaf("array_agg")?
-                    .call(vec![dynamic::call(Kernel::EncodeJson, vec![value.clone()])])
+                    .call(vec![dynamic::call(Kernel::EncodeWire, vec![value.clone()])])
             } else {
                 aggregate_functions::collection(kind, limit, value.clone())
             };
@@ -445,7 +461,7 @@ impl Collector<'_> {
             && dynamic::is_dynamic(&values[0].get_type(self.schema.as_ref())?)
         {
             values[0] = when(values[0].clone().is_null(), lit(ScalarValue::Utf8(None)))
-                .otherwise(dynamic::call(Kernel::EncodeJson, vec![values[0].clone()]))?;
+                .otherwise(dynamic::call(Kernel::EncodeWire, vec![values[0].clone()]))?;
         }
         if matches!(name, "take_any" | "any" | "take_anyif") {
             let mut valid = values[0].clone().is_not_null();
@@ -454,7 +470,36 @@ impl Collector<'_> {
             }
             filter = Some(filter.map_or(valid.clone(), |filter| filter.and(valid)));
         }
-        let mut root = self.expressions.state.udaf(native)?.call(values);
+        let decimal = values.len() == 1
+            && crate::decimal::is_decimal(&values[0].get_type(self.schema.as_ref())?);
+        let decimal_sum = decimal && matches!(native, "sum" | "avg" | "min" | "max");
+        if decimal
+            && matches!(
+                native,
+                "stddev_samp" | "stddev_pop" | "var_samp" | "var_pop"
+            )
+        {
+            values[0] = crate::decimal::cast(values[0].clone(), DataType::Float64);
+        }
+        if decimal && matches!(native, "approx_distinct" | "count") {
+            let key = self.expressions.function(
+                "get_field",
+                vec![
+                    crate::decimal::call(crate::decimal::Op::Convert, vec![values[0].clone()]),
+                    lit("__kql_decimal_order_v1"),
+                ],
+            )?;
+            values[0] = when(
+                values[0].clone().is_null(),
+                lit(ScalarValue::FixedSizeBinary(16, None)),
+            )
+            .otherwise(key)?;
+        }
+        let mut root = if decimal_sum {
+            crate::decimal::aggregate(native, values[0].clone())
+        } else {
+            self.expressions.state.udaf(native)?.call(values)
+        };
         if distinct || filter.is_some() {
             let mut builder = root.order_by(Vec::new());
             if distinct {
@@ -465,8 +510,12 @@ impl Collector<'_> {
             }
             root = builder.build()?;
         }
-        let post = if duration {
+        let post = if decimal_sum {
+            Post::Direct
+        } else if duration {
             Post::Duration(zero)
+        } else if native == "avg" && root.get_type(self.schema.as_ref())?.is_floating() {
+            Post::Nan
         } else if zero {
             Post::Zero
         } else if signed {
@@ -494,21 +543,25 @@ impl Collector<'_> {
         }
         let value = self.expressions.scalar(&args[0], &self.schema)?;
         let ty = value.get_type(self.schema.as_ref())?;
-        if !ty.is_numeric() {
+        if !ty.is_numeric() && !crate::decimal::is_decimal(&ty) {
             return Err(Error::syntax(
                 "percentile input must be numeric",
                 args[0].span,
             ));
         }
         let integer = ty.is_integer();
-        let value = cast(
-            value,
-            if integer {
-                DataType::Int64
-            } else {
-                DataType::Float64
-            },
-        );
+        let value = if crate::decimal::is_decimal(&ty) {
+            crate::decimal::cast(value, DataType::Float64)
+        } else {
+            cast(
+                value,
+                if integer {
+                    DataType::Int64
+                } else {
+                    DataType::Float64
+                },
+            )
+        };
         let weight = if weighted {
             cast(
                 self.expressions.scalar(&args[1], &self.schema)?,
@@ -623,7 +676,10 @@ impl Collector<'_> {
             .udaf("first_value")?
             .call(vec![value]);
         if extremum {
-            let key = self.expressions.scalar(&args[0], &self.schema)?;
+            let key = crate::ordering::sort_value(
+                self.expressions.scalar(&args[0], &self.schema)?,
+                &self.schema,
+            )?;
             root = root
                 .order_by(vec![key.sort(matches!(name, "arg_min" | "argmin"), false)])
                 .build()?;
