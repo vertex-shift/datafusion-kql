@@ -33,13 +33,15 @@ arrays with native `Unnest`, and aggregates the expanded measurements.
 
 ## Extend an existing DataFusion session
 
-While this crate is unpublished, add it as a local path dependency alongside a
-matching DataFusion version:
+The crates.io package is named **`datafusion-kql-native`**; the Rust library
+remains **`datafusion_kql`**. The registry name `datafusion-kql` belongs to a
+separate project. Until the first publication, use a local dependency alias
+alongside the matching DataFusion version:
 
 ```toml
 [dependencies]
 datafusion = "55.2"
-datafusion-kql = { path = "../datafusion-kql" }
+datafusion-kql = { package = "datafusion-kql-native", path = "../datafusion-kql" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -240,6 +242,20 @@ Building the decimal128 runtime requires a C compiler for the bundled
 `libdecnumber` dependency. Decimal output uses an opaque Arrow struct rather
 than a fixed-scale Arrow decimal; use KQL `tostring` for display and see the
 compatibility contract before migrating persisted 0.6 schemas.
+
+## Crate releases
+
+CI validates Rust 1.94/stable and builds a verified `.crate` archive with
+`cargo publish --dry-run`. Version tags trigger a release workflow that
+revalidates the exact commit, requires it to be merged into `main`, and waits
+for approval in the protected `crates-io` environment before publishing.
+Subsequent releases use short-lived crates.io OIDC credentials. The first
+publication requires a separately configured bootstrap API token; no registry
+credentials are stored in the source tree.
+
+See [the release guide](docs/releasing.md) for first-publish setup, trusted
+publisher configuration, dry runs, and version-tag releases. No crate is
+represented as published merely because the dry-run CI succeeds.
 
 ## License
 

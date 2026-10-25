@@ -1,13 +1,30 @@
 [package]
-name = "datafusion-kql"
+name = "datafusion-kql-native"
 version = "0.8.0"
 edition = "2024"
 rust-version = "1.94"
 description = "A native Kusto Query Language frontend for Apache DataFusion"
 repository = "https://github.com/vertex-shift/datafusion-kql"
+documentation = "https://docs.rs/datafusion-kql-native"
+readme = "README.md"
 license = "Apache-2.0"
+publish = ["crates-io"]
+include = [
+    "/src/**",
+    "/tests/**",
+    "/examples/**",
+    "/benches/**",
+    "/docs/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+]
 keywords = ["datafusion", "kql", "kusto", "arrow", "query"]
 categories = ["database", "parser-implementations"]
+
+[lib]
+name = "datafusion_kql"
 
 [features]
 default = ["parquet"]
