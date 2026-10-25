@@ -181,12 +181,8 @@ impl Sketch {
                     return Err(error("invalid sparse HLL payload length"));
                 }
                 let mut previous = None;
-                for bytes in payload.chunks_exact(8) {
-                    let hash = u64::from_le_bytes(
-                        bytes
-                            .try_into()
-                            .map_err(|_| error("invalid HLL hash width"))?,
-                    );
+                for bytes in payload.as_chunks::<8>().0 {
+                    let hash = u64::from_le_bytes(*bytes);
                     if previous.is_some_and(|previous| previous >= hash) {
                         return Err(error("sparse HLL hashes must be unique and ordered"));
                     }
