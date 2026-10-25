@@ -122,6 +122,12 @@ errors rather than silently execute with different semantics.
   Snapshots are scoped to planned queries, including DataFrame clones.
 - Management commands, remote Kusto connectors, visualization metadata,
   CLI/Python bindings, and language tooling.
+- Common telemetry functions now include bounded compiled term-set search,
+  term prefixes/suffixes, native IP/CIDR parsing and range membership, URL/query
+  parsing, percent/base64 encoding, and KQL regex trimming. Source fixtures cover
+  their documented examples. A finite public-help reference baseline is captured
+  in ordinary tests; wider runtime decimal semantics remain a confirmed gap.
+  Full live certification is separate from this bounded baseline.
 - Conformance fixtures against a real Kusto cluster and production workload
   benchmarks before claiming complete compatibility.
 

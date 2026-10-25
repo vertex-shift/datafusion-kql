@@ -240,6 +240,8 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
   internal helper columns are not packed, and unused fallbacks are not resolved.
 - `tostring`, `tolong`, `toint`, `toreal`/`todouble`, `tobool`, `todatetime`,
   scalar type constructors; failed conversions use Arrow `TRY_CAST` semantics.
+  Native boolean string conversion uses `True`/`False`; dynamic JSON boolean
+  string conversion uses `true`/`false`. Null string conversion yields `""`.
 - `strcat`, `strlen`, `tolower`, `toupper`, `substring` (zero-based),
   `replace_string`, `extract`, `extract_all`/`extractall`, `extract_json`/`extractjson`,
   `totimespan`/`totime`, and `todate`.
@@ -275,6 +277,13 @@ functions are implemented. As in KQL, malformed JSON deliberately becomes a
 dynamic string holding the original text. Missing properties/indices produce
 dynamic nulls. `dynamic(...)` itself must be a constant expression; use
 `parse_json`, `pack_array`, or `bag_pack` for runtime values.
+
+The local constant evaluator also accepts decimal expressions inside
+`dynamic(...)`, and explicit `todynamic` conversions from native non-string
+scalars. These are **frontend extensions**, not portable Kusto syntax: the
+reference engine rejects decimal literals inside dynamic objects and rejects
+`todynamic(decimal(...))`. Use runtime `bag_pack`/`pack_array` when constructing
+portable dynamic collections containing computed decimals.
 
 Functions: `array_length`, `pack_array`, `bag_pack`/`pack`/`pack_dictionary`,
 `bag_keys`, `bag_has_key`, `bag_merge` (leftmost wins), root-key `bag_set_key`
@@ -355,8 +364,8 @@ Overflow and division by zero produce typed decimal nulls.
 
 The Arrow representation is `Decimal256(57,28)`. The wider native storage lets
 one column retain both the full integer range and the smallest decimal fraction
-without a per-row custom numeric object; it does not expand the accepted KQL
-value range. Sorting, equality, hashing, joins, and grouped states remain native
+without a per-row custom numeric object; it does not expand the accepted local
+value profile. Sorting, equality, hashing, joins, and grouped states remain native
 DataFusion operations. Sum/average results normalize to the decimal range, with
 single midpoint-to-even rounding when reducing excess native scale.
 `tostring` uses normalized non-exponential formatting.
@@ -375,6 +384,12 @@ and averages, and can multiply the local maximum by two without overflowing.
 The local `min`/`max`, overflow boundary, precision, and non-exponential
 formatting therefore differ. The measured exact decimal workloads do not
 certify these unsupported boundaries.
+The exact raw-number JSON extraction is also a deliberate current difference:
+the reference query for `9007199254740993.123456789` returns `9007199254740992`
+through binary64 conversion, while this extension retains the exact token.
+Quoted JSON decimal strings agree in the captured baseline. Two explicitly
+ignored reference regression tests preserve the wider-decimal and raw-JSON
+disagreements; they are not counted as passing conformance.
 Decimal table ranges currently error rather than silently casting their bounds
 and steps to real.
 
@@ -382,29 +397,41 @@ and steps to real.
 
 `parse_url`/`parseurl` and `parse_urlquery`/`parseurlquery` return dynamic bags
 with documented component names, including `"Query Parameters"`. Parsing never
-fetches a URL. Hosted absolute URLs support explicit/default ports and IPv6;
-nonabsolute/nonhierarchical inputs return dynamic null. Query keys/values are
-form-decoded, with the last duplicate value retained. The URL parser's
-normalization and repeated-key policy are documented behavior pending live
-Kusto verification for edge cases.
+fetches a URL. Its raw component semantics follow captured Kusto results, not
+a browser URL normalizer. Scheme/host case, leading path slashes, dot segments, percent
+escapes, and explicit ports are preserved; default ports are not inserted.
+Inputs without `://` return a component bag with empty values. The reference
+parser splits host/port at the last colon even for bracketed IPv6, so this is
+not an IPv6 validator or a network-connection URI parser.
+
+Query keys/values are not URL-decoded: `+` and percent escapes remain literal,
+and an initial `?` is part of the first key. Missing/empty keys or values are
+omitted. Repeated keys produce ordered arrays rather than discarding earlier
+values. Use `url_decode` explicitly when decoded parameter text is required.
 
 `url_encode` and `url_encode_component` use lowercase percent escapes; spaces
-become `+` and `%20` respectively. `url_decode` accepts either case of escapes,
-decodes `+` as space, retains malformed escape sequences literally, and replaces
-invalid decoded UTF-8 with U+FFFD. Userinfo decoding preserves literal plus signs.
+become `+` and `%20` respectively. Their captured safe punctuation is
+`.!'()*~`; notably `-` and `_` are escaped. `url_decode` accepts either case of
+escapes, decodes `+` as space, and retains malformed escape sequences literally.
+If the decoded bytes are not valid UTF-8, it returns the original input.
+URL parsing itself does not decode userinfo.
 Text conversions have a 16 MiB per-value input/encoding-output budget.
 
 `base64_encode_tostring`/`base64_encodestring`,
 `base64_decode_tostring`/`base64_decodestring`, and `base64_decode_toarray`
-operate on UTF-8 strings or byte arrays as documented. ASCII whitespace is
-ignored while decoding standard padded base64. Invalid input and invalid
-decoded UTF-8 produce null, not an empty successful decode; this follows the
-function-specific nullable return contract. Byte arrays also obey the dynamic
-collection limit.
+operate on UTF-8 strings or byte arrays as documented. Decoding requires
+standard padded base64 without whitespace, accepting nonzero unused trailing
+bits as the reference does. Invalid string input or invalid
+decoded UTF-8 returns the KQL string default `""` (therefore `isnull` is false);
+invalid byte-array input returns dynamic null. Use `isempty` for string-result
+failure checks, noting that a valid empty input also yields an empty string.
+Byte arrays also obey the dynamic collection limit.
 
 `trim`, `trim_start`, and `trim_end` take a constant regex followed by the source,
-not SQL-style character sets. Compiled native regex replacements remove all
-matching edge runs. Regex syntax follows the same Rust-regex boundary as the
+not SQL-style character sets. Compiled native regex replacements remove one
+anchored match at each requested edge. Repetition belongs to the regex itself:
+`trim("--","----text----")` produces `"--text--"`, while a quantified pattern can
+remove whole runs. Regex syntax follows the same Rust-regex boundary as the
 other extraction functions.
 
 ## Grouped tabular subqueries
@@ -732,12 +759,23 @@ representations and continue to ignore nulls.
 
 ## Opt-in Kusto reference checks
 
-The conformance suite in `tests/conformance.rs` runs synthetic inline-data
-fixtures locally by default. It covers counts/nulls, expansion, per-row/per-key
+The conformance suite in `tests/conformance.rs` runs 28 synthetic inline-data
+fixtures locally by default, comparing exact column names and row multisets
+against results captured from the public Kusto help cluster (`Samples`) through
+Azure MCP on 2026-10-25. It covers counts/nulls, expansion, per-row/per-key
 queries, scans, hierarchical tops, schema-declared plugins, scalar subqueries,
-ranges, GUIDs, parsing, decimal precision, rich nested tags, term/IP/encoding
-helpers, documented NaN defaults, and series shape. Local fixture checks are **not**
-evidence that those fixtures have passed against a Kusto engine.
+ranges, GUIDs, parsing, bounded decimal arithmetic, rich nested tags,
+term/IP/encoding helpers, documented NaN defaults, and series shape. The
+captured baseline exposed and corrected boolean text casing, raw URL/query
+semantics, regex edge matching, and base64/percent-decoding differences.
+Engine build metadata was not available through the query router.
+
+This is a finite historical reference baseline, **not full Kusto certification**
+or a new remote execution on every CI run. Wider decimal precision/range and
+raw-number JSON rounding remain explicit differences in separately ignored
+reference regressions. The portable decimal JSON fixture uses a quoted string;
+the rich-value fixture uses runtime packing rather than decimal syntax inside
+`dynamic(...)`. Fixture aliases and scan-step names avoid reserved keywords.
 
 To compare the same fixtures against an explicitly configured reference:
 

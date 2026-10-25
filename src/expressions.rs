@@ -736,6 +736,11 @@ impl Expressions<'_> {
     pub(crate) fn string_value(&self, value: Expr, schema: &DFSchema) -> Result<Expr> {
         Ok(if dynamic::is_dynamic(&value.get_type(schema)?) {
             dynamic::call(Kernel::Convert(DataType::Utf8), vec![value])
+        } else if value.get_type(schema)? == DataType::Boolean {
+            datafusion::logical_expr::expr_fn::case(value)
+                .when(lit(true), lit("True"))
+                .when(lit(false), lit("False"))
+                .otherwise(lit(ScalarValue::Utf8(None)))?
         } else if crate::decimal::is_decimal(&value.get_type(schema)?) {
             crate::decimal::call(crate::decimal::Op::Format, vec![value])
         } else if value.get_type(schema)? == crate::guid::data_type() {
@@ -896,13 +901,13 @@ impl Expressions<'_> {
                 if name != "trim_end" {
                     value = self.function(
                         "regexp_replace",
-                        vec![value, lit(format!("^(?:{pattern})+")), lit("")],
+                        vec![value, lit(format!("^(?:{pattern})")), lit("")],
                     )?;
                 }
                 if name != "trim_start" {
                     value = self.function(
                         "regexp_replace",
-                        vec![value, lit(format!("(?:{pattern})+$")), lit("")],
+                        vec![value, lit(format!("(?:{pattern})$")), lit("")],
                     )?;
                 }
                 value
@@ -1352,18 +1357,15 @@ impl Expressions<'_> {
             }
             "tostring" => {
                 arity(1)?;
-                if dynamic::is_dynamic(&values[0].get_type(schema)?) {
-                    return Ok(dynamic::call(Kernel::Convert(DataType::Utf8), values));
-                }
-                if crate::decimal::is_decimal(&values[0].get_type(schema)?) {
-                    return Ok(crate::decimal::call(crate::decimal::Op::Format, values));
-                }
-                if values[0].get_type(schema)? == crate::guid::data_type() {
-                    return Ok(crate::guid::call(values[0].clone(), true));
-                }
                 self.function(
                     "coalesce",
-                    vec![try_cast(values[0].clone(), DataType::Utf8), lit("")],
+                    vec![
+                        try_cast(
+                            self.string_value(values[0].clone(), schema)?,
+                            DataType::Utf8,
+                        ),
+                        lit(""),
+                    ],
                 )?
             }
             "todatetime" | "todate" => {
@@ -1402,13 +1404,13 @@ impl Expressions<'_> {
                     return Ok(dynamic::call(Kernel::Convert(ty), values));
                 }
                 if name == "string" {
-                    if crate::decimal::is_decimal(&values[0].get_type(schema)?) {
-                        return Ok(crate::decimal::call(crate::decimal::Op::Format, values));
-                    }
-                    if values[0].get_type(schema)? == crate::guid::data_type() {
-                        return Ok(crate::guid::call(values[0].clone(), true));
-                    }
-                    self.function("coalesce", vec![try_cast(values[0].clone(), ty), lit("")])?
+                    self.function(
+                        "coalesce",
+                        vec![
+                            try_cast(self.string_value(values[0].clone(), schema)?, ty),
+                            lit(""),
+                        ],
+                    )?
                 } else {
                     try_cast(values[0].clone(), ty)
                 }

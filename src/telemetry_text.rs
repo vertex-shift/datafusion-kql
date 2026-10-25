@@ -12,6 +12,10 @@ use datafusion::logical_expr::{
 use crate::dynamic_value::Node;
 
 const MAX_BYTES: usize = 16 << 20;
+const DECODER: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    base64::engine::GeneralPurposeConfig::new().with_decode_allow_trailing_bits(true),
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Op {
@@ -67,7 +71,7 @@ fn bounded(size: usize) -> Result<()> {
 }
 
 fn encode(text: &str, component: bool) -> Result<String> {
-    let safe = |byte: u8| byte.is_ascii_alphanumeric() || b"-_.!*()".contains(&byte);
+    let safe = |byte: u8| byte.is_ascii_alphanumeric() || b".!'()*~".contains(&byte);
     let length = text.bytes().try_fold(0_usize, |count, byte| {
         let width = if safe(byte) || byte == b' ' && !component {
             1
@@ -95,7 +99,7 @@ fn encode(text: &str, component: bool) -> Result<String> {
     Ok(output)
 }
 
-fn decode(text: &str, plus_as_space: bool) -> String {
+fn decode(text: &str) -> String {
     fn hex(byte: u8) -> Option<u8> {
         match byte {
             b'0'..=b'9' => Some(byte - b'0'),
@@ -115,7 +119,7 @@ fn decode(text: &str, plus_as_space: bool) -> String {
             output.push((high << 4) | low);
             index += 3;
         } else {
-            output.push(if plus_as_space && bytes[index] == b'+' {
+            output.push(if bytes[index] == b'+' {
                 b' '
             } else {
                 bytes[index]
@@ -123,73 +127,71 @@ fn decode(text: &str, plus_as_space: bool) -> String {
             index += 1;
         }
     }
-    String::from_utf8_lossy(&output).into_owned()
+    String::from_utf8(output).unwrap_or_else(|_| text.to_owned())
 }
 
 fn query(text: &str) -> Result<Node> {
-    let mut output = BTreeMap::new();
-    for (key, value) in url::form_urlencoded::parse(text.trim_start_matches('?').as_bytes()) {
-        if output.len() >= crate::dynamic::MAX_COLLECTION_SIZE {
+    let mut output: BTreeMap<String, Node> = BTreeMap::new();
+    let mut parameters = 0;
+    for parameter in text.split('&') {
+        let Some((key, value)) = parameter.split_once('=') else {
+            continue;
+        };
+        if key.is_empty() || value.is_empty() {
+            continue;
+        }
+        parameters += 1;
+        if parameters > crate::dynamic::MAX_COLLECTION_SIZE {
             return Err(DataFusionError::Execution(
                 "URL query exceeds its parameter budget".into(),
             ));
         }
-        output.insert(key.into_owned(), Node::String(value.into_owned()));
+        let value = Node::String(value.to_owned());
+        match output.get_mut(key) {
+            Some(Node::Array(values)) => values.push(value),
+            Some(existing) => {
+                let first = std::mem::replace(existing, Node::Null);
+                *existing = Node::Array(vec![first, value]);
+            }
+            None => {
+                output.insert(key.to_owned(), value);
+            }
+        }
     }
     Ok(Node::Bag(output))
 }
 
 fn parse_url(text: &str) -> Result<Node> {
-    let Ok(url) = url::Url::parse(text) else {
-        return Ok(Node::Null);
-    };
-    if url.cannot_be_a_base() || url.host().is_none() {
-        return Ok(Node::Null);
-    }
-    let host = match url.host() {
-        Some(url::Host::Domain(value)) => value.to_owned(),
-        Some(url::Host::Ipv4(value)) => value.to_string(),
-        Some(url::Host::Ipv6(value)) => value.to_string(),
-        None => return Ok(Node::Null),
-    };
+    let (scheme, rest) = text.split_once("://").unwrap_or(("", ""));
+    let (rest, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let (rest, parameters) = rest.split_once('?').unwrap_or((rest, ""));
+    let (authority, path) = rest
+        .find('/')
+        .map_or((rest, ""), |index| rest.split_at(index));
+    let (username, password, host_port) = authority
+        .rsplit_once('@')
+        .and_then(|(userinfo, host_port)| {
+            userinfo
+                .rsplit_once(':')
+                .map(|(username, password)| (username, password, host_port))
+        })
+        .unwrap_or(("", "", authority));
+    let (host, port) = host_port.rsplit_once(':').unwrap_or((host_port, ""));
     let mut fields = BTreeMap::from([
-        ("Scheme".into(), Node::String(url.scheme().into())),
-        ("Host".into(), Node::String(host)),
-        (
-            "Port".into(),
-            Node::String(
-                url.port_or_known_default()
-                    .map(|value| value.to_string())
-                    .unwrap_or_default(),
-            ),
-        ),
-        (
-            "Path".into(),
-            Node::String(url.path().strip_prefix('/').unwrap_or(url.path()).into()),
-        ),
-        (
-            "Username".into(),
-            Node::String(decode(url.username(), false)),
-        ),
-        (
-            "Password".into(),
-            Node::String(decode(url.password().unwrap_or(""), false)),
-        ),
-        (
-            "Fragment".into(),
-            Node::String(url.fragment().unwrap_or("").into()),
-        ),
+        ("Scheme".into(), Node::String(scheme.into())),
+        ("Host".into(), Node::String(host.into())),
+        ("Port".into(), Node::String(port.into())),
+        ("Path".into(), Node::String(path.into())),
+        ("Username".into(), Node::String(username.into())),
+        ("Password".into(), Node::String(password.into())),
+        ("Fragment".into(), Node::String(fragment.into())),
     ]);
-    fields.insert("Query Parameters".into(), query(url.query().unwrap_or(""))?);
+    fields.insert("Query Parameters".into(), query(parameters)?);
     Ok(Node::Bag(fields))
 }
 
 fn base64(text: &str, array: bool) -> Result<Option<Vec<u8>>> {
-    let compact = text
-        .bytes()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .collect::<Vec<_>>();
-    let estimated = compact
+    let estimated = text
         .len()
         .div_ceil(4)
         .checked_mul(3)
@@ -200,7 +202,7 @@ fn base64(text: &str, array: bool) -> Result<Option<Vec<u8>>> {
             "base64 byte array exceeds its collection budget".into(),
         ));
     }
-    match base64::engine::general_purpose::STANDARD.decode(compact) {
+    match DECODER.decode(text) {
         Ok(output) => {
             if array {
                 crate::dynamic_value::check_size(output.len())?;
@@ -274,7 +276,7 @@ impl ScalarUDFImpl for Function {
                     Op::UrlEncode | Op::ComponentEncode => {
                         output.append_value(encode(text, self.op == Op::ComponentEncode)?)
                     }
-                    Op::UrlDecode => output.append_value(decode(text, true)),
+                    Op::UrlDecode => output.append_value(decode(text)),
                     Op::Base64Encode => {
                         let length = base64::encoded_len(text.len(), true).ok_or_else(|| {
                             DataFusionError::Execution("base64 encoded length overflow".into())
@@ -285,7 +287,7 @@ impl ScalarUDFImpl for Function {
                     Op::Base64Decode => {
                         let decoded =
                             base64(text, false)?.and_then(|bytes| String::from_utf8(bytes).ok());
-                        output.append_option(decoded);
+                        output.append_value(decoded.unwrap_or_default());
                     }
                     _ => unreachable!("dynamic text functions are handled above"),
                 }

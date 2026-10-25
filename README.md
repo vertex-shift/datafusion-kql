@@ -165,7 +165,8 @@ and hierarchical `top-nested` selection are supported. Schema-declared
 aggregation lazy and native.
 GUID/UUID values use native 128-bit Arrow storage, with literals, nullable
 conversion, generation, canonical formatting, typed parameters, and root dynamic
-GUID tags. Decimal arithmetic is exact base-ten, and nested dynamic
+GUID tags. Decimal arithmetic uses a bounded exact base-ten profile (full Kusto
+runtime decimal range/precision remains a known gap), and nested dynamic
 datetime/timespan/GUID/decimal values retain their types across access,
 collections, expansion, aggregation, and serialized offsets. Existing dynamic
 tag numbers and previous input schemas remain compatible.
@@ -216,11 +217,13 @@ optimizer behavior, Arrow integration, and Parquet. SQL is enabled only by the
 development dependency for comparison; the frontend does not require
 DataFusion's SQL feature at runtime.
 
-`tests/conformance.rs` also provides an opt-in reference suite for a configured
-Kusto emulator or ADX test database. Default tests validate its synthetic
-fixtures/protocol locally; CI exercises its curl transport against a self-owned
-loopback fixture, **not a Kusto reference engine**. See the compatibility
-contract for explicit live-test setup and remaining conformance boundaries.
+`tests/conformance.rs` compares 28 synthetic fixtures with captured public Kusto
+help-cluster results by default, and provides an opt-in live suite for a
+configured emulator or ADX test database. Two known decimal disagreements are
+explicitly ignored, not counted as passing parity. CI also exercises curl
+transport against a self-owned loopback fixture, **not a Kusto engine**.
+See the compatibility contract for capture provenance, live-test setup, and
+remaining conformance boundaries.
 
 ## License
 

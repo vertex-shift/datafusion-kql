@@ -47,26 +47,28 @@ async fn base64_helpers_match_published_kusto_examples() {
         &[&["S3VzdG8=", "Kusto"]],
     )
     .await;
+    check("print a=base64_decode_tostring('Zh=='),b=tostring(base64_decode_toarray('Zh==')),c=base64_decode_tostring('Zg='),d=base64_decode_tostring('Zg===')",
+        &[&["f","[102]","",""]]).await;
 }
 
 #[tokio::test]
-async fn base64_preserves_utf8_and_ignores_ascii_whitespace_while_decoding() {
+async fn base64_preserves_utf8_and_rejects_whitespace_while_decoding() {
     check("datatable(s:string)['hello','中文','Österreich',''] | project s,roundtrip=base64_decode_tostring(base64_encode_tostring(s))",
         &[&["hello","hello"],&["中文","中文"],&["Österreich","Österreich"],&["",""]]).await;
     check(
         r#"print value=base64_decode_tostring(' S3Vz\tdG8=\n')"#,
-        &[&["Kusto"]],
+        &[&[""]],
     )
     .await;
 }
 
 #[tokio::test]
-async fn malformed_base64_and_invalid_utf8_are_nullable_not_empty_successes() {
+async fn malformed_base64_uses_kql_string_defaults_and_dynamic_nulls() {
     check("print a=isnull(base64_decode_tostring('invalid!')),b=isnull(base64_decode_tostring('////')),c=isnull(base64_decode_toarray('invalid!')),d=array_length(base64_decode_toarray('////'))",
-        &[&["true","true","true","3"]]).await;
+        &[&["false","false","true","3"]]).await;
     check(
         "print n=isnull(base64_decode_tostring('U3RyaW5n0KHR0tGA0L7Rh9C60LA='))",
-        &[&["true"]],
+        &[&["false"]],
     )
     .await;
 }
@@ -83,44 +85,61 @@ async fn url_encoders_differ_in_space_handling_and_round_trip_unicode() {
 }
 
 #[tokio::test]
-async fn malformed_url_escapes_are_literal_and_invalid_decoded_utf8_is_replaced() {
+async fn malformed_url_escapes_are_literal_and_invalid_decoded_utf8_retains_input() {
     check(
         "print a=url_decode('a%ZZ+b%2'),b=url_decode('%ff')",
-        &[&["a%ZZ b%2", "�"]],
+        &[&["a%ZZ b%2", "%ff"]],
     )
     .await;
+    check("print ordinary=url_encode(\"!'()*~_-. /:&\"),component=url_encode_component(\"!'()*~_-. /:&\"),mixed=url_decode('hello%20world%ff')",
+        &[&["!'()*~%5f%2d.+%2f%3a%26","!'()*~%5f%2d.%20%2f%3a%26","hello%20world%ff"]]).await;
 }
 
 #[tokio::test]
 async fn parse_url_exposes_documented_components_without_fetching_anything() {
     check("print u=parse_url('scheme://demo:sample@host:1234/this/is/a/path?k1=v1&k2=v2#fragment') | project Scheme=tostring(u.Scheme),Host=tostring(u.Host),Port=tostring(u.Port),Path=tostring(u.Path),User=tostring(u.Username),Password=tostring(u.Password),Query=tostring(u['Query Parameters'].k1),Fragment=tostring(u.Fragment)",
-        &[&["scheme","host","1234","this/is/a/path","demo","sample","v1","fragment"]]).await;
+        &[&["scheme","host","1234","/this/is/a/path","demo","sample","v1","fragment"]]).await;
 }
 
 #[tokio::test]
-async fn parse_urlquery_decodes_keys_and_values_and_keeps_last_duplicate_value() {
+async fn parse_urlquery_preserves_raw_text_and_collects_duplicate_values() {
     check("print q=parse_urlquery('k1=v1&k2=hello+world&k3=%E4%B8%AD%E6%96%87&k1=last') | project a=tostring(q['Query Parameters'].k1),b=tostring(q['Query Parameters'].k2),c=tostring(q['Query Parameters'].k3)",
-        &[&["last","hello world","中文"]]).await;
-    check("print q=parseurlquery('?flag&empty=&encoded%20key=value') | project a=tostring(q['Query Parameters']['encoded key']),b=bag_has_key(q['Query Parameters'],'flag'),c=tostring(q['Query Parameters'].empty)",
-        &[&["value","true",""]]).await;
+        &[&["[\"v1\",\"last\"]","hello+world","%E4%B8%AD%E6%96%87"]]).await;
+    check("print q=parseurlquery('?flag&empty=&encoded%20key=value') | project a=tostring(q['Query Parameters']['encoded%20key']),b=bag_has_key(q['Query Parameters'],'flag'),c=bag_has_key(q['Query Parameters'],'empty')",
+        &[&["value","false","false"]]).await;
 }
 
 #[tokio::test]
-async fn url_parser_handles_ipv6_defaults_and_rejects_nonabsolute_inputs() {
+async fn url_parser_uses_raw_reference_components_not_uri_normalization() {
     check("print u=parseurl('https://[2001:db8::1]/resource') | project host=tostring(u.Host),port=tostring(u.Port),path=tostring(u.Path)",
-        &[&["2001:db8::1","443","resource"]]).await;
-    check("print a=isnull(parse_url('not-an-absolute-url')),b=isnull(parse_url('')),c=tostring(parse_urlquery('')['Query Parameters'])", &[&["true","true","{}"]]).await;
+        &[&["[2001:db8:","1]","/resource"]]).await;
+    check("print a=isnull(parse_url('not-an-absolute-url')),b=tostring(parse_url('').Host),c=tostring(parse_urlquery('')['Query Parameters'])", &[&["false","","{}"]]).await;
+    check("print u=parse_url('HTTPS://Example.COM/a%20b/../c?a=hello+world&b=%20#x%20y') | project scheme=tostring(u.Scheme),host=tostring(u.Host),port=tostring(u.Port),path=tostring(u.Path),a=tostring(u['Query Parameters'].a),b=tostring(u['Query Parameters'].b),fragment=tostring(u.Fragment)",
+        &[&["HTTPS","Example.COM","","/a%20b/../c","hello+world","%20","x%20y"]]).await;
 }
 
 #[tokio::test]
 async fn regex_trim_helpers_remove_matches_not_literal_character_sets() {
     check(r#"print a=trim(@'\s+','   Hello, world!   '),b=trim('--','----text----'),c=trim_start('--','----text----'),d=trim_end('--','----text----')"#,
-        &[&["Hello, world!","text","text----","----text"]]).await;
+        &[&["Hello, world!","--text--","--text----","----text--"]]).await;
     check(
         r#"print a=trim(@'(?P<edge>x)','xxvaluExx'),b=trim(@'[^\w]+','-  Te st1// $')"#,
-        &[&["valuE", "Te st1"]],
+        &[&["xvaluEx", "Te st1"]],
     )
     .await;
+}
+
+#[tokio::test]
+async fn native_boolean_text_differs_from_dynamic_json_boolean_text() {
+    check("datatable(b:bool)[true,false,bool(null)] | project s=tostring(b),concat=strcat('value:',b)",
+        &[&["True","value:True"],&["False","value:False"],&["","value:"]]).await;
+    check(
+        "print a=tostring(dynamic(true)),b=tostring(dynamic(false)),c=tostring(bool(null))",
+        &[&["true", "false", ""]],
+    )
+    .await;
+    check("range x from 1 to 1024 step 1 | extend s=tostring(rand()<0.5) | summarize valid=countif(s in('True','False')),missingCount=countif(isempty(s))",
+        &[&["1024","0"]]).await;
 }
 
 #[tokio::test]
