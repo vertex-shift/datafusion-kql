@@ -264,6 +264,7 @@ impl Collector<'_> {
     fn rewrite(&mut self, expression: &ast::Expr) -> Result<ast::Expr> {
         if let ExprKind::Call { name, args } = &expression.kind
             && is_aggregate(self.expressions.state, name)
+            && !(name == "hll_merge" && args.len() != 1)
         {
             let (root, post) = self.aggregate(name, args, expression.span)?;
             return self.reference(root, post, expression.span);
@@ -272,6 +273,11 @@ impl Collector<'_> {
     }
 
     fn aggregate(&self, name: &str, args: &[ast::Expr], span: Span) -> Result<(Expr, Post)> {
+        if matches!(name, "dcount" | "dcountif" | "hll" | "hll_if" | "hll_merge") {
+            return self
+                .hll(name, args, span)
+                .map(|value| (value, Post::Direct));
+        }
         if matches!(
             name,
             "percentile" | "percentilew" | "percentiles_array" | "percentilesw_array"
@@ -366,7 +372,6 @@ impl Collector<'_> {
         let (native, filtered, distinct, zero, signed) = match name {
             "count" => ("count", false, false, false, false),
             "countif" => ("count", true, false, false, false),
-            "dcount" | "dcountif" => ("approx_distinct", name == "dcountif", false, false, true),
             "count_distinct" | "count_distinctif" => {
                 ("count", name == "count_distinctif", true, false, false)
             }
@@ -422,9 +427,7 @@ impl Collector<'_> {
         } else {
             if standard && args.len() != expected {
                 return Err(Error::unsupported(
-                    format!(
-                        "{name} expects {expected} argument(s); accuracy hints are not implemented"
-                    ),
+                    format!("{name} expects {expected} argument(s)"),
                     span,
                 ));
             }
@@ -524,6 +527,102 @@ impl Collector<'_> {
             Post::Direct
         };
         Ok((root, post))
+    }
+
+    fn hll(&self, name: &str, args: &[ast::Expr], span: Span) -> Result<Expr> {
+        use crate::hll_functions::{Kind, aggregate};
+        if name == "hll_merge" {
+            if args.len() != 1 {
+                return Err(Error::syntax(
+                    "aggregate hll_merge expects one sketch column",
+                    span,
+                ));
+            }
+            let value = self.expressions.scalar(&args[0], &self.schema)?;
+            let value = self
+                .expressions
+                .hll_value(value, &self.schema, args[0].span)?;
+            return Ok(aggregate(Kind::Merge, value, ""));
+        }
+        let conditional = matches!(name, "dcountif" | "hll_if");
+        let minimum = if conditional { 2 } else { 1 };
+        if !(minimum..=minimum + 1).contains(&args.len()) {
+            return Err(Error::syntax(
+                format!(
+                    "{name} expects a value, {}optional accuracy",
+                    if conditional {
+                        "predicate, and "
+                    } else {
+                        "and "
+                    }
+                ),
+                span,
+            ));
+        }
+        let accuracy = if let Some(argument) = args.get(minimum) {
+            let value = self.expressions.scalar(argument, &DFSchema::empty())?;
+            if !value.get_type(&DFSchema::empty())?.is_integer() {
+                return Err(Error::syntax(
+                    "HLL accuracy must be a constant integer from 0 through 4",
+                    argument.span,
+                ));
+            }
+            match self
+                .expressions
+                .constant(cast(value, DataType::Int64), argument.span)?
+            {
+                ScalarValue::Int64(Some(value @ 0..=4)) => value as u8,
+                _ => {
+                    return Err(Error::syntax(
+                        "HLL accuracy must be a constant integer from 0 through 4",
+                        argument.span,
+                    ));
+                }
+            }
+        } else {
+            1
+        };
+        let mut value = self.expressions.scalar(&args[0], &self.schema)?;
+        let ty = value.get_type(self.schema.as_ref())?;
+        let domain = crate::tabular::type_names(&ty).0;
+        if dynamic::is_dynamic(&ty) {
+            value = when(value.clone().is_null(), lit(ScalarValue::Utf8(None)))
+                .otherwise(dynamic::call(Kernel::EncodeWire, vec![value]))?;
+        } else if crate::decimal::is_decimal(&ty) {
+            let key = self.expressions.function(
+                "get_field",
+                vec![
+                    crate::decimal::call(crate::decimal::Op::Convert, vec![value.clone()]),
+                    lit("__kql_decimal_order_v1"),
+                ],
+            )?;
+            value = when(value.is_null(), lit(ScalarValue::FixedSizeBinary(16, None)))
+                .otherwise(key)?;
+        } else {
+            let mut logical = &ty;
+            while let DataType::Dictionary(_, values) = logical {
+                logical = values;
+            }
+            let canonical = crate::tabular::canonical(logical);
+            if canonical != ty {
+                value = cast(value, canonical);
+            }
+        }
+        let mut result = aggregate(
+            if matches!(name, "dcount" | "dcountif") {
+                Kind::Count(accuracy)
+            } else {
+                Kind::Build(accuracy)
+            },
+            value,
+            &domain,
+        );
+        if conditional {
+            result = result
+                .filter(self.expressions.predicate(&args[1], &self.schema)?)
+                .build()?;
+        }
+        Ok(result)
     }
 
     fn quantile(
@@ -717,6 +816,9 @@ pub(crate) fn is_aggregate(state: &SessionState, name: &str) -> bool {
             "countif"
                 | "dcount"
                 | "dcountif"
+                | "hll"
+                | "hll_if"
+                | "hll_merge"
                 | "count_distinct"
                 | "count_distinctif"
                 | "sumif"

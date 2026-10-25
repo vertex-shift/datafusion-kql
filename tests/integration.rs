@@ -484,7 +484,7 @@ async fn unsupported_features_and_invalid_names_do_not_silently_fall_back() {
         "Events | project value",
         "events | take 1",
         "Events | summarize unknown_aggregate(Value)",
-        "Events | summarize dcount(Value,4)",
+        "Events | summarize dcount(Value,5)",
         "Events | summarize x=Value",
         "Events | where Category has Value",
         "let x=1; let x=2; print y=x",

@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.7 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.8 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -21,6 +21,7 @@ cargo run --example functions
 cargo run --example grouped_scan
 cargo run --example schema_plugins
 cargo run --example telemetry_functions
+cargo run --example distinct_sketches
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -174,6 +175,13 @@ Term-list/prefix/suffix searches, IPv4/IPv6 and CIDR functions, URL/query
 parsing, percent/base64 encodings, and regex trimming cover common telemetry
 queries. Compiled matchers and network range caches are bounded.
 
+`dcount`/`dcountif` support accuracy levels 0-4 with bounded HyperLogLog states
+and exact small-set counting. `hll`/`hll_if`, scalar and aggregate `hll_merge`,
+and `dcount_hll` support reusable daily-to-weekly distinct-count rollups.
+Sketches use a versioned local format, not Kusto-service binary compatibility.
+Native vectorized grouped accumulators keep small groups sparse instead of
+allocating a full register array per key.
+
 Advanced signal processing, management commands, additional hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.
 
@@ -216,6 +224,9 @@ Tests cover parser diagnostics/limits, KQL-specific semantics, SQL result parity
 optimizer behavior, Arrow integration, and Parquet. SQL is enabled only by the
 development dependency for comparison; the frontend does not require
 DataFusion's SQL feature at runtime.
+HLL regressions separately cover exact thresholds, probabilistic error checks,
+partial-state/filter/merge equivalence, malformed sketches, and host memory
+accounting; they are not represented as new live Kusto reference captures.
 
 `tests/conformance.rs` compares 49 synthetic fixtures with captured public Kusto
 help-cluster results by default, and provides an opt-in live suite for a

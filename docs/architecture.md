@@ -107,7 +107,10 @@ errors rather than silently execute with different semantics.
   discovery, source-labelled unions and conflicting-type schema splitting are
   implemented. Cross-table search/find, smart row packing, hierarchical
   top-nested (including reaggregated others), and exact heavy-hitter estimates
-  are implemented. Continue with Kusto-specific approximate algorithms and hints.
+  are implemented. Accuracy-controlled HLL, reusable sketches, native
+  vectorized grouped states, and bounded sparse-to-dense promotion are now
+  implemented. Remaining scaling work includes generic scans/grouped
+  subqueries, approximate percentile states, and spill-aware query snapshots.
 - Explicit-schema bag_unpack and pivot compile to batch struct extraction and
   native conditional aggregation. Runtime pivot schema mismatches are explicit
   errors; implicit data-dependent schema discovery and additional service

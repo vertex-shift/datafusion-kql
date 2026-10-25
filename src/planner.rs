@@ -2550,6 +2550,9 @@ pub(crate) fn default_name(expr: &ast::Expr, index: usize) -> String {
     match &expr.kind {
         ExprKind::Identifier(parts) => parts.last().expect("identifiers are nonempty").clone(),
         ExprKind::Call { name, args } => {
+            if name == "hll_merge" && args.len() >= 2 {
+                return "hll_merged_result".into();
+            }
             let column = args.first().and_then(|arg| {
                 if let ExprKind::Identifier(parts) = &arg.kind {
                     parts.last()

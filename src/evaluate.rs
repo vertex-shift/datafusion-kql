@@ -464,8 +464,13 @@ fn pivot(
         };
         let (name_, args_) = match aggregate_name.as_str() {
             "count" if aggregate_args.len() <= 1 => ("countif", vec![condition]),
-            name @ ("sum" | "min" | "max" | "avg" | "dcount" | "stdev" | "variance"
-            | "take_any" | "make_list" | "make_set" | "make_bag")
+            "dcount" if (1..=2).contains(&aggregate_args.len()) => {
+                let mut values = vec![aggregate_args[0].clone(), condition];
+                values.extend_from_slice(&aggregate_args[1..]);
+                ("dcountif", values)
+            }
+            name @ ("sum" | "min" | "max" | "avg" | "stdev" | "variance" | "take_any"
+            | "make_list" | "make_set" | "make_bag")
                 if aggregate_args.len() == 1 =>
             {
                 let mapped = match name {
@@ -473,7 +478,6 @@ fn pivot(
                     "min" => "minif",
                     "max" => "maxif",
                     "avg" => "avgif",
-                    "dcount" => "dcountif",
                     "stdev" => "stdevif",
                     "variance" => "varianceif",
                     "take_any" => "take_anyif",
