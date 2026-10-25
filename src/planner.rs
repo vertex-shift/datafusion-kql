@@ -1635,10 +1635,11 @@ impl<'s> Planner<'s> {
                     let sorts = keys
                         .iter()
                         .map(|key| {
-                            Ok(self
-                                .expressions()
-                                .scalar(&key.expr, plan.schema())?
-                                .sort(key.ascending, key.nulls_first))
+                            Ok(ordering::sort_value(
+                                self.expressions().scalar(&key.expr, plan.schema())?,
+                                plan.schema(),
+                            )?
+                            .sort(key.ascending, key.nulls_first))
                         })
                         .collect::<Result<Vec<_>>>()?;
                     let sorted = LogicalPlanBuilder::from(plan)
@@ -1652,10 +1653,11 @@ impl<'s> Planner<'s> {
                 }
                 Operator::Top { count, key } => {
                     let count = self.row_limit(count)?;
-                    let sort = self
-                        .expressions()
-                        .scalar(&key.expr, plan.schema())?
-                        .sort(key.ascending, key.nulls_first);
+                    let sort = ordering::sort_value(
+                        self.expressions().scalar(&key.expr, plan.schema())?,
+                        plan.schema(),
+                    )?
+                    .sort(key.ascending, key.nulls_first);
                     let sorted = LogicalPlanBuilder::from(plan)
                         .sort(vec![sort.clone()])?
                         .limit(0, Some(count))?
@@ -1918,10 +1920,11 @@ impl<'s> Planner<'s> {
             Operator::Top { count, key: sort } => {
                 use datafusion::logical_expr::expr_fn::ExprFunctionExt;
                 let count = self.row_limit(count)?;
-                let sort = self
-                    .expressions()
-                    .scalar(&sort.expr, input.schema())?
-                    .sort(sort.ascending, sort.nulls_first);
+                let sort = ordering::sort_value(
+                    self.expressions().scalar(&sort.expr, input.schema())?,
+                    input.schema(),
+                )?
+                .sort(sort.ascending, sort.nulls_first);
                 let rank = self
                     .state
                     .udwf("row_number")?

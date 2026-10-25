@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.6 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.7 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -165,8 +165,8 @@ and hierarchical `top-nested` selection are supported. Schema-declared
 aggregation lazy and native.
 GUID/UUID values use native 128-bit Arrow storage, with literals, nullable
 conversion, generation, canonical formatting, typed parameters, and root dynamic
-GUID tags. Decimal arithmetic uses a bounded exact base-ten profile (full Kusto
-runtime decimal range/precision remains a known gap), and nested dynamic
+GUID tags. Decimal arithmetic uses a 34-digit decimal128 runtime with
+reference-backed scalar/vector conversion semantics, and nested dynamic
 datetime/timespan/GUID/decimal values retain their types across access,
 collections, expansion, aggregation, and serialized offsets. Existing dynamic
 tag numbers and previous input schemas remain compatible.
@@ -217,13 +217,18 @@ optimizer behavior, Arrow integration, and Parquet. SQL is enabled only by the
 development dependency for comparison; the frontend does not require
 DataFusion's SQL feature at runtime.
 
-`tests/conformance.rs` compares 30 synthetic fixtures with captured public Kusto
+`tests/conformance.rs` compares 49 synthetic fixtures with captured public Kusto
 help-cluster results by default, and provides an opt-in live suite for a
-configured emulator or ADX test database. Two known decimal disagreements are
-explicitly ignored, not counted as passing parity. CI also exercises curl
+configured emulator or ADX test database. The formerly ignored decimal
+precision and JSON conversion cases are now ordinary regressions. CI also exercises curl
 transport against a self-owned loopback fixture, **not a Kusto engine**.
 See the compatibility contract for capture provenance, live-test setup, and
 remaining conformance boundaries.
+
+Building the decimal128 runtime requires a C compiler for the bundled
+`libdecnumber` dependency. Decimal output uses an opaque Arrow struct rather
+than a fixed-scale Arrow decimal; use KQL `tostring` for display and see the
+compatibility contract before migrating persisted 0.6 schemas.
 
 ## License
 

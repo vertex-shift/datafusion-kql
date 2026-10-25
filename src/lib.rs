@@ -19,6 +19,8 @@ mod aggregation;
 pub mod ast;
 mod calendar;
 mod decimal;
+mod decimal128;
+mod decimal_aggregate;
 mod dynamic;
 mod dynamic_nested;
 mod dynamic_value;

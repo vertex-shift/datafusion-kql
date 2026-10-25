@@ -151,7 +151,8 @@ pub(crate) fn hitters(
             expr: grouping,
         }],
     )?;
-    let order = named(&grouped, &measure)?.sort(false, false);
+    let order =
+        ordering::sort_value(named(&grouped, &measure)?, grouped.schema())?.sort(false, false);
     let result = LogicalPlanBuilder::from(grouped)
         .sort(vec![order])?
         .limit(0, Some(count))?
@@ -207,7 +208,8 @@ fn select(
     let Some(count) = count else {
         return Ok(input);
     };
-    let sort = named(&input, score)?.sort(ascending, ascending);
+    let sort =
+        ordering::sort_value(named(&input, score)?, input.schema())?.sort(ascending, ascending);
     if prefix.is_empty() {
         return Ok(LogicalPlanBuilder::from(input)
             .sort(vec![sort])?

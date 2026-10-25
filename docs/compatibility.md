@@ -360,47 +360,58 @@ loopback, or link-local addresses.
 
 `decimal(...)` supports exact base-ten literals, scientific notation, `min`,
 `max`, and typed nulls; `todecimal` performs nullable runtime conversion. Values
-currently use a signed 96-bit coefficient and scale 0-28, a **bounded local
-profile, not full Kusto decimal parity**.
+use decimal128 arithmetic with **34 significant digits**, not an intermediate
+binary64 value or the previous 96-bit/scale-28 profile.
 Kusto's [decimal documentation](https://learn.microsoft.com/en-us/kusto/query/scalar-data-types/decimal)
-describes a 128-bit decimal number; it does not establish this narrower profile.
-The [public decimal literal reader](https://github.com/microsoft/Kusto-Query-Language/blob/328e05d10d6c73654e416675fc75af7ed0e05ffd/src/Kusto.Language/Syntax/SyntaxToken.cs#L622-L636)
-uses `System.Decimal`, but that frontend representation does not establish
-the engine's runtime range or precision.
-Arithmetic uses checked decimal operations, not an intermediate `f64`.
-Overflow and division by zero produce typed decimal nulls.
+describes a 128-bit number; the runtime precision/range and conversion details
+here are backed by captured public-help queries, not inferred from the public
+C# frontend's `System.Decimal` constant type.
 
-The Arrow representation is `Decimal256(57,28)`. The wider native storage lets
-one column retain both the full integer range and the smallest decimal fraction
-without a per-row custom numeric object; it does not expand the accepted local
-value profile. Sorting, equality, hashing, joins, and grouped states remain native
-DataFusion operations. Sum/average results normalize to the decimal range, with
-single midpoint-to-even rounding when reducing excess native scale.
-`tostring` uses normalized non-exponential formatting.
-`extract_json(..., typeof(decimal))` reads the selected raw JSON token directly,
-so exact decimal text is not first rounded through a JSON `f64`. The `min` and
-`max` names are literal constructors only, not accepted numeric strings by
-`todecimal`.
+Runtime string columns support values through
+`9.999999999999999999999999999999999E+6144` and subnormals down to `1E-6176`.
+Overflow can produce decimal infinity; still smaller magnitudes underflow to
+signed zero. `decimal(max)` and `decimal(min)` are the reference sentinels
+`1E+38` and `-1E+38`, **not** the largest finite arithmetic values. Division or
+modulo by zero yields typed null. Runtime invalid operations such as infinity
+times zero can produce decimal NaN; scalar evaluation instead yields null.
+NaN string conversion is invalid, while runtime `"Infinity"`/`"-Infinity"`
+strings are accepted. Comparisons follow numeric NaN/zero semantics; exact
+distinct counting preserves the reference's signed-zero distinction.
+
+DataFusion has no native floating-decimal Arrow type. The extension uses an
+opaque two-field Arrow struct: a canonical ordered 16-byte key and a 16-byte
+decimal128 payload. Native DataFusion grouping, sorting, joins, and hash states
+operate on that representation; arithmetic/comparison batch expressions and
+constant-size sum/avg/min/max accumulator states remain native extension points.
+NaNs follow requested null placement in sort/top keys and propagate through
+decimal numeric aggregates. Empty sum is zero; empty average/min/max is null.
+Use `tostring` for numeric display rather than Arrow's generic struct formatter.
+
+**0.7 representation change:** callers must treat the struct fields as opaque.
+Standard Arrow `Decimal128`/`Decimal256` inputs and typed request values are
+converted into the new representation. Persisted 0.6 dense unions remain
+readable: tag 10 retains its `Decimal256(57,28)` field, and the new runtime
+decimal field is appended at tag 13. Existing tag numbers and typed-collection
+wire versions are not repurposed.
 
 Typed datatables/parameters/functions, nullable parsing/extraction, numeric
 arithmetic, exact binning/floor/ceiling, native decimal inputs, unions, root
-dynamic tags, and serialized offsets are supported. Mixed decimal/real
-arithmetic promotes to real. Initial synthetic queries against the public
-Kusto help cluster on 2026-10-25 exposed a material remaining gap: the engine
-returns `1E+38` for `decimal(max)`, retains more precision for decimal division
-and averages, and can multiply the local maximum by two without overflowing.
-The local `min`/`max`, overflow boundary, precision, and non-exponential
-formatting therefore differ. The measured exact decimal workloads do not
-certify these unsupported boundaries.
-The exact raw-number JSON extraction is also a deliberate current difference:
-the scalar reference query for `9007199254740993.123456789` returns
-`9007199254740992`, while this extension retains the exact token. Runtime
-extraction from a string column instead returned `9007199254740993.123` in
-the reference probe. Scalar constant folding and vector conversion must
-therefore be checked separately, not approximated with one blanket `f64` cast.
-Quoted JSON decimal strings agree in the captured baseline. Two explicitly
-ignored reference regression tests preserve the wider-decimal and raw-JSON
-disagreements; they are not counted as passing conformance.
+dynamic tags, and serialized offsets are supported. Decimal dominates real
+in arithmetic and numeric comparisons. Conditional/coalesce decimal branches
+must have matching types; implicit widening of those branches is not silently
+invented. `abs`, binning, floor, and ceiling retain decimals; real-valued math
+functions use the reference's numeric conversion path.
+
+Scalar and vector conversion are intentionally distinct. Scalar scientific
+constants are bounded below `1E+38` and truncate fractional resolution beyond
+`1E-37`; vector string conversion retains the full exponent range.
+`extract_json(..., typeof(decimal))` preserves quoted decimal strings and exact
+long tokens. Fractional scalar tokens use a 17-digit binary64 accumulator,
+while vector tokens use 19 decimal significant digits. Thus the captured
+`9007199254740993.123456789` example yields `9007199254740992` in scalar
+evaluation and `9007199254740993.123` from a string column. Scalar subqueries
+retain scalar semantics even when their physical values arrive as Arrow arrays.
+These previously ignored disagreements are now regular conformance fixtures.
 Decimal table ranges currently error rather than silently casting their bounds
 and steps to real.
 
@@ -770,12 +781,12 @@ representations and continue to ignore nulls.
 
 ## Opt-in Kusto reference checks
 
-The conformance suite in `tests/conformance.rs` runs 30 synthetic inline-data
+The conformance suite in `tests/conformance.rs` runs 49 synthetic inline-data
 fixtures locally by default, comparing exact column names and row multisets
 against results captured from the public Kusto help cluster (`Samples`) through
 Azure MCP on 2026-10-25. It covers counts/nulls, expansion, per-row/per-key
 queries, scans, hierarchical tops, schema-declared plugins, scalar subqueries,
-ranges, GUIDs, parsing, bounded decimal arithmetic, rich nested tags,
+ranges, GUIDs, parsing, decimal128 arithmetic/conversion/special values, rich nested tags,
 term/IP/encoding helpers, documented NaN defaults, and series shape. The
 captured baseline exposed and corrected boolean text casing, raw URL/query
 semantics, regex edge matching, base64/percent-decoding differences, and native
@@ -783,10 +794,11 @@ versus dynamic type names/null reporting.
 Engine build metadata was not available through the query router.
 
 This is a finite historical reference baseline, **not full Kusto certification**
-or a new remote execution on every CI run. Wider decimal precision/range and
-raw-number JSON rounding remain explicit differences in separately ignored
-reference regressions. The portable decimal JSON fixture uses a quoted string;
-the rich-value fixture uses runtime packing rather than decimal syntax inside
+or a new remote execution on every CI run. The two formerly ignored decimal
+precision/JSON regressions are now included in ordinary comparisons. Quoted
+and numeric JSON, scalar and vector evaluation, exponent boundaries, NaNs,
+infinities, signed zero, and arithmetic promotion have explicit fixtures.
+The rich-value fixture uses runtime packing rather than decimal syntax inside
 `dynamic(...)`. Fixture aliases and scan-step names avoid reserved keywords.
 
 To compare the same fixtures against an explicitly configured reference:

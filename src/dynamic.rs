@@ -31,6 +31,7 @@ const GUID: i8 = 9;
 const DECIMAL: i8 = 10;
 const RICH_ARRAY: i8 = 11;
 const RICH_BAG: i8 = 12;
+const DECIMAL128: i8 = 13;
 pub(crate) const MAX_COLLECTION_SIZE: usize = 1_048_576;
 
 static FIELDS: LazyLock<UnionFields> = LazyLock::new(|| {
@@ -79,7 +80,7 @@ static FIELDS: LazyLock<UnionFields> = LazyLock::new(|| {
         ),
         (
             DECIMAL,
-            Arc::new(Field::new("decimal", crate::decimal::data_type(), false)),
+            Arc::new(Field::new("decimal", crate::decimal::legacy_type(), false)),
         ),
         (
             RICH_ARRAY,
@@ -97,6 +98,10 @@ static FIELDS: LazyLock<UnionFields> = LazyLock::new(|| {
                     [("datafusion_kql:dynamic_encoding".into(), "typed-v1".into())],
                 )),
             ),
+        ),
+        (
+            DECIMAL128,
+            Arc::new(Field::new("decimal128", crate::decimal::data_type(), false)),
         ),
     ])
 });
@@ -157,7 +162,7 @@ enum Value<'a> {
     Datetime(i64),
     Timespan(i64),
     Guid([u8; 16]),
-    Decimal(rust_decimal::Decimal),
+    Decimal(crate::decimal::Decimal),
     RichArray(&'a str),
     RichBag(&'a str),
 }
@@ -261,6 +266,7 @@ struct Builder {
     decimals: Decimal256Builder,
     rich_arrays: StringBuilder,
     rich_bags: StringBuilder,
+    decimal128s: crate::decimal::Builder,
 }
 
 impl Builder {
@@ -278,9 +284,10 @@ impl Builder {
             datetimes: datafusion::arrow::array::TimestampNanosecondBuilder::new(),
             timespans: datafusion::arrow::array::DurationNanosecondBuilder::new(),
             guids: FixedSizeBinaryBuilder::new(16),
-            decimals: Decimal256Builder::new().with_data_type(crate::decimal::data_type()),
+            decimals: Decimal256Builder::new().with_data_type(crate::decimal::legacy_type()),
             rich_arrays: StringBuilder::new(),
             rich_bags: StringBuilder::new(),
+            decimal128s: crate::decimal::Builder::new(capacity),
         }
     }
 
@@ -327,8 +334,8 @@ impl Builder {
                 (GUID, self.guids.len() - 1)
             }
             Value::Decimal(value) => {
-                self.decimals.append_value(crate::decimal::encode(value));
-                (DECIMAL, self.decimals.len() - 1)
+                self.decimal128s.append(Some(value))?;
+                (DECIMAL128, self.decimal128s.len() - 1)
             }
             Value::RichArray(value) => {
                 self.rich_arrays.append_value(value);
@@ -399,6 +406,7 @@ impl Builder {
             Arc::new(self.decimals.finish()),
             Arc::new(self.rich_arrays.finish()),
             Arc::new(self.rich_bags.finish()),
+            self.decimal128s.finish()?,
         ];
         Ok(Arc::new(UnionArray::try_new(
             FIELDS.clone(),
@@ -472,13 +480,10 @@ impl Input {
                     .try_into()
                     .map_err(|_| failure("invalid guid width"))?,
             ),
-            DataType::Decimal256(_, scale) => {
-                let value = downcast::<Decimal256Array>(&self.array)?.value(row);
-                Value::Decimal(
-                    crate::decimal::decode(value, *scale as u32)
-                        .ok_or_else(|| failure("invalid native decimal dynamic value"))?,
-                )
-            }
+            ty if crate::decimal::is_decimal(ty) => Value::Decimal(
+                crate::decimal::value(&self.array, row)?
+                    .ok_or_else(|| failure("invalid native decimal dynamic value"))?,
+            ),
             ty => {
                 return Err(failure(format!(
                     "cannot use Arrow {ty} as a dynamic scalar"
@@ -521,6 +526,10 @@ fn child_value(array: &ArrayRef, row: usize, id: i8) -> Result<Value<'_>> {
         }
         RICH_ARRAY => Value::RichArray(downcast::<StringArray>(array)?.value(row)),
         RICH_BAG => Value::RichBag(downcast::<StringArray>(array)?.value(row)),
+        DECIMAL128 => Value::Decimal(
+            crate::decimal::value(array, row)?
+                .ok_or_else(|| failure("invalid decimal128 dynamic value"))?,
+        ),
         _ => return Err(failure("unknown KQL dynamic type id")),
     })
 }
@@ -993,6 +1002,9 @@ fn convert(input: &Input, ty: &DataType, type_only: bool) -> Result<ArrayRef> {
     };
     if !is_dynamic(input.array.data_type()) {
         if crate::decimal::is_decimal(ty) {
+            if type_only && !crate::decimal::is_decimal(input.array.data_type()) {
+                return Ok(new_null_array(ty, input.array.len()));
+            }
             return crate::decimal::convert_array(&input.array);
         }
         if crate::decimal::is_decimal(input.array.data_type())
@@ -1000,6 +1012,14 @@ fn convert(input: &Input, ty: &DataType, type_only: bool) -> Result<ArrayRef> {
             && !type_only
         {
             return crate::decimal::format_array(&input.array);
+        }
+        if crate::decimal::is_decimal(input.array.data_type())
+            && matches!(
+                ty,
+                DataType::Int32 | DataType::Int64 | DataType::Float64 | DataType::Boolean
+            )
+        {
+            return crate::decimal::cast_array(&input.array, ty);
         }
         if *ty == crate::guid::data_type() {
             return crate::guid::parse_array(&input.array);
@@ -1032,12 +1052,28 @@ fn convert(input: &Input, ty: &DataType, type_only: bool) -> Result<ArrayRef> {
             casted.push(Arc::new(output.finish()));
             continue;
         }
-        if *ty == DataType::Utf8 && id == DECIMAL && !type_only {
+        if *ty == DataType::Utf8 && matches!(id, DECIMAL | DECIMAL128) && !type_only {
             casted.push(crate::decimal::format_array(source)?);
             continue;
         }
-        if crate::decimal::is_decimal(ty) && !type_only {
-            casted.push(crate::decimal::convert_array(source)?);
+        if crate::decimal::is_decimal(ty) {
+            casted.push(
+                if id == NULL || type_only && !matches!(id, DECIMAL | DECIMAL128) {
+                    new_null_array(ty, source.len())
+                } else {
+                    crate::decimal::convert_array(source)?
+                },
+            );
+            continue;
+        }
+        if matches!(id, DECIMAL | DECIMAL128)
+            && !type_only
+            && matches!(
+                ty,
+                DataType::Int32 | DataType::Int64 | DataType::Float64 | DataType::Boolean
+            )
+        {
+            casted.push(crate::decimal::cast_array(source, ty)?);
             continue;
         }
         if *ty == DataType::Utf8 && id == GUID && !type_only {

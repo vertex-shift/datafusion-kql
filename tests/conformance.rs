@@ -19,7 +19,6 @@ struct Fixture {
     rows: &'static [&'static [&'static str]],
 }
 // Captured through Azure MCP from help.kusto.windows.net/Samples on 2026-10-25.
-// The separately ignored decimal regressions below are not covered by this baseline.
 const FIXTURES: &[Fixture] = &[
     Fixture {
         name: "exact-decimal-arithmetic",
@@ -400,6 +399,264 @@ const FIXTURES: &[Fixture] = &[
             "long", "real", "bool", "string", "datetime", "guid", "decimal", "int", "long", "null",
         ]],
     },
+    Fixture {
+        name: "decimal-runtime-range-and-precision",
+        query: "print maximum=tostring(decimal(max)),third=tostring(decimal(1)/decimal(3)),overflow=tostring(isnull(decimal(max)+1))",
+        columns: &["maximum", "third", "overflow"],
+        rows: &[&["1E+38", "0.3333333333333333333333333333333333", "False"]],
+    },
+    Fixture {
+        name: "decimal-json-number-rounding",
+        query: r#"print value=tostring(extract_json('$.amount','{"amount":9007199254740993.123456789}',typeof(decimal)))"#,
+        columns: &["value"],
+        rows: &[&["9007199254740992"]],
+    },
+    Fixture {
+        name: "decimal-runtime-string-conversion",
+        query: r#"datatable(s:string)['1e38','1e100','1e-38','1e-100',
+            '99999999999999999999999999999999999999',
+            '1.123456789012345678901234567890123456789',
+            '0.00000000000000000000000000000000000001']
+            | project s,value=tostring(todecimal(s)),TypeName=gettype(todecimal(s))"#,
+        columns: &["s", "value", "TypeName"],
+        rows: &[
+            &["1e38", "1E+38", "decimal"],
+            &["1e100", "1E+100", "decimal"],
+            &["1e-38", "1E-38", "decimal"],
+            &["1e-100", "1E-100", "decimal"],
+            &["99999999999999999999999999999999999999", "1E+38", "decimal"],
+            &[
+                "1.123456789012345678901234567890123456789",
+                "1.123456789012345678901234567890123",
+                "decimal",
+            ],
+            &[
+                "0.00000000000000000000000000000000000001",
+                "1E-38",
+                "decimal",
+            ],
+        ],
+    },
+    Fixture {
+        name: "decimal-scalar-json-precision-matrix",
+        query: r#"print A=tostring(extract_json('$','9007199254740993',typeof(decimal))),
+            B=tostring(extract_json('$','9007199254740993.123456789',typeof(decimal))),
+            C=tostring(extract_json('$','9007199254740993.9',typeof(decimal))),
+            D=tostring(extract_json('$','9007199254740994.25',typeof(decimal))),
+            E=tostring(extract_json('$','-9007199254740993.123456789',typeof(decimal))),
+            F=tostring(extract_json('$','0.12345678901234567890123456789',typeof(decimal))),
+            G=tostring(extract_json('$','1.0000000000000000000000000001',typeof(decimal))),
+            H=tostring(extract_json('$','1.25e2',typeof(decimal)))"#,
+        columns: &["A", "B", "C", "D", "E", "F", "G", "H"],
+        rows: &[&[
+            "9007199254740993",
+            "9007199254740992",
+            "9007199254740994",
+            "9007199254740994",
+            "-9007199254740992",
+            "0.12345678901234568",
+            "1",
+            "125",
+        ]],
+    },
+    Fixture {
+        name: "decimal-vector-json-precision-matrix",
+        query: r#"datatable(s:string)['{"amount":9007199254740993.123456789}',
+            '{"amount":"9007199254740993.123456789"}','{"amount":9007199254740993}',
+            '{"amount":9007199254740995}','{"amount":0.12345678901234567890123456789}']
+            | project s,value=tostring(extract_json('$.amount',s,typeof(decimal))),
+                jsonValue=tostring(parse_json(s).amount),TypeName=gettype(parse_json(s).amount)"#,
+        columns: &["s", "value", "jsonValue", "TypeName"],
+        rows: &[
+            &[
+                r#"{"amount":9007199254740993.123456789}"#,
+                "9007199254740993.123",
+                "9007199254740994.0",
+                "double",
+            ],
+            &[
+                r#"{"amount":"9007199254740993.123456789"}"#,
+                "9007199254740993.123456789",
+                "9007199254740993.123456789",
+                "string",
+            ],
+            &[
+                r#"{"amount":9007199254740993}"#,
+                "9007199254740993",
+                "9007199254740993",
+                "long",
+            ],
+            &[
+                r#"{"amount":9007199254740995}"#,
+                "9007199254740995",
+                "9007199254740995",
+                "long",
+            ],
+            &[
+                r#"{"amount":0.12345678901234567890123456789}"#,
+                "0.1234567890123456789",
+                "0.12345678901234568",
+                "double",
+            ],
+        ],
+    },
+    Fixture {
+        name: "decimal-formatting-and-normalization",
+        query: "print A=tostring(decimal(1.0)),B=tostring(decimal(1.2300)),C=tostring(decimal(1.25)*decimal(2.4)),D=tostring(decimal(0.0000001)),E=tostring(decimal(0.000001)),F=tostring(decimal(1e5)),G=tostring(decimal(1)/decimal(3)),H=tostring(decimal(100000)+decimal(0))",
+        columns: &["A", "B", "C", "D", "E", "F", "G", "H"],
+        rows: &[&[
+            "1",
+            "1.23",
+            "3",
+            "1E-7",
+            "0.000001",
+            "100000",
+            "0.3333333333333333333333333333333333",
+            "100000",
+        ]],
+    },
+    Fixture {
+        name: "decimal-scientific-frontend-conversion",
+        query: "print A=tostring(decimal(1e-38)),B=tostring(decimal(1e-100)),C=tostring(decimal(9e28))",
+        columns: &["A", "B", "C"],
+        rows: &[&["0", "0", "90000000000000000000000000000"]],
+    },
+    Fixture {
+        name: "decimal-real-arithmetic-promotion",
+        query: "print A=gettype(decimal(1.5)+real(0.25)),B=tostring(decimal(1.5)+real(0.25)),C=tostring(decimal(0.1)+real(0.2)),D=tostring(todecimal(real(0.1))),G=gettype(decimal(1)/real(3))",
+        columns: &["A", "B", "C", "D", "G"],
+        rows: &[&["decimal", "1.75", "0.3", "0.1", "decimal"]],
+    },
+    Fixture {
+        name: "decimal-math-coercion-and-rounding",
+        query: "print A=tostring(round(decimal(2.5))),B=tostring(round(decimal(-2.5))),C=tostring(round(decimal(1.25),1)),D=gettype(round(decimal(1.25),1)),E=gettype(abs(decimal(-1.25))),F=gettype(sign(decimal(-1.25))),G=tostring(round(decimal(9007199254740993.25),0))",
+        columns: &["A", "B", "C", "D", "E", "F", "G"],
+        rows: &[&[
+            "3.0",
+            "-3.0",
+            "1.3",
+            "real",
+            "decimal",
+            "real",
+            "9007199254740992.0",
+        ]],
+    },
+    Fixture {
+        name: "decimal-runtime-exponent-boundaries",
+        query: "datatable(s:string)['1e6144','9.999999999999999999999999999999999e6144','1e6145','1e-6176','1e-6177'] | project s,value=tostring(todecimal(s)),Missing=tostring(isnull(todecimal(s)))",
+        columns: &["s", "value", "Missing"],
+        rows: &[
+            &["1e6144", "1E+6144", "False"],
+            &[
+                "9.999999999999999999999999999999999e6144",
+                "9.999999999999999999999999999999999E+6144",
+                "False",
+            ],
+            &["1e6145", "Infinity", "False"],
+            &["1e-6176", "1E-6176", "False"],
+            &["1e-6177", "0", "False"],
+        ],
+    },
+    Fixture {
+        name: "decimal-vector-special-value-conversion",
+        query: "datatable(s:string)['NaN','nan','Infinity','-Infinity','inf','invalid'] | extend d=todecimal(s) | project s,value=tostring(d),Missing=tostring(isnull(d)),SelfEqual=tostring(d==d),Zero=tostring(d*decimal(0))",
+        columns: &["s", "value", "Missing", "SelfEqual", "Zero"],
+        rows: &[
+            &["NaN", "", "True", "", ""],
+            &["nan", "", "True", "", ""],
+            &["Infinity", "Infinity", "False", "True", "NaN"],
+            &["-Infinity", "-Infinity", "False", "True", "NaN"],
+            &["inf", "Infinity", "False", "True", "NaN"],
+            &["invalid", "", "True", "", ""],
+        ],
+    },
+    Fixture {
+        name: "decimal-vector-nan-comparisons",
+        query: "datatable(s:string)['Infinity','-Infinity'] | extend d=todecimal(s) | extend N=d*decimal(0) | project s,Text=tostring(N),Missing=tostring(isnull(N)),Eq=tostring(N==N),Ne=tostring(N!=N),Lt=tostring(N<decimal(0)),Gt=tostring(N>decimal(0)),ZeroDivision=tostring(decimal(0)/decimal(0))",
+        columns: &[
+            "s",
+            "Text",
+            "Missing",
+            "Eq",
+            "Ne",
+            "Lt",
+            "Gt",
+            "ZeroDivision",
+        ],
+        rows: &[
+            &[
+                "Infinity", "NaN", "False", "False", "True", "False", "False", "",
+            ],
+            &[
+                "-Infinity",
+                "NaN",
+                "False",
+                "False",
+                "True",
+                "False",
+                "False",
+                "",
+            ],
+        ],
+    },
+    Fixture {
+        name: "decimal-signed-zero-and-membership",
+        query: "datatable(s:string)['-0','0','Infinity','-Infinity'] | extend d=todecimal(s) | project s,Text=tostring(d),Eq=tostring(d==decimal(0)),Membership=tostring(d in(decimal(0))),Bool=tostring(tobool(d))",
+        columns: &["s", "Text", "Eq", "Membership", "Bool"],
+        rows: &[
+            &["-0", "-0", "True", "True", "False"],
+            &["0", "0", "True", "True", "False"],
+            &["Infinity", "Infinity", "False", "False", ""],
+            &["-Infinity", "-Infinity", "False", "False", ""],
+        ],
+    },
+    Fixture {
+        name: "decimal-nan-aggregate-propagation",
+        query: "datatable(s:string)['Infinity','1','0','-1'] | extend d=todecimal(s) | extend N=d*decimal(0) | summarize S=sum(N),A=avg(N),Lo=min(N),Hi=max(N),C=count_distinct(N) | project S=tostring(S),A=tostring(A),Lo=tostring(Lo),Hi=tostring(Hi),C=tostring(C)",
+        columns: &["S", "A", "Lo", "Hi", "C"],
+        rows: &[&["NaN", "NaN", "NaN", "NaN", "3"]],
+    },
+    Fixture {
+        name: "decimal-scalar-subquery-conversion",
+        query: r#"let T=datatable(s:string,j:string)['1e100','{"amount":9007199254740993.123456789}']; print Constant=tostring(todecimal('1e100')),Runtime=tostring(todecimal(toscalar(T | project s))),Json=tostring(extract_json('$.amount',toscalar(T | project j),typeof(decimal))),RealValue=tostring(toreal(decimal(9007199254740993.25)))"#,
+        columns: &["Constant", "Runtime", "Json", "RealValue"],
+        rows: &[&["", "", "9007199254740992", "9007199254740994.0"]],
+    },
+    Fixture {
+        name: "decimal-wide-frontend-literals",
+        query: "print A=tostring(decimal(99999999999999999999999999999999999999)),B=tostring(decimal(1.123456789012345678901234567890123456789))",
+        columns: &["A", "B"],
+        rows: &[&["1E+38", "1.123456789012345678901234567890123"]],
+    },
+    Fixture {
+        name: "decimal-scalar-scientific-resolution",
+        query: "print A=tostring(decimal(6e-29)),B=tostring(decimal(9.9e-29)),C=tostring(decimal(1.234567890123456789012345678901234e-28)),D=tostring(decimal(1.123456789012345678901234567890123e0))",
+        columns: &["A", "B", "C", "D"],
+        rows: &[&[
+            "6E-29",
+            "9.9E-29",
+            "1.23456789E-28",
+            "1.123456789012345678901234567890123",
+        ]],
+    },
+    Fixture {
+        name: "decimal-scalar-scientific-truncation",
+        query: "print A=tostring(decimal(6e-38)),B=tostring(decimal(9.9e-38)),C=tostring(decimal(5e-38)),D=tostring(decimal(1.5e-37))",
+        columns: &["A", "B", "C", "D"],
+        rows: &[&["0", "0", "0", "1E-37"]],
+    },
+    Fixture {
+        name: "decimal-scientific-mantissa-normalization",
+        query: "print A=tostring(decimal(100000000000000e-30)),B=tostring(decimal(1.123456789012345678901234567890123e0)),C=tostring(todecimal('100000000000000e-30')),D=tostring(todecimal('1e29')),E=tostring(decimal(1000000000e28))",
+        columns: &["A", "B", "C", "D", "E"],
+        rows: &[&[
+            "1E-16",
+            "1.123456789012345678901234567890123",
+            "1E-16",
+            "100000000000000000000000000000",
+            "1E+37",
+        ]],
+    },
 ];
 
 fn endpoint(uri: &str) -> TestResult<(String, bool)> {
@@ -698,28 +955,6 @@ async fn captured_reference_fixtures_match_locally() -> TestResult<()> {
         captured(&ctx, fixture).await?;
     }
     Ok(())
-}
-
-#[tokio::test]
-#[ignore = "known gap: the current bounded decimal profile differs from Kusto runtime range/precision"]
-async fn reference_decimal_range_and_precision_gap() -> TestResult<()> {
-    captured(&SessionContext::new(), &Fixture {
-        name: "decimal-runtime-range-and-precision",
-        query: "print maximum=tostring(decimal(max)),third=tostring(decimal(1)/decimal(3)),overflow=tostring(isnull(decimal(max)+1))",
-        columns: &["maximum", "third", "overflow"],
-        rows: &[&["1E+38", "0.3333333333333333333333333333333333", "False"]],
-    }).await
-}
-
-#[tokio::test]
-#[ignore = "known difference: exact raw JSON decimal extraction does not reproduce Kusto binary64 rounding"]
-async fn reference_decimal_json_number_rounding_gap() -> TestResult<()> {
-    captured(&SessionContext::new(), &Fixture {
-        name: "decimal-json-number-rounding",
-        query: r#"print value=tostring(extract_json('$.amount','{"amount":9007199254740993.123456789}',typeof(decimal)))"#,
-        columns: &["value"],
-        rows: &[&["9007199254740992"]],
-    }).await
 }
 
 #[test]

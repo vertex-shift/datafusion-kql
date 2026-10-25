@@ -32,6 +32,9 @@ pub(crate) fn canonical(ty: &DataType) -> DataType {
 }
 
 pub(crate) fn type_names(ty: &DataType) -> (String, String) {
+    if crate::decimal::is_decimal(ty) {
+        return ("decimal".into(), "System.Decimal".into());
+    }
     let (name, system) = match ty {
         DataType::Dictionary(_, value) => return type_names(value),
         DataType::Boolean => ("bool", "System.Boolean"),

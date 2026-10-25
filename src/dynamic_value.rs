@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::decimal::Decimal;
 use datafusion::common::{DataFusionError, Result};
-use rust_decimal::Decimal;
 use serde_json::{Map, Number, Value as Json, json};
 
 use crate::dynamic::MAX_COLLECTION_SIZE;
@@ -292,7 +292,7 @@ impl Node {
                 10 => Self::Decimal(
                     payload
                         .as_str()
-                        .and_then(crate::decimal::parse)
+                        .and_then(crate::decimal::parse_wire)
                         .ok_or_else(|| error("invalid typed decimal"))?,
                 ),
                 _ => return Err(error("unknown or invalid typed dynamic tag")),
@@ -339,7 +339,7 @@ mod tests {
         let value = Node::Array(vec![
             Node::Datetime(123),
             Node::Timespan(-1),
-            Node::Decimal(Decimal::MAX),
+            Node::Decimal(crate::decimal::literal("max").unwrap()),
             Node::Guid([7; 16]),
             Node::Real(f64::INFINITY),
             Node::Bag(BTreeMap::from([("v".into(), Node::String("1".into()))])),

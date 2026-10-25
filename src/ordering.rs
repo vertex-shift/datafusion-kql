@@ -17,6 +17,14 @@ use crate::ast::{self, BindingValue, ExprKind, Operator, Source};
 const HIDDEN: &str = "datafusion_kql:hidden";
 const ORDINAL: &str = "datafusion_kql:ordinal";
 
+pub(crate) fn sort_value(value: Expr, schema: &DFSchema) -> Result<Expr> {
+    Ok(if crate::decimal::is_decimal(&value.get_type(schema)?) {
+        crate::decimal::call(crate::decimal::Op::SortKey, vec![value])
+    } else {
+        value
+    })
+}
+
 pub(crate) fn hidden(field: &Field) -> bool {
     field
         .metadata()

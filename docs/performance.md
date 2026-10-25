@@ -70,6 +70,31 @@ operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
 
+## Measured 0.7 decimal128 workloads
+
+The wider decimal128 runtime was measured on 2026-10-25 on the same Apple
+M4/arm64 host, Rust 1.95.0, DataFusion 55.2.0, optimized bench profile, and four
+target partitions:
+
+```bash
+cargo bench --locked --bench kql -j 2 -- \
+  'workloads/(decimal_exact|rich_nested)' \
+  --warm-up-time 1 --measurement-time 3 --sample-size 30
+```
+
+| Benchmark | Criterion estimate | 95% confidence interval | Input rows/second |
+| --- | --- | --- | --- |
+| Exact decimal parse/add/sum, 100,000 rows | 8.90 ms | 8.71-9.14 ms | 11.24 million |
+| Rich nested pack/access/aggregate, 10,000 rows | 94.99 ms | 87.22-102.75 ms | 105,300 |
+
+The same exact totals/type checks and numeric SQL/KQL plan-equivalence assertion
+ran as preflight. Decimal execution measured faster than the bounded 0.6 profile
+(10.42 ms); the rich-value intervals overlap and Criterion detected no significant
+change. This is broader arithmetic semantics without a demonstrated throughput
+regression on these fixtures, not proof that every decimal query is faster.
+Rich nested processing remains substantially more expensive than primitive
+operations. Both runs reported timing outliers on the shared host.
+
 ## Measured 0.6 type and telemetry workloads
 
 These workloads were measured on 2026-10-25 on the same Apple M4/arm64 host,

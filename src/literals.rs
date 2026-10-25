@@ -50,11 +50,7 @@ pub(crate) fn literal_value(literal: &Literal, span: Span) -> Result<ScalarValue
                         let value = crate::decimal::literal(value).ok_or_else(|| {
                             Error::syntax("invalid or out-of-range decimal literal", span)
                         })?;
-                        ScalarValue::Decimal256(
-                            Some(crate::decimal::encode(value)),
-                            crate::decimal::PRECISION,
-                            crate::decimal::SCALE,
-                        )
+                        crate::decimal::scalar(Some(value))?
                     }
                     _ => ScalarValue::try_from_string(value.to_owned(), &data_type(*ty))?,
                 }

@@ -33,7 +33,9 @@ pub(crate) fn parameter_cast(
     if ty == ScalarType::Dynamic {
         return Ok(dynamic::call(Kernel::IntoDynamic, vec![value]));
     }
-    if ty == ScalarType::Decimal && (actual.is_numeric() || actual == DataType::Null) {
+    if ty == ScalarType::Decimal
+        && (actual.is_numeric() || crate::decimal::is_decimal(&actual) || actual == DataType::Null)
+    {
         return Ok(crate::decimal::call(
             crate::decimal::Op::Convert,
             vec![value],
@@ -85,6 +87,61 @@ pub(crate) fn parameter_cast(
 }
 
 impl Expressions<'_> {
+    fn decimal_operands(
+        &self,
+        values: Vec<Expr>,
+        schema: &DFSchema,
+        span: Span,
+    ) -> Result<Vec<Expr>> {
+        let types = values
+            .iter()
+            .map(|value| value.get_type(schema))
+            .collect::<datafusion::common::Result<Vec<_>>>()?;
+        if !types.iter().any(crate::decimal::is_decimal) {
+            return Ok(values);
+        }
+        if types
+            .iter()
+            .any(|ty| !(ty.is_numeric() || crate::decimal::is_decimal(ty) || *ty == DataType::Null))
+        {
+            return Err(Error::syntax("decimal operands must be numeric", span));
+        }
+        Ok(values
+            .into_iter()
+            .zip(types)
+            .map(|(value, ty)| {
+                if ty == crate::decimal::data_type() {
+                    value
+                } else {
+                    crate::decimal::call(crate::decimal::Op::Convert, vec![value])
+                }
+            })
+            .collect())
+    }
+
+    fn decimal_results(
+        &self,
+        values: Vec<Expr>,
+        schema: &DFSchema,
+        span: Span,
+    ) -> Result<Vec<Expr>> {
+        let types = values
+            .iter()
+            .map(|value| value.get_type(schema))
+            .collect::<datafusion::common::Result<Vec<_>>>()?;
+        if types.iter().any(crate::decimal::is_decimal)
+            && types
+                .iter()
+                .any(|ty| !crate::decimal::is_decimal(ty) && *ty != DataType::Null)
+        {
+            return Err(Error::syntax(
+                "decimal conditional results must have matching types",
+                span,
+            ));
+        }
+        self.decimal_operands(values, schema, span)
+    }
+
     pub fn scalar(&self, expr: &ast::Expr, schema: &DFSchema) -> Result<Expr> {
         let result = self.lower(expr, schema, false)?;
         check_expression(&result)?;
@@ -207,7 +264,9 @@ impl Expressions<'_> {
                 match op {
                     UnaryOp::Not => value.not(),
                     UnaryOp::Negate => {
-                        if matches!(value.get_type(schema)?, DataType::Duration(_)) {
+                        if crate::decimal::is_decimal(&value.get_type(schema)?) {
+                            crate::decimal::call(crate::decimal::Op::Negate, vec![value])
+                        } else if matches!(value.get_type(schema)?, DataType::Duration(_)) {
                             let ty = DataType::Duration(TimeUnit::Nanosecond);
                             cast(cast(cast(value, ty.clone()), DataType::Int64).neg(), ty)
                         } else {
@@ -216,7 +275,9 @@ impl Expressions<'_> {
                     }
                     UnaryOp::Plus => {
                         let ty = value.get_type(schema)?;
-                        if !ty.is_numeric() && !matches!(ty, DataType::Duration(_) | DataType::Null)
+                        if !ty.is_numeric()
+                            && !crate::decimal::is_decimal(&ty)
+                            && !matches!(ty, DataType::Duration(_) | DataType::Null)
                         {
                             return Err(Error::syntax(
                                 "unary plus requires a number or timespan",
@@ -240,8 +301,8 @@ impl Expressions<'_> {
                 negated,
                 case_insensitive,
             } => {
-                let value = self.lower(expr, schema, false)?;
-                let lowered = values
+                let mut value = self.lower(expr, schema, false)?;
+                let mut lowered = values
                     .iter()
                     .map(|item| {
                         let value = self.lower(item, &DFSchema::empty(), false)?;
@@ -273,6 +334,27 @@ impl Expressions<'_> {
                         &item.get_type(&DFSchema::empty())?,
                         expr.span,
                     )?;
+                }
+                let mut operands = vec![value];
+                operands.extend(lowered);
+                let mut operands = self
+                    .decimal_operands(operands, schema, expr.span)?
+                    .into_iter();
+                value = operands.next().expect("membership has a left operand");
+                lowered = operands
+                    .map(|item| self.constant(item, expr.span).map(lit))
+                    .collect::<Result<Vec<_>>>()?;
+                if crate::decimal::is_decimal(&value.get_type(schema)?) {
+                    if *case_insensitive {
+                        return Err(Error::syntax(
+                            "case-insensitive membership requires strings",
+                            expr.span,
+                        ));
+                    }
+                    let mut arguments = vec![value];
+                    arguments.extend(lowered);
+                    let result = crate::decimal::call(crate::decimal::Op::Contains, arguments);
+                    return Ok(if *negated { result.not() } else { result });
                 }
                 let mut contains_null = false;
                 let mut list = Vec::with_capacity(values.len());
@@ -377,6 +459,15 @@ impl Expressions<'_> {
                 {
                     high = self.arithmetic(low.clone(), BinaryOp::Add, high, schema, expr.span)?;
                 }
+                let [value, low, high] = self
+                    .decimal_operands(vec![value, low, high], schema, expr.span)?
+                    .try_into()
+                    .expect("between has three operands");
+                if crate::decimal::is_decimal(&value.get_type(schema)?) {
+                    let result =
+                        crate::decimal::call(crate::decimal::Op::Between, vec![value, low, high]);
+                    return Ok(if *negated { result.not() } else { result });
+                }
                 if *negated {
                     value.not_between(low, high)
                 } else {
@@ -408,6 +499,23 @@ impl Expressions<'_> {
         {
             return Ok(dynamic::call(
                 Kernel::Equal(op == B::NotEq),
+                vec![left, right],
+            ));
+        }
+        let (left, right) = if matches!(op, B::Eq | B::NotEq | B::Lt | B::LtEq | B::Gt | B::GtEq) {
+            let [left, right] = self
+                .decimal_operands(vec![left, right], schema, right_span)?
+                .try_into()
+                .expect("comparison has two operands");
+            (left, right)
+        } else {
+            (left, right)
+        };
+        if matches!(op, B::Eq | B::NotEq | B::Lt | B::LtEq | B::Gt | B::GtEq)
+            && crate::decimal::is_decimal(&left.get_type(schema)?)
+        {
+            return Ok(crate::decimal::call(
+                crate::decimal::Op::Compare(op),
                 vec![left, right],
             ));
         }
@@ -613,17 +721,12 @@ impl Expressions<'_> {
         let left_type = left.get_type(schema)?;
         let right_type = right.get_type(schema)?;
         if crate::decimal::is_decimal(&left_type) || crate::decimal::is_decimal(&right_type) {
-            if left_type.is_floating() || right_type.is_floating() {
-                return self.arithmetic(
-                    cast(left, DataType::Float64),
-                    op,
-                    cast(right, DataType::Float64),
-                    schema,
-                    span,
-                );
-            }
-            if !(left_type.is_numeric() || left_type == DataType::Null)
-                || !(right_type.is_numeric() || right_type == DataType::Null)
+            if !(left_type.is_numeric()
+                || crate::decimal::is_decimal(&left_type)
+                || left_type == DataType::Null)
+                || !(right_type.is_numeric()
+                    || crate::decimal::is_decimal(&right_type)
+                    || right_type == DataType::Null)
             {
                 return Err(Error::syntax(
                     "decimal arithmetic requires numeric operands",
@@ -719,6 +822,11 @@ impl Expressions<'_> {
     }
 
     fn access(&self, value: Expr, index: Expr, schema: &DFSchema) -> Result<Expr> {
+        if crate::decimal::is_decimal(&value.get_type(schema)?) {
+            return Err(Error::Plan(
+                "decimal values do not have properties or indices".into(),
+            ));
+        }
         match value.get_type(schema)? {
             ty if dynamic::is_dynamic(&ty) => Ok(dynamic::call(Kernel::Get, vec![value, index])),
             DataType::Struct(_) => self.function("get_field", vec![value, index]),
@@ -1325,7 +1433,11 @@ impl Expressions<'_> {
             }
             "iff" | "iif" => {
                 arity(3)?;
-                when(values[0].clone(), values[1].clone()).otherwise(values[2].clone())?
+                let [yes, no] = self
+                    .decimal_results(vec![values[1].clone(), values[2].clone()], schema, span)?
+                    .try_into()
+                    .expect("conditional has two result branches");
+                when(values[0].clone(), yes).otherwise(no)?
             }
             "case" => {
                 if values.len() < 3 || values.len().is_multiple_of(2) {
@@ -1333,6 +1445,18 @@ impl Expressions<'_> {
                         "case expects condition/value pairs followed by a default value",
                         span,
                     ));
+                }
+                let mut values = values;
+                let indices = (1..values.len())
+                    .filter(|i| i % 2 == 1 || *i == values.len() - 1)
+                    .collect::<Vec<_>>();
+                let results = self.decimal_results(
+                    indices.iter().map(|i| values[*i].clone()).collect(),
+                    schema,
+                    span,
+                )?;
+                for (index, result) in indices.into_iter().zip(results) {
+                    values[index] = result;
                 }
                 let mut builder = when(values[0].clone(), values[1].clone());
                 for pair in values[2..values.len() - 1].as_chunks::<2>().0 {
@@ -1402,6 +1526,9 @@ impl Expressions<'_> {
                 if values[0].get_type(schema)? == crate::guid::data_type() {
                     return Ok(lit(ScalarValue::try_from(&data_type(ty))?));
                 }
+                if crate::decimal::is_decimal(&values[0].get_type(schema)?) {
+                    return Ok(crate::decimal::cast(values[0].clone(), data_type(ty)));
+                }
                 try_cast(values[0].clone(), data_type(ty))
             }
             "bool" | "boolean" | "int" | "long" | "real" | "double" | "string" => {
@@ -1419,7 +1546,11 @@ impl Expressions<'_> {
                         ],
                     )?
                 } else {
-                    try_cast(values[0].clone(), ty)
+                    if crate::decimal::is_decimal(&values[0].get_type(schema)?) {
+                        crate::decimal::cast(values[0].clone(), ty)
+                    } else {
+                        try_cast(values[0].clone(), ty)
+                    }
                 }
             }
             "coalesce" => {
@@ -1452,7 +1583,7 @@ impl Expressions<'_> {
                     nonempty.push(lit(""));
                     self.function("coalesce", nonempty)?
                 } else {
-                    self.function("coalesce", values)?
+                    self.function("coalesce", self.decimal_results(values, schema, span)?)?
                 }
             }
             "substring" => {
@@ -1500,10 +1631,65 @@ impl Expressions<'_> {
                         span,
                     ));
                 }
-                let function =
-                    self.state.scalar_functions().get(name).ok_or_else(|| {
-                        Error::unsupported(format!("scalar function '{name}'"), span)
-                    })?;
+                if name == "abs"
+                    && values.len() == 1
+                    && crate::decimal::is_decimal(&values[0].get_type(schema)?)
+                {
+                    return Ok(crate::decimal::call(crate::decimal::Op::Abs, values));
+                }
+                let values = if matches!(
+                    name,
+                    "sqrt"
+                        | "exp"
+                        | "ln"
+                        | "log"
+                        | "log2"
+                        | "log10"
+                        | "pow"
+                        | "power"
+                        | "sin"
+                        | "cos"
+                        | "tan"
+                        | "asin"
+                        | "acos"
+                        | "atan"
+                        | "atan2"
+                        | "sinh"
+                        | "cosh"
+                        | "tanh"
+                        | "asinh"
+                        | "acosh"
+                        | "atanh"
+                        | "cot"
+                        | "degrees"
+                        | "radians"
+                        | "isnan"
+                        | "isinf"
+                        | "isfinite"
+                        | "round"
+                        | "trunc"
+                        | "signum"
+                        | "sign"
+                ) {
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            Ok(if crate::decimal::is_decimal(&value.get_type(schema)?) {
+                                crate::decimal::call(crate::decimal::Op::ImplicitReal, vec![value])
+                            } else {
+                                value
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?
+                } else {
+                    values
+                };
+                let native_name = if name == "sign" { "signum" } else { name };
+                let function = self
+                    .state
+                    .scalar_functions()
+                    .get(native_name)
+                    .ok_or_else(|| Error::unsupported(format!("scalar function '{name}'"), span))?;
                 function.call(values)
             }
         })
@@ -1576,8 +1762,12 @@ impl Expressions<'_> {
         if crate::decimal::is_decimal(&ty) {
             let size_type = size.get_type(schema)?;
             let origin_type = origin.get_type(schema)?;
-            if !(size_type.is_numeric() || size_type == DataType::Null)
-                || !(origin_type.is_numeric() || origin_type == DataType::Null)
+            if !(size_type.is_numeric()
+                || crate::decimal::is_decimal(&size_type)
+                || size_type == DataType::Null)
+                || !(origin_type.is_numeric()
+                    || crate::decimal::is_decimal(&origin_type)
+                    || origin_type == DataType::Null)
             {
                 return Err(Error::syntax(
                     "decimal bin_at requires numeric size and origin",
@@ -1670,7 +1860,10 @@ impl Expressions<'_> {
     fn bin(&self, value: Expr, size: Expr, schema: &DFSchema, span: Span) -> Result<Expr> {
         let ty = value.get_type(schema)?;
         if crate::decimal::is_decimal(&ty) {
-            if !size.get_type(schema)?.is_numeric() && size.get_type(schema)? != DataType::Null {
+            if !size.get_type(schema)?.is_numeric()
+                && !crate::decimal::is_decimal(&size.get_type(schema)?)
+                && size.get_type(schema)? != DataType::Null
+            {
                 return Err(Error::syntax("decimal bin requires a numeric size", span));
             }
             return Ok(crate::decimal::call(
