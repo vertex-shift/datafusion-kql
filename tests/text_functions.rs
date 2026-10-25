@@ -74,6 +74,23 @@ async fn strrep_supports_delimiters_and_scalar_string_conversion() {
 }
 
 #[tokio::test]
+async fn native_and_dynamic_timespan_string_coercion_uses_one_clock_formatter() {
+    check("print a=tostring(3s),b=tostring(dynamic(3s)),c=strrep(dynamic(3s),2,' '),d=strcat('elapsed:',3s)",
+        &[&["00:00:03","00:00:03","00:00:03 00:00:03","elapsed:00:00:03"]]).await;
+    check(
+        "datatable(d:timespan)[timespan(null),-1s,1.25d,1ns,1tick] | project value=tostring(d)",
+        &[
+            &[""],
+            &["-00:00:01"],
+            &["1.06:00:00"],
+            &["00:00:00.000000001"],
+            &["00:00:00.0000001"],
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn strrep_is_not_the_dynamic_array_repeat_function() {
     check("print a=gettype(strrep('x',3)),b=gettype(repeat('x',3)),c=strrep('x',1025) | project a,b,n=strlen(c)",
         &[&["string","array","1025"]]).await;

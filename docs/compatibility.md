@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.6 implements the typed tabular and dynamic subset below. Keywords, function
+0.9 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -10,6 +10,7 @@ syntax/functions return an error; there is no SQL fallback.
 | Construct | Supported behavior |
 | --- | --- |
 | Tables | Existing session table providers; one-, two-, and three-component catalog paths |
+| Source selectors | Literal `table('T')`, `database('schema').T`, and `cluster('catalog').database('schema').table('T')`; local providers only |
 | Table patterns | `*` wildcards in the selected catalog/schema; discovery is limited to 1024 matching providers |
 | Escaped identifiers | `['column name']`, including literal dots |
 | `let` | Scalar expressions, tabular plans, aliases, nested lexical scopes |
@@ -25,6 +26,15 @@ Reusing one can rescan its inputs; use explicit `materialize` when needed.
 Scalar bindings retain expressions, matching KQL's binding
 rather than assignment model. Use a new pipe to reference a newly extended
 column; assignments in a single `extend` resolve against its input.
+
+Source selector spellings compile into the same local table references and add
+no execution operators or network connections. `database` selects a DataFusion
+schema and `cluster` selects a catalog; cluster selectors require an explicit
+database/schema selector. Names must be nonempty string literals. Extra scopes,
+datascope arguments, and dynamic table-name expressions are rejected, not
+silently redirected to another catalog. `table('name.with.dots')` preserves the
+name as one table identifier. Ordinary qualified paths and escaped names remain
+unchanged.
 
 ## Parameters and query-defined functions
 
@@ -192,8 +202,8 @@ Column[:type], ... [, pack_all()]` fixes the output schema; its optional
 provider fields are handled explicitly, and conflicting projected types require
 a declared type. Unknown columns/providers and output-name conflicts error.
 
-Qualified DataFusion catalogs/schemas and provider wildcards are supported;
-Kusto-service `cluster()`/`database()` discovery syntax is not. Predicate
+Qualified DataFusion catalogs/schemas, local source selectors, and provider
+wildcards are supported; remote Kusto-service discovery is not. Predicate
 coercion for a column with different input types follows each provider's native
 DataFusion analysis rather than promising complete Kusto cross-type inference.
 
@@ -202,12 +212,18 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
 - Literals: signed 64-bit integers, floating point, booleans, single/double quoted
   strings, backslash escapes, verbatim `@` strings, typed null constructors,
   `datetime(...)`, and `timespan(...)`.
+- Hexadecimal `0x`/`0X` integers are exact longs, including typed numeric
+  constructors and negative signed-minimum literals. Values outside the signed
+  64-bit range are rejected rather than wrapped. Boolean constructors also
+  accept case-insensitive TRUE/FALSE tokens without changing column-name casing.
 - GUID literals (`guid(...)`, `uuid(...)`, `uniqueid(...)`) and typed nulls;
   nullable `toguid`, volatile `new_guid`, and canonical `tostring` formatting.
 - Exact `decimal(...)` literals/conversion and nonfinite real literals
   `real(nan)`, `real(inf)`, and `real(-inf)`.
 - Timespans: `d`, `h`, `m`, `s`, `ms`, `us`, `ns`, `tick`/`ticks`,
-  `microsecond(s)`, decimal quantities, and `[d.]hh:mm:ss[.fraction]`.
+  spelled day/hour/minute/second/millisecond/microsecond units and plurals,
+  `milli`/`micro`, decimal quantities, and `[d.]hh:mm:ss[.fraction]`.
+  Typed constructors and conversions allow whitespace between number and unit.
   Bare numbers inside `timespan(...)` represent days. Conversion uses integer
   arithmetic, not floating point.
 - Arithmetic `+ - * / %`, comparisons `== != < <= > >=`, `and`, `or`, unary
@@ -242,6 +258,10 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
   scalar type constructors; failed conversions use Arrow `TRY_CAST` semantics.
   Native boolean string conversion uses `True`/`False`; dynamic JSON boolean
   string conversion uses `true`/`false`. Null string conversion yields `""`.
+  Native and root dynamic timespans share clock-style string conversion rather
+  than Arrow's ISO duration display: optional day prefix, `hh:mm:ss`, and
+  fractional ticks/nanoseconds when present. Raw Arrow duration columns retain
+  their ordinary Arrow display; typed collection JSON retains its existing encoding.
 - `strcat`, `strlen`, `tolower`, `toupper`, `substring` (zero-based),
   `replace_string`, `extract`, `extract_all`/`extractall`, `extract_json`/`extractjson`,
   `totimespan`/`totime`, and `todate`.
@@ -639,6 +659,9 @@ a string capture. Dynamic capture types are not supported; extract a string and
 apply `parse_json`. Patterns are bounded to 256 segments.
 
 Nullable datetime conversion accepts ISO-8601 and common US log timestamps.
+RFC-822/RFC-2822 and numeric-offset RFC-850 date forms are accepted by literals
+and conversions; explicit offsets normalize to UTC. This does not widen the
+nanosecond timestamp range or add timezone-name inference.
 Timespan conversion accepts the same unit/day-clock formats as literals.
 Regex execution uses Rust regex syntax, not unsupported .NET backreferences or
 look-around.
@@ -908,6 +931,9 @@ and numeric JSON, scalar and vector evaluation, exponent boundaries, NaNs,
 infinities, signed zero, and arithmetic promotion have explicit fixtures.
 The rich-value fixture uses runtime packing rather than decimal syntax inside
 `dynamic(...)`. Fixture aliases and scan-step names avoid reserved keywords.
+Nine additional source-based fixtures (four HLL, three string, two literal)
+exercise published examples/contracts locally and are included in the opt-in
+live runner. They are not counted among the 49 captured engine results.
 
 To compare the same fixtures against an explicitly configured reference:
 

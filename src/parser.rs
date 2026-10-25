@@ -387,6 +387,15 @@ impl<'a> Parser<'a, '_> {
         ) {
             return true;
         }
+        if matches!(
+            self.tokens[at].kind,
+            Kind::Ident("table" | "database" | "cluster")
+        ) && matches!(
+            self.tokens.get(at + 1).map(|token| &token.kind),
+            Some(Kind::LParen)
+        ) {
+            return true;
+        }
         if matches!(self.tokens[at].kind, Kind::Ident("range"))
             && !matches!(self.tokens.get(at + 1).map(|t| &t.kind), Some(Kind::LParen))
         {
@@ -522,6 +531,34 @@ impl<'a> Parser<'a, '_> {
                     pack_all,
                 }),
             }
+        } else if matches!(
+            self.current().kind,
+            Kind::Ident("table" | "database" | "cluster")
+        ) && matches!(
+            self.tokens.get(self.pos + 1).map(|token| &token.kind),
+            Some(Kind::LParen)
+        ) {
+            let start = self.current().span.start;
+            let mut name = Vec::new();
+            if self.eat_keyword("cluster") {
+                name.push(self.source_selector()?);
+                self.expect(Kind::Dot)?;
+                self.expect_keyword("database")?;
+                name.push(self.source_selector()?);
+                self.expect(Kind::Dot)?;
+            } else if self.eat_keyword("database") {
+                name.push(self.source_selector()?);
+                self.expect(Kind::Dot)?;
+            }
+            if self.eat_keyword("table") {
+                name.push(self.source_selector()?);
+            } else {
+                name.push(self.identifier()?);
+            }
+            Source::Table {
+                name,
+                span: Span::new(start, self.tokens[self.pos - 1].span.end),
+            }
         } else {
             let start = self.current().span.start;
             if self.at(&Kind::Star) {
@@ -564,6 +601,25 @@ impl<'a> Parser<'a, '_> {
         };
         self.nesting -= 1;
         Ok(source)
+    }
+
+    fn source_selector(&mut self) -> Result<String> {
+        self.expect(Kind::LParen)?;
+        let token = self.advance();
+        let Kind::String(value) = token.kind else {
+            return Err(Error::syntax(
+                "local table selectors require a literal string name",
+                token.span,
+            ));
+        };
+        if value.is_empty() {
+            return Err(Error::syntax(
+                "local table selector names cannot be empty",
+                token.span,
+            ));
+        }
+        self.expect(Kind::RParen)?;
+        Ok(value.into_owned())
     }
 
     fn source_arguments(&mut self) -> Result<Vec<CallArgument>> {
@@ -1753,7 +1809,9 @@ impl<'a> Parser<'a, '_> {
         let span = token.span;
         let kind = match token.kind {
             Kind::Number(text) => {
-                let literal = if text.contains(['.', 'e', 'E']) {
+                let literal = if text.starts_with("0x") || text.starts_with("0X") {
+                    Literal::Integer(crate::literals::integer(text, span)?)
+                } else if text.contains(['.', 'e', 'E']) {
                     let value: f64 = text
                         .parse()
                         .map_err(|_| Error::syntax("invalid real literal", span))?;
@@ -1762,9 +1820,7 @@ impl<'a> Parser<'a, '_> {
                     }
                     Literal::Real(value)
                 } else {
-                    Literal::Integer(text.parse().map_err(|_| {
-                        Error::syntax("integer literal is outside the signed 64-bit range", span)
-                    })?)
+                    Literal::Integer(crate::literals::integer(text, span)?)
                 };
                 ExprKind::Literal(literal)
             }
@@ -1817,7 +1873,21 @@ impl<'a> Parser<'a, '_> {
                     let mut args = Vec::new();
                     if !self.at(&Kind::RParen) {
                         loop {
-                            let argument = if matches!(self.current().kind, Kind::Ident(_))
+                            let argument = if matches!(name.as_str(), "bool" | "boolean")
+                                && matches!(self.current().kind,Kind::Ident(word) if word.eq_ignore_ascii_case("true") || word.eq_ignore_ascii_case("false"))
+                            {
+                                let token = self.advance();
+                                let Kind::Ident(word) = token.kind else {
+                                    unreachable!("boolean token was checked");
+                                };
+                                self.node(
+                                    ExprKind::Literal(Literal::Bool(
+                                        word.eq_ignore_ascii_case("true"),
+                                    )),
+                                    token.span,
+                                    1,
+                                )?
+                            } else if matches!(self.current().kind, Kind::Ident(_))
                                 && self
                                     .tokens
                                     .get(self.pos + 1)
@@ -1920,7 +1990,9 @@ impl<'a> Parser<'a, '_> {
             }
             Kind::Minus | Kind::Plus | Kind::Bang => {
                 if matches!(token.kind, Kind::Minus)
-                    && matches!(self.current().kind, Kind::Number("9223372036854775808"))
+                    && matches!(self.current().kind, Kind::Number(text) if text=="9223372036854775808" ||
+                        text.strip_prefix("0x").or_else(||text.strip_prefix("0X"))
+                            .and_then(|hex|u64::from_str_radix(hex,16).ok())==Some(1_u64<<63))
                 {
                     let end = self.advance().span.end;
                     return self.node(

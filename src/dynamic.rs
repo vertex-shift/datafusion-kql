@@ -1023,6 +1023,12 @@ fn convert(input: &Input, ty: &DataType, type_only: bool) -> Result<ArrayRef> {
         {
             return crate::decimal::format_array(&input.array);
         }
+        if *ty == DataType::Utf8
+            && matches!(input.array.data_type(), DataType::Duration(_))
+            && !type_only
+        {
+            return crate::text_functions::format_timespan(&input.array);
+        }
         if crate::decimal::is_decimal(input.array.data_type())
             && matches!(
                 ty,
@@ -1049,6 +1055,10 @@ fn convert(input: &Input, ty: &DataType, type_only: bool) -> Result<ArrayRef> {
     };
     for (id, _) in fields.iter() {
         let source = union.child(id);
+        if *ty == DataType::Utf8 && id == TIMESPAN && !type_only {
+            casted.push(crate::text_functions::format_timespan(source)?);
+            continue;
+        }
         if *ty == DataType::Utf8 && matches!(id, RICH_ARRAY | RICH_BAG) && !type_only {
             let strings = downcast::<StringArray>(source)?;
             let mut output = StringBuilder::new();

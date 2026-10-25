@@ -115,6 +115,48 @@ pub(crate) fn timespan(value: Expr) -> Expr {
     .call(vec![value])
 }
 
+pub(crate) fn format_timespan(array: &ArrayRef) -> Result<ArrayRef> {
+    let values = array
+        .as_any()
+        .downcast_ref::<DurationNanosecondArray>()
+        .ok_or_else(|| {
+            DataFusionError::Internal("timespan text requires nanosecond duration".into())
+        })?;
+    let mut output = StringBuilder::new();
+    for value in values {
+        let Some(value) = value else {
+            output.append_value("");
+            continue;
+        };
+        let absolute = value.unsigned_abs();
+        let days = absolute / 86_400_000_000_000;
+        let mut text = if value < 0 {
+            "-".to_owned()
+        } else {
+            String::new()
+        };
+        if days != 0 {
+            text.push_str(&format!("{days}."));
+        }
+        text.push_str(&format!(
+            "{:02}:{:02}:{:02}",
+            absolute / 3_600_000_000_000 % 24,
+            absolute / 60_000_000_000 % 60,
+            absolute / 1_000_000_000 % 60
+        ));
+        let fraction = absolute % 1_000_000_000;
+        if fraction != 0 {
+            if fraction.is_multiple_of(100) {
+                text.push_str(&format!(".{:07}", fraction / 100));
+            } else {
+                text.push_str(&format!(".{fraction:09}"));
+            }
+        }
+        output.append_value(text);
+    }
+    Ok(Arc::new(output.finish()))
+}
+
 pub(crate) fn replace_regex(
     source: Expr,
     pattern: String,
@@ -187,7 +229,8 @@ fn find(source: &str, needle: &str, start: i64, length: i64, occurrence: i64) ->
     if length < -1 || occurrence <= 0 {
         return None;
     }
-    let count = if source.is_ascii() {
+    let ascii = source.is_ascii();
+    let count = if ascii {
         source.len()
     } else {
         source.chars().count()
@@ -204,7 +247,7 @@ fn find(source: &str, needle: &str, start: i64, length: i64, occurrence: i64) ->
         return Some(-1);
     }
     let byte = |index: i64| {
-        if source.is_ascii() {
+        if ascii {
             index as usize
         } else {
             source
@@ -216,12 +259,15 @@ fn find(source: &str, needle: &str, start: i64, length: i64, occurrence: i64) ->
     let mut byte_start = byte(start);
     let mut position = start;
     let needle_length = needle.chars().count() as i64;
+    if length != -1 && length < needle_length {
+        return Some(-1);
+    }
     for current in 1..=occurrence {
         let window = &source[byte_start..];
         let Some(offset) = window.find(needle) else {
             return Some(-1);
         };
-        let distance = if source.is_ascii() {
+        let distance = if ascii {
             offset
         } else {
             window[..offset].chars().count()
@@ -279,45 +325,7 @@ impl ScalarUDFImpl for Function {
             .map(|value| value.to_array(1))
             .collect::<Result<Vec<_>>>()?;
         if matches!(self.mode, Mode::TimespanText) {
-            let values = arrays[0]
-                .as_any()
-                .downcast_ref::<DurationNanosecondArray>()
-                .ok_or_else(|| {
-                    DataFusionError::Internal("timespan text requires nanosecond duration".into())
-                })?;
-            let mut output = StringBuilder::new();
-            for value in values {
-                let Some(value) = value else {
-                    output.append_value("");
-                    continue;
-                };
-                let absolute = value.unsigned_abs();
-                let days = absolute / 86_400_000_000_000;
-                let mut text = if value < 0 {
-                    "-".to_owned()
-                } else {
-                    String::new()
-                };
-                if days != 0 {
-                    text.push_str(&format!("{days}."));
-                }
-                text.push_str(&format!(
-                    "{:02}:{:02}:{:02}",
-                    absolute / 3_600_000_000_000 % 24,
-                    absolute / 60_000_000_000 % 60,
-                    absolute / 1_000_000_000 % 60
-                ));
-                let fraction = absolute % 1_000_000_000;
-                if fraction != 0 {
-                    if fraction.is_multiple_of(100) {
-                        text.push_str(&format!(".{:07}", fraction / 100));
-                    } else {
-                        text.push_str(&format!(".{fraction:09}"));
-                    }
-                }
-                output.append_value(text);
-            }
-            let output: ArrayRef = Arc::new(output.finish());
+            let output = format_timespan(&arrays[0])?;
             return if scalar {
                 Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(
                     &output, 0,

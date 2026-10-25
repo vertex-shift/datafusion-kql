@@ -74,6 +74,13 @@ pub(crate) fn datetime(text: &str, span: Span) -> Result<i64> {
     let text = unquote(text.trim());
     let parsed = if let Ok(value) = DateTime::parse_from_rfc3339(text) {
         value.naive_utc()
+    } else if let Ok(value) = DateTime::parse_from_rfc2822(text) {
+        value.naive_utc()
+    } else if let Some(value) = ["%A, %d-%b-%Y %H:%M:%S %z", "%A, %d-%b-%y %H:%M:%S %z"]
+        .iter()
+        .find_map(|format| DateTime::parse_from_str(text, format).ok())
+    {
+        value.naive_utc()
     } else if let Ok(value) = NaiveDate::parse_from_str(text, "%Y-%m-%d") {
         value
             .and_hms_opt(0, 0, 0)
@@ -83,13 +90,41 @@ pub(crate) fn datetime(text: &str, span: Span) -> Result<i64> {
         ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"]
             .iter()
             .find_map(|format| NaiveDateTime::parse_from_str(text, format).ok())
-            .ok_or_else(|| Error::syntax("invalid ISO-8601 datetime literal", span))?
+            .ok_or_else(|| Error::syntax("invalid ISO-8601 or RFC datetime literal", span))?
     };
     parsed.and_utc().timestamp_nanos_opt().ok_or_else(|| {
         Error::unsupported(
             "datetime is outside Arrow's signed 64-bit nanosecond timestamp range",
             span,
         )
+    })
+}
+
+pub(crate) fn integer(text: &str, span: Span) -> Result<i64> {
+    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        i64::from_str_radix(hex, 16).map_err(|_| {
+            Error::syntax(
+                "hexadecimal integer is outside the signed 64-bit range",
+                span,
+            )
+        })
+    } else {
+        text.parse()
+            .map_err(|_| Error::syntax("integer literal is outside the signed 64-bit range", span))
+    }
+}
+
+pub(crate) fn timespan_unit(unit: &str) -> Option<i128> {
+    Some(match unit {
+        "d" | "day" | "days" => 86_400_000_000_000,
+        "h" | "hour" | "hours" => 3_600_000_000_000,
+        "m" | "minute" | "minutes" => 60_000_000_000,
+        "s" | "second" | "seconds" => 1_000_000_000,
+        "ms" | "milli" | "millisecond" | "milliseconds" => 1_000_000,
+        "us" | "micro" | "microsecond" | "microseconds" => 1_000,
+        "tick" | "ticks" => 100,
+        "ns" => 1,
+        _ => return None,
     })
 }
 
@@ -135,23 +170,14 @@ pub(crate) fn timespan(text: &str, span: Span) -> Result<i64> {
             .and_then(|n| n.checked_add(seconds))
             .ok_or_else(invalid)?
     } else {
-        let units = [
-            ("microseconds", 1_000_i128),
-            ("microsecond", 1_000),
-            ("ticks", 100),
-            ("tick", 100),
-            ("ms", 1_000_000),
-            ("us", 1_000),
-            ("ns", 1),
-            ("d", 86_400_000_000_000),
-            ("h", 3_600_000_000_000),
-            ("m", 60_000_000_000),
-            ("s", 1_000_000_000),
-        ];
-        let (number, multiplier) = units
-            .iter()
-            .find_map(|(suffix, multiplier)| text.strip_suffix(suffix).map(|n| (n, *multiplier)))
-            .unwrap_or((text, 86_400_000_000_000));
+        let number = text.trim_end_matches(|ch: char| ch.is_ascii_alphabetic());
+        let unit = &text[number.len()..];
+        let multiplier = if unit.is_empty() {
+            86_400_000_000_000
+        } else {
+            timespan_unit(unit).ok_or_else(invalid)?
+        };
+        let number = number.trim_end();
         decimal_scaled(number, multiplier).ok_or_else(invalid)?
     };
     let nanos = nanos.checked_mul(sign).ok_or_else(invalid)?;

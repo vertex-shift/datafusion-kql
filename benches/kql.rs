@@ -1,6 +1,6 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use datafusion::arrow::array::{Int64Array, StringArray};
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::array::{Int64Array, ListArray, StringArray};
+use datafusion::arrow::datatypes::{DataType, Field, Int64Type, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::TableReference;
 use datafusion::datasource::MemTable;
@@ -42,6 +42,12 @@ const NATIVE_DCOUNT_QUERY: &str = "CardinalityEvents | summarize N=approx_distin
 const GROUPED_DCOUNT_QUERY: &str =
     "CardinalityEvents | summarize N=dcount(Id,4) by Group | summarize Total=sum(N),Groups=count()";
 const HLL_ROLLUP_QUERY: &str = "CardinalityEvents | summarize s=hll(Id,2) by Shard | summarize s=hll_merge(s) | project N=dcount_hll(s)";
+const ARROW_QUERY: &str =
+    "ArrowEvents | mv-expand Values to typeof(long) | summarize Total=sum(Values)";
+const ARROW_SQL: &str = "SELECT coalesce(sum(v),0) AS \"Total\" FROM (SELECT UNNEST(\"Values\") AS v FROM \"ArrowEvents\")";
+const ARROW_DYNAMIC_QUERY: &str = "ArrowEvents | extend d=todynamic(Values) | mv-expand d to typeof(long) | summarize Total=sum(d)";
+const INDEXOF_QUERY: &str = "Telemetry | summarize Total=sum(indexof(Message,' '))";
+const TEXT_REWRITE_QUERY: &str = "Telemetry | extend Rewritten=replace_regex(strrep(Message,2,';'),@'\\s+','_') | summarize N=countif(indexof(Rewritten,' ')==-1 and indexof(Rewritten,';')>=0)";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -191,6 +197,23 @@ fn cardinality_context() -> SessionContext {
     ctx
 }
 
+fn arrow_context() -> SessionContext {
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let values = ListArray::from_iter_primitive::<Int64Type, _, _>(
+        (0..JSON_ROWS).map(|_| Some(vec![Some(1), Some(2), Some(3)])),
+    );
+    let batch = RecordBatch::try_from_iter(vec![("Values", Arc::new(values) as _)]).unwrap();
+    let partitions = (0..4)
+        .map(|i| vec![batch.slice(i * JSON_ROWS / 4, JSON_ROWS / 4)])
+        .collect();
+    ctx.register_table(
+        TableReference::bare("ArrowEvents"),
+        Arc::new(MemTable::try_new(batch.schema(), partitions).unwrap()),
+    )
+    .unwrap();
+    ctx
+}
+
 fn benchmarks(c: &mut Criterion) {
     c.bench_function("parse/kql_pipeline", |b| {
         b.iter(|| parse(black_box(QUERY)).unwrap())
@@ -256,6 +279,7 @@ fn benchmarks(c: &mut Criterion) {
     let guids = guid_context();
     let telemetry = telemetry_context();
     let cardinality = cardinality_context();
+    let arrow = arrow_context();
     let mut distinct_estimate = None;
     let mut workloads = c.benchmark_group("workloads");
     for (name, query, context, rows, expected_rows) in [
@@ -280,17 +304,33 @@ fn benchmarks(c: &mut Criterion) {
         ("dcount_native", NATIVE_DCOUNT_QUERY, &cardinality, ROWS, 1),
         ("dcount_groups", GROUPED_DCOUNT_QUERY, &cardinality, ROWS, 1),
         ("hll_rollup", HLL_ROLLUP_QUERY, &cardinality, ROWS, 1),
+        ("arrow_expand", ARROW_QUERY, &arrow, JSON_ROWS, 1),
+        ("arrow_expand_sql", ARROW_SQL, &arrow, JSON_ROWS, 1),
+        (
+            "arrow_dynamic_expand",
+            ARROW_DYNAMIC_QUERY,
+            &arrow,
+            JSON_ROWS,
+            1,
+        ),
+        ("indexof", INDEXOF_QUERY, &telemetry, JSON_ROWS, 1),
+        ("text_rewrite", TEXT_REWRITE_QUERY, &telemetry, JSON_ROWS, 1),
     ] {
         let plan = runtime.block_on(async {
-            context
-                .kql(query)
-                .await
-                .unwrap()
-                .create_physical_plan()
-                .await
-                .unwrap()
+            let frame = if name == "arrow_expand_sql" {
+                context.sql(query).await.unwrap()
+            } else {
+                context.kql(query).await.unwrap()
+            };
+            frame.create_physical_plan().await.unwrap()
         });
         let native = displayable(plan.as_ref()).indent(false).to_string();
+        if name == "arrow_expand" {
+            assert!(
+                native.contains("__kql_native_expand_list"),
+                "typed Arrow expansion must not use the JSON conversion path"
+            );
+        }
         if name == "partition_top" {
             assert!(
                 !native.contains("KqlApplyExec"),
@@ -322,6 +362,25 @@ fn benchmarks(c: &mut Criterion) {
             expected_rows,
             "unexpected result cardinality for {name}",
         );
+        if matches!(
+            name,
+            "arrow_expand"
+                | "arrow_expand_sql"
+                | "arrow_dynamic_expand"
+                | "indexof"
+                | "text_rewrite"
+        ) {
+            let expected = match name {
+                "indexof" => 300_000,
+                "text_rewrite" => JSON_ROWS as i64,
+                _ => (JSON_ROWS * 6) as i64,
+            };
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(expected)),
+                "incorrect result for {name}"
+            );
+        }
         if matches!(name, "dcount_accuracy" | "dcount_native" | "hll_rollup") {
             let value =
                 datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap();

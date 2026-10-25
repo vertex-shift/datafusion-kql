@@ -873,6 +873,11 @@ impl Expressions<'_> {
                 crate::decimal::call(crate::decimal::Op::Format, vec![value])
             } else if value.get_type(schema)? == crate::guid::data_type() {
                 crate::guid::call(value, true)
+            } else if matches!(value.get_type(schema)?, DataType::Duration(_)) {
+                crate::text_functions::timespan(cast(
+                    value,
+                    DataType::Duration(TimeUnit::Nanosecond),
+                ))
             } else {
                 value
             },
@@ -972,13 +977,7 @@ impl Expressions<'_> {
         };
         if matches!(name, "indexof" | "strrep" | "replace_regex") {
             let text = |index: usize| -> Result<Expr> {
-                let mut value = values[index].clone();
-                if matches!(value.get_type(schema)?, DataType::Duration(_)) {
-                    value = crate::text_functions::timespan(cast(
-                        value,
-                        DataType::Duration(TimeUnit::Nanosecond),
-                    ));
-                }
+                let value = values[index].clone();
                 self.function(
                     "coalesce",
                     vec![

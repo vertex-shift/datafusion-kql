@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.8 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.9 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -22,6 +22,7 @@ cargo run --example grouped_scan
 cargo run --example schema_plugins
 cargo run --example telemetry_functions
 cargo run --example distinct_sketches
+cargo run --example arrow_interop
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -30,6 +31,8 @@ required.
 
 `telemetry_json` parses JSON telemetry, reads nested properties, expands latency
 arrays with native `Unnest`, and aggregates the expanded measurements.
+`arrow_interop` queries native Arrow list columns directly, using a local table
+selector, hexadecimal threshold, regex normalization, and typed buffer expansion.
 
 ## Extend an existing DataFusion session
 
@@ -118,6 +121,9 @@ Dynamic literals, JSON parsing, property/index access, bag/array/set functions,
 and `mv-expand` are supported with typed Arrow unions and native batch kernels.
 Multiple expanded columns zip with null padding rather than forming an
 accidental Cartesian product.
+Native Arrow lists, list views, structs and string-keyed maps also work with
+dynamic operations and expansion, preserving nested temporal/decimal/GUID types.
+Simple typed list expansion stays in checked Arrow buffers and native Unnest.
 
 Typed `parse`/`parse-where`, regex/JSON extraction, collection and percentile
 aggregations, correlated `arg_min`/`arg_max`, and scalar expressions over
@@ -176,6 +182,11 @@ tag numbers and previous input schemas remain compatible.
 Term-list/prefix/suffix searches, IPv4/IPv6 and CIDR functions, URL/query
 parsing, percent/base64 encodings, and regex trimming cover common telemetry
 queries. Compiled matchers and network range caches are bounded.
+`indexof` implements zero-based optional-range/occurrence semantics, `strrep`
+supports delimiters, and global `replace_regex` uses KQL capture rewrites.
+Hexadecimal integers, spelled duration units, RFC date forms and literal
+`table`/`database`/`cluster` source selectors close common interoperability gaps.
+Source selectors resolve local DataFusion providers; they are not ADX connections.
 
 `dcount`/`dcountif` support accuracy levels 0-4 with bounded HyperLogLog states
 and exact small-set counting. `hll`/`hll_if`, scalar and aggregate `hll_merge`,

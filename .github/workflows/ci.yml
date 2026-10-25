@@ -50,6 +50,7 @@ jobs:
       - run: cargo run --locked --example schema_plugins
       - run: cargo run --locked --example telemetry_functions
       - run: cargo run --locked --example distinct_sketches
+      - run: cargo run --locked --example arrow_interop
 
   package:
     name: Verify publishable crate

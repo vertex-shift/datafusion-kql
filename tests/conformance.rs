@@ -703,6 +703,18 @@ const SOURCE_FIXTURES: &[Fixture] = &[
         columns: &["text"],
         rows: &[&["Number was: 1"], &["Number was: 2"], &["Number was: 3"]],
     },
+    Fixture {
+        name: "source-hexadecimal-long-literal",
+        query: "print value=tostring(0xf),kind=gettype(0xf)",
+        columns: &["value", "kind"],
+        rows: &[&["15", "long"]],
+    },
+    Fixture {
+        name: "source-spelled-timespan-constructor",
+        query: "print same=tostring(timespan(15 seconds)==15s),days=tostring(timespan(2)==2d)",
+        columns: &["same", "days"],
+        rows: &[&["True", "True"]],
+    },
 ];
 
 fn endpoint(uri: &str) -> TestResult<(String, bool)> {

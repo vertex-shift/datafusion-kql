@@ -55,6 +55,11 @@ capacity estimates.
 | `workloads/dcount_native` | Native DataFusion `approx_distinct` over the same 1,000,000 longs, with its own precision/error check |
 | `workloads/dcount_groups` | Accuracy-4 distinct counts over 100,000 ten-value groups; assert the exact one-million total and group count |
 | `workloads/hll_rollup` | Build 32 accuracy-2 sketches over 1,000,000 rows, merge them, and assert equality with the one-pass HLL estimate |
+| `workloads/arrow_expand` | Expand 100,000 native Arrow three-long lists through the typed buffer path and assert a 600,000 total |
+| `workloads/arrow_expand_sql` | Native SQL Unnest/sum over the same Arrow lists and exact total |
+| `workloads/arrow_dynamic_expand` | Explicitly convert those lists to dynamic, expand, and assert the same total |
+| `workloads/indexof` | Zero-based string search over 100,000 telemetry messages; assert the exact position sum |
+| `workloads/text_rewrite` | Delimited repetition, regex rewriting and two substring checks over 100,000 messages |
 
 The fixture uses two non-null columns, four in-memory partitions, a filter,
 grouped sum, and top-k. Source data and physical planning are outside the
@@ -73,6 +78,41 @@ Each execution iteration uses DataFusion's `reset_plan_states` to create fresh
 operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
+
+## Measured 0.9 interoperability workloads
+
+The new Arrow/string paths were measured on 2026-10-25 on the same Apple
+M4/arm64 host, Rust 1.95.0, DataFusion 55.2.0, optimized bench profile, and four
+target partitions:
+
+```bash
+cargo bench --locked --bench kql -j 2 -- \
+  'workloads/(arrow_expand|arrow_expand_sql|arrow_dynamic_expand|indexof|text_rewrite)' \
+  --warm-up-time 1 --measurement-time 3 --sample-size 30
+```
+
+| Benchmark | Criterion estimate | 95% confidence interval |
+| --- | --- | --- |
+| Typed Arrow list expansion/sum, 100,000 lists | 1.03 ms | 1.01-1.05 ms |
+| Native SQL Unnest/sum, same lists | 0.804 ms | 0.794-0.814 ms |
+| Explicit dynamic conversion/expansion, same lists | 23.67 ms | 23.38-23.98 ms |
+| Optional-index search, 100,000 strings | 2.04 ms | 1.99-2.09 ms |
+| Repeat/regex rewrite/search, 100,000 strings | 32.77 ms | 31.30-34.38 ms |
+
+Each list contains three longs; all three expansion plans assert the exact
+600,000 total, so throughput counts original lists, not expanded rows. The
+typed KQL path processes about 97 million lists/second on this fixture while
+retaining checked collection bounds. The untyped/general dynamic route supports
+broader mixed/rich data but is much more expensive. SQL is faster here, and these
+three plans are not identical: do not attribute an execution advantage to KQL.
+
+The string fixture contains four repeating messages and asserts a 300,000
+index-position sum plus 100,000 successful rewrite checks. Regex compilation,
+source construction and physical planning are outside the timed region.
+Every benchmark preflight still executes, including the original numeric
+KQL/SQL physical-plan equality assertion. Some runs reported timing outliers
+on the shared host. These are local memory-resident workload measurements,
+not production capacity guarantees or new live Kusto conformance evidence.
 
 ## Measured 0.8 bounded distinct-count workloads
 

@@ -23,20 +23,23 @@ fn error(message: impl Into<String>) -> DataFusionError {
 }
 
 pub(crate) fn is_collection(ty: &DataType) -> bool {
+    let mut ty = ty;
+    while let DataType::Dictionary(_, value) = ty {
+        ty = value;
+    }
     if crate::decimal::is_decimal(ty) {
         return false;
     }
-    match ty {
-        DataType::Dictionary(_, value) => is_collection(value),
+    matches!(
+        ty,
         DataType::List(_)
-        | DataType::LargeList(_)
-        | DataType::FixedSizeList(_, _)
-        | DataType::ListView(_)
-        | DataType::LargeListView(_)
-        | DataType::Struct(_)
-        | DataType::Map(_, _) => true,
-        _ => false,
-    }
+            | DataType::LargeList(_)
+            | DataType::FixedSizeList(_, _)
+            | DataType::ListView(_)
+            | DataType::LargeListView(_)
+            | DataType::Struct(_)
+            | DataType::Map(_, _)
+    )
 }
 
 fn downcast<T: Array + 'static>(array: &ArrayRef) -> Result<&T> {

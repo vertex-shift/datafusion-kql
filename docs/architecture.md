@@ -103,6 +103,10 @@ errors rather than silently execute with different semantics.
   tags and a bounded nonrecursive wire representation; ordinary JSON retains
   its lightweight path. Complete reference certification and full temporal
   ranges remain milestones.
+- Native Arrow lists, list views, structs, and string-keyed maps now enter
+  dynamic operations without erasing scalar types. Typed primitive expansion
+  retains Arrow buffers and native Unnest; mixed/rich expansion shares bounded
+  dynamic kernels. Schema-depth validation occurs before scan-plan construction.
 - Lookup, schema introspection, projection reordering, sampling, wildcard table
   discovery, source-labelled unions and conflicting-type schema splitting are
   implemented. Cross-table search/find, smart row packing, hierarchical
@@ -132,6 +136,12 @@ errors rather than silently execute with different semantics.
   their documented examples. A finite public-help reference baseline is captured
   in ordinary tests, including the former decimal precision/JSON disagreements.
   Full live certification is separate from this bounded baseline.
+- Literal/source compatibility includes hexadecimal longs, spelled duration
+  units, RFC date forms, and literal local table/catalog selectors. String
+  helpers implement optional-index search, delimited repetition, and global
+  capture-based regex rewriting rather than assuming SQL aliases have KQL
+  semantics. A standalone CLI/parser package remains a separate integration
+  milestone, not implied by these improvements.
 - Conformance fixtures against a real Kusto cluster and production workload
   benchmarks before claiming complete compatibility.
 
