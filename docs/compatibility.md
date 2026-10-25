@@ -244,9 +244,21 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
 `dynamic(...)` supports nested arrays and property bags with single- or
 double-quoted strings, scalar literals, and nulls. Dynamic values are real
 Arrow **dense unions**, distinguishing null, bool, long, real, string, array,
-bag, datetime, timespan, and guid. Arrays and bags use JSON-marked UTF-8 child buffers;
-they are not confused with ordinary string columns or normalized to empty
-strings. Nested non-JSON scalar types serialize as strings inside collections.
+bag, datetime, timespan, guid, and decimal. Ordinary arrays/bags keep JSON-marked
+UTF-8 child buffers. Collections containing richer scalars use appended typed
+array/bag tags and a versioned, bounded internal encoding; old tag numbers and
+older dense-union input schemas remain readable. They are not confused with
+ordinary strings or with user JSON objects that resemble internal encodings.
+
+Nested datetimes, timespans, GUIDs, decimals, real tags, and nonfinite reals
+retain their types through property/index access, packing, collection updates,
+set operations, expansion, materialization, aggregation/merge states, and
+serialized row offsets. External JSON formatting still serializes non-JSON
+scalar types as strings; explicitly reparsing that JSON does not recover the
+lost type information. Internal typed encodings are never recognized from
+ordinary user JSON. Typed collections enforce depth 128, per-collection element
+limits, and a total-node budget; malformed references and reused child nodes
+fail explicitly.
 
 `parse_json`/`todynamic`, dotted properties, arbitrary string-key subscripts,
 zero-based and negative array indices, `gettype`, and scalar conversion
@@ -298,8 +310,8 @@ generator without overwriting or depending on a host registry override.
 Dynamic GUID roots retain their own tag through conversion, null-padding-safe
 row offsets, and scalar expansion. The GUID tag is appended after existing tags;
 older dense-union input schemas remain readable and normalize during union.
-As with datetime/timespan, GUIDs nested inside JSON-backed arrays/bags currently
-serialize as strings, not fully rich nested Kusto scalar values.
+GUIDs nested inside typed arrays/bags retain GUID tags; only explicit external
+JSON serialization represents them as strings.
 
 ## Decimal values
 
@@ -537,9 +549,11 @@ Arrays are limited to 1,048,576 points. Integer axes retain precision beyond
 
 Explicit starting bounds avoid the extra per-group minimum window needed for
 automatic origins. Filter inputs early and configure host memory budgets.
-Datetime/timespan array elements use lossless JSON strings, consistent with the
-collection representation; cast accessed elements back with `todatetime` or
-`totimespan`.
+Datetime/timespan axis elements retain typed scalar values. `todatetime` and
+`totimespan` remain valid for explicit conversion, but `gettype` now reports the
+actual type rather than `string`. JSON rendering uses the same canonical
+RFC-3339 datetime formatter as other typed dynamic values, so zero fractions
+are no longer padded solely for make-series axes.
 
 Series processors include element-wise arithmetic and numeric comparisons;
 absolute value, trigonometric/exponential/logarithmic functions, square root,
@@ -636,8 +650,7 @@ representations and continue to ignore nulls.
   Operators/functions not listed in this contract are not covered merely
   because they exist in Kusto. Additional areas include other `evaluate`
   plugins, implicit plugin schema discovery, graph operators,
-  external-data syntax, richer decimal literals, fully rich nested dynamic
-  scalar values, and full scalar-function
+  external-data syntax, full datetime/timespan ranges, and full scalar-function
   conformance. See [the delivery plan](architecture.md).
 - Default parsing limits: 1 MiB of query text, nesting/expression depth 64,
   and 128 operators per pipeline. `parse_with_options` permits changing these

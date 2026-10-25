@@ -445,7 +445,36 @@ impl ScalarUDFImpl for Fill {
         }
         let arrays = outputs
             .into_iter()
-            .map(|rows| dynamic::from_json_rows(rows.into_iter().map(Ok), lists.len()))
+            .enumerate()
+            .map(|(index, rows)| {
+                if index == defaults.len() && matches!(self.axis, Axis::Datetime | Axis::Timespan) {
+                    dynamic::from_node_rows(
+                        rows.into_iter().map(|row| {
+                            let items = row
+                                .as_array()
+                                .ok_or_else(|| series_error("invalid temporal axis array"))?;
+                            Ok(crate::dynamic_value::Node::Array(
+                                items
+                                    .iter()
+                                    .map(|value| {
+                                        let value = value.as_i64().ok_or_else(|| {
+                                            series_error("invalid temporal axis value")
+                                        })?;
+                                        Ok(if self.axis == Axis::Datetime {
+                                            crate::dynamic_value::Node::Datetime(value)
+                                        } else {
+                                            crate::dynamic_value::Node::Timespan(value)
+                                        })
+                                    })
+                                    .collect::<datafusion::error::Result<_>>()?,
+                            ))
+                        }),
+                        lists.len(),
+                    )
+                } else {
+                    dynamic::from_json_rows(rows.into_iter().map(Ok), lists.len())
+                }
+            })
             .collect::<datafusion::error::Result<Vec<_>>>()?;
         let array = Arc::new(StructArray::try_new(
             fields(self.defaults.len()).into(),
@@ -647,7 +676,7 @@ impl Fill {
             for i in 0..count {
                 let value = i64::try_from(start + i as i128 * step)
                     .map_err(|_| series_error("series axis is outside its supported range"))?;
-                result[defaults.len()].push(self.axis_json(value));
+                result[defaults.len()].push(Json::from(value));
             }
             for (key, row) in bins {
                 let Number::Integer(key) = key else {
@@ -660,35 +689,6 @@ impl Fill {
             }
         }
         Ok(result)
-    }
-
-    fn axis_json(&self, value: i64) -> Json {
-        match self.axis {
-            Axis::Datetime => {
-                let date = chrono::DateTime::from_timestamp_nanos(value);
-                let base = date.format("%Y-%m-%dT%H:%M:%S");
-                let fraction = date.timestamp_subsec_nanos();
-                if value % 100 == 0 {
-                    format!("{base}.{:07}Z", fraction / 100).into()
-                } else {
-                    format!("{base}.{fraction:09}Z").into()
-                }
-            }
-            Axis::Timespan => {
-                let sign = if value < 0 { "-" } else { "" };
-                let value = value.unsigned_abs();
-                format!(
-                    "{sign}{}.{:02}:{:02}:{:02}.{:09}",
-                    value / 86_400_000_000_000,
-                    value / 3_600_000_000_000 % 24,
-                    value / 60_000_000_000 % 60,
-                    value / 1_000_000_000 % 60,
-                    value % 1_000_000_000
-                )
-                .into()
-            }
-            _ => Json::from(value),
-        }
     }
 
     fn assign(

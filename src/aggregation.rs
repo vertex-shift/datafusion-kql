@@ -319,7 +319,7 @@ impl Collector<'_> {
                 self.expressions
                     .state
                     .udaf("array_agg")?
-                    .call(vec![dynamic::call(Kernel::EncodeJson, vec![value.clone()])])
+                    .call(vec![dynamic::call(Kernel::EncodeWire, vec![value.clone()])])
             } else {
                 aggregate_functions::collection(kind, limit, value.clone())
             };
@@ -448,7 +448,7 @@ impl Collector<'_> {
             && dynamic::is_dynamic(&values[0].get_type(self.schema.as_ref())?)
         {
             values[0] = when(values[0].clone().is_null(), lit(ScalarValue::Utf8(None)))
-                .otherwise(dynamic::call(Kernel::EncodeJson, vec![values[0].clone()]))?;
+                .otherwise(dynamic::call(Kernel::EncodeWire, vec![values[0].clone()]))?;
         }
         if matches!(name, "take_any" | "any" | "take_anyif") {
             let mut valid = values[0].clone().is_not_null();

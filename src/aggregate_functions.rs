@@ -16,6 +16,7 @@ use datafusion::logical_expr::{
 use serde_json::{Map, Value as Json};
 
 use crate::dynamic;
+use crate::dynamic_value::Node;
 
 fn error(message: impl Into<String>) -> DataFusionError {
     DataFusionError::Execution(message.into())
@@ -43,7 +44,7 @@ pub(crate) fn collection(kind: CollectionKind, limit: usize, value: Expr) -> Exp
         signature: Signature::exact(vec![DataType::Utf8], Volatility::Immutable),
     })
     .call(vec![dynamic::call(
-        dynamic::Kernel::EncodeJson,
+        dynamic::Kernel::EncodeWire,
         vec![value],
     )])
 }
@@ -110,18 +111,18 @@ struct CollectionState {
 
 impl CollectionState {
     fn push(&mut self, value: &str) -> Result<()> {
-        if value == "null" && self.kind != CollectionKind::ListWithNulls {
+        if value == "jnull" && self.kind != CollectionKind::ListWithNulls {
             return Ok(());
         }
         if self.kind == CollectionKind::Bag {
-            let json: Json = serde_json::from_str(value)
-                .map_err(|e| error(format!("invalid collection state: {e}")))?;
-            if let Json::Object(bag) = json {
+            if let Node::Bag(bag) = Node::from_wire(value)? {
                 for (key, value) in bag {
                     if self.bag.len() == self.limit {
                         break;
                     }
-                    self.bag.entry(key).or_insert_with(|| value.to_string());
+                    if let std::collections::btree_map::Entry::Vacant(entry) = self.bag.entry(key) {
+                        entry.insert(value.wire()?);
+                    }
                 }
             }
         } else if self.values.len() < self.limit
@@ -146,26 +147,21 @@ impl Accumulator for CollectionState {
     }
     fn evaluate(&mut self) -> Result<ScalarValue> {
         let value = if self.kind == CollectionKind::Bag {
-            Json::Object(
+            Node::Bag(
                 self.bag
                     .iter()
-                    .map(|(key, value)| {
-                        Ok((
-                            key.clone(),
-                            serde_json::from_str(value).map_err(|e| error(e.to_string()))?,
-                        ))
-                    })
-                    .collect::<Result<Map<_, _>>>()?,
+                    .map(|(key, value)| Ok((key.clone(), Node::from_wire(value)?)))
+                    .collect::<Result<BTreeMap<_, _>>>()?,
             )
         } else {
-            Json::Array(
+            Node::Array(
                 self.values
                     .iter()
-                    .map(|value| serde_json::from_str(value).map_err(|e| error(e.to_string())))
+                    .map(|value| Node::from_wire(value))
                     .collect::<Result<_>>()?,
             )
         };
-        dynamic::from_json(&value)
+        dynamic::from_node(&value)
     }
     fn size(&self) -> usize {
         size_of::<Self>()
@@ -182,14 +178,11 @@ impl Accumulator for CollectionState {
     fn state(&mut self) -> Result<Vec<ScalarValue>> {
         let mut builder = ListBuilder::new(StringBuilder::new());
         if self.kind == CollectionKind::Bag {
-            let mut bag = Map::new();
+            let mut bag = BTreeMap::new();
             for (key, value) in &self.bag {
-                bag.insert(
-                    key.clone(),
-                    serde_json::from_str(value).map_err(|e| error(e.to_string()))?,
-                );
+                bag.insert(key.clone(), Node::from_wire(value)?);
             }
-            builder.values().append_value(Json::Object(bag).to_string());
+            builder.values().append_value(Node::Bag(bag).wire()?);
         } else {
             for value in &self.values {
                 builder.values().append_value(value);

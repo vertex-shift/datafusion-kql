@@ -96,8 +96,12 @@ errors rather than silently execute with different semantics.
   range and richer dynamic scalar types remain compatibility milestones.
 - Native 128-bit GUIDs, nullable conversion, UUID-v4 generation, typed query
   integration, and root dynamic GUID tags are implemented. Existing dynamic
-  tag numbers and older dense-union inputs remain compatible. Full decimal
-  coverage and rich nested non-JSON scalar values remain milestones.
+  tag numbers and older dense-union inputs remain compatible. Decimal
+  values now use checked coefficient/scale arithmetic with lossless native
+  decimal storage. Rich nested non-JSON values use appended typed collection
+  tags and a bounded nonrecursive wire representation; ordinary JSON retains
+  its lightweight path. Complete reference certification and full temporal
+  ranges remain milestones.
 - Lookup, schema introspection, projection reordering, sampling, wildcard table
   discovery, source-labelled unions and conflicting-type schema splitting are
   implemented. Cross-table search/find, smart row packing, hierarchical

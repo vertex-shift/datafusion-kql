@@ -701,6 +701,25 @@ impl Expressions<'_> {
     }
 
     fn call(&self, name: &str, args: &[ast::Expr], span: Span, schema: &DFSchema) -> Result<Expr> {
+        if matches!(name, "real" | "double") && args.len() == 1 {
+            let constant = match &args[0].kind {
+                ExprKind::Identifier(parts) if parts.len() == 1 => match parts[0].as_str() {
+                    "nan" => Some(f64::NAN),
+                    "inf" => Some(f64::INFINITY),
+                    _ => None,
+                },
+                ExprKind::Unary {
+                    op: UnaryOp::Negate,
+                    expr,
+                } if matches!(&expr.kind, ExprKind::Identifier(parts) if parts.as_slice() == ["inf"]) => {
+                    Some(f64::NEG_INFINITY)
+                }
+                _ => None,
+            };
+            if let Some(value) = constant {
+                return Ok(lit(value));
+            }
+        }
         if name == "column_ifexists" {
             if args.len() != 2 {
                 return Err(Error::syntax(

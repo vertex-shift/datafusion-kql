@@ -20,6 +20,8 @@ pub mod ast;
 mod calendar;
 mod decimal;
 mod dynamic;
+mod dynamic_nested;
+mod dynamic_value;
 mod error;
 mod evaluate;
 mod expressions;

@@ -164,8 +164,10 @@ and hierarchical `top-nested` selection are supported. Schema-declared
 aggregation lazy and native.
 GUID/UUID values use native 128-bit Arrow storage, with literals, nullable
 conversion, generation, canonical formatting, typed parameters, and root dynamic
-GUID tags. Existing dynamic tag numbers and previous input schemas remain
-compatible.
+GUID tags. Decimal arithmetic is exact base-ten, and nested dynamic
+datetime/timespan/GUID/decimal values retain their types across access,
+collections, expansion, aggregation, and serialized offsets. Existing dynamic
+tag numbers and previous input schemas remain compatible.
 
 Advanced signal processing, management commands, additional hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.
