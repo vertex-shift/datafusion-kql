@@ -109,6 +109,8 @@ async fn empty_null_and_zero_weight_inputs_have_explicit_null_results() {
     .await;
     check("range x from 1 to 3 step 1 | summarize s=tdigest(x) | project p=percentile_tdigest(tdigest_merge(s,dynamic(null)),50,typeof(long)),allNull=isnull(tdigest_merge(dynamic(null),dynamic(null))),noRank=isnull(percentile_tdigest(s,real(null)))",
         &[&["2","true","true"]]).await;
+    check("datatable(t:datetime)[] | summarize p=percentile_exact(t,50),a=percentiles_array_exact(t,0,100) | project missing=isnull(p),arrayNull=isnull(a),native=gettype(p)",
+        &[&["true","true","datetime"]]).await;
     check("datatable(x:long,w:long)[10,-1,20,0,30,long(null),40,1] | summarize p=percentilew(x,w,50),e=percentilew_exact(x,w,50),s=tdigest(x,w) | project p,e,decoded=percentile_tdigest(s,50,typeof(long))",
         &[&["40","40","40"]]).await;
 }
@@ -239,6 +241,8 @@ async fn grouped_sparse_states_and_native_partition_paths_stay_exact() {
         &[&["0","10000"]]).await;
     check("range x from 1 to 20 step 1 | extend g=x%2 | partition hint.strategy=native by g(summarize s=tdigest(x)) | project low=percentile_tdigest(s,0,typeof(long)),high=percentile_tdigest(s,100,typeof(long)) | sort by low asc",
         &[&["1","19"],&["2","20"]]).await;
+    check("range x from 0 to 9 step 1 | make-series p=percentile(x,50),e=percentile_exact(x,50) on x from 0 to 10 step 5 | project p=tostring(p),e=tostring(e)",
+        &[&["[2,7]","[2,7]"]]).await;
 }
 
 fn register(ctx: &SessionContext, values: &[(f64, i64)]) {

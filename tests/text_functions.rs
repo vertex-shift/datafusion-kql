@@ -46,23 +46,26 @@ async fn check(query: &str, expected: &[&[&str]]) {
 }
 
 #[tokio::test]
-async fn indexof_matches_all_published_examples_including_negative_starts() {
+async fn indexof_matches_captured_optional_arguments_including_negative_starts() {
     check("print a=indexof('abcdefg','cde'),b=indexof('abcdefg','cde',1,4),c=indexof('abcdefg','cde',1,2),d=indexof('abcdefg','cde',3,4),e=indexof('abcdefg','cde',-5),f=indexof(1234567,5,1,4),g=indexof('abcdefg','cde',2,-1),h=indexof('abcdefgabcdefg','cde',1,10,2),i=indexof('abcdefgabcdefg','cde',1,-1,3)",
-        &[&["2","2","-1","-1","2","4","2","9","-1"]]).await;
+        &[&["2","2","2","-1","2","4","2","9","-1"]]).await;
 }
 
 #[tokio::test]
 async fn indexof_positions_and_lengths_can_vary_by_row() {
     check("datatable(s:string,n:string,start:long,length:long)['abracadabra','abra',0,-1,'abracadabra','abra',1,-1,'abc','b',0,1,'abc','a',9,1,'abc','a',-4,-1,'abc','a',0,-2,'abc','a',long(null),-1] | project p=indexof(s,n,start,length)",
-        &[&["0"],&["7"],&["-1"],&["-1"],&["<null>"],&["<null>"],&["<null>"]]).await;
-    check("print a=indexof('aaaa','aa',0,-1,2),b=indexof('abc','',0,-1,4),c=indexof('',''),d=indexof('abc','a',0,-1,0),e=indexof('abc','a',0,-1,long(null))",
-        &[&["2","3","0","<null>","<null>"]]).await;
+        &[&["0"],&["7"],&["-1"],&["-1"],&["0"],&["<null>"],&["<null>"]]).await;
+    check(
+        "print a=indexof('aaaa','aa',0,-1,2),b=indexof('abc','',0,-1,4),c=indexof('','')",
+        &[&["1", "0", "-1"]],
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn indexof_counts_unicode_characters_instead_of_utf8_bytes() {
     check("print a=indexof('é中🙂abc','a'),b=indexof('é中🙂abc','中🙂',1,2),c=indexof('é中🙂abc','🙂',-4,1),d=indexof('é中🙂abc','中🙂',1,1)",
-        &[&["3","1","2","-1"]]).await;
+        &[&["3","1","2","1"]]).await;
 }
 
 #[tokio::test]
@@ -158,6 +161,8 @@ async fn invalid_text_function_arguments_fail_explicitly() {
         "print x=indexof('a')",
         "print x=indexof('a','b',1.5)",
         "range x from 1 to 3 step 1 | project p=indexof('aaa','a',0,-1,x)",
+        "print p=indexof('abc','a',0,-1,0)",
+        "print p=indexof('abc','a',0,-1,long(null))",
         "print x=strrep('a')",
         "print x=strrep('a',1.5)",
         "print x=replace_regex('a','[','x')",

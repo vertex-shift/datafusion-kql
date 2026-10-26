@@ -18,7 +18,8 @@ struct Fixture {
     columns: &'static [&'static str],
     rows: &'static [&'static [&'static str]],
 }
-// Captured through Azure MCP from help.kusto.windows.net/Samples on 2026-10-25.
+// Baseline captured through Azure MCP from help.kusto.windows.net/Samples on
+// 2026-10-25; additional dated capture cohorts are marked below.
 const FIXTURES: &[Fixture] = &[
     Fixture {
         name: "exact-decimal-arithmetic",
@@ -700,63 +701,86 @@ const FIXTURES: &[Fixture] = &[
         columns: &["untypedKind", "untyped", "typedKind", "typed", "element"],
         rows: &[&["array", "[2]", "array", "[2]", "long"]],
     },
-];
-
-// Published-contract fixtures awaiting a live engine run, not captured results.
-const SOURCE_FIXTURES: &[Fixture] = &[
+    // Former source-only fixtures, now captured on 2026-10-26.
     Fixture {
-        name: "source-hll-published-scalar-merge",
+        name: "hll-published-scalar-merge",
         query: "range x from 1 to 10 step 1 | extend y=x+10 | summarize a=hll(x),b=hll(y) | project N=tostring(dcount_hll(hll_merge(a,b)))",
         columns: &["N"],
         rows: &[&["20"]],
     },
     Fixture {
-        name: "source-hll-exact-threshold",
+        name: "hll-exact-threshold",
         query: "range x from 1 to 1000 step 1 | summarize N=dcount(x,1),s=hll(x,1) | project N=tostring(N),Restored=tostring(dcount_hll(s))",
         columns: &["N", "Restored"],
         rows: &[&["1000", "1000"]],
     },
     Fixture {
-        name: "source-hll-conditional-grouped-merge",
+        name: "hll-conditional-grouped-merge",
         query: "range x from 1 to 20 step 1 | extend g=x%2 | summarize s=hll_if(x,x>10,2) by g | summarize s=hll_merge(s) | project N=tostring(dcount_hll(s))",
         columns: &["N"],
         rows: &[&["10"]],
     },
     Fixture {
-        name: "source-hll-empty-count",
+        name: "hll-empty-count",
         query: "datatable(x:long)[] | summarize N=dcount(x,2),s=hll(x,2) | project N=tostring(N),Restored=tostring(dcount_hll(s))",
         columns: &["N", "Restored"],
         rows: &[&["0", "0"]],
     },
     Fixture {
-        name: "source-indexof-published-optional-arguments",
+        name: "indexof-reference-optional-arguments",
         query: "print a=tostring(indexof('abcdefg','cde')),b=tostring(indexof('abcdefg','cde',1,4)),c=tostring(indexof('abcdefg','cde',1,2)),d=tostring(indexof('abcdefg','cde',3,4)),e=tostring(indexof('abcdefg','cde',-5)),f=tostring(indexof(1234567,5,1,4)),g=tostring(indexof('abcdefg','cde',2,-1)),h=tostring(indexof('abcdefgabcdefg','cde',1,10,2)),i=tostring(indexof('abcdefgabcdefg','cde',1,-1,3))",
         columns: &["a", "b", "c", "d", "e", "f", "g", "h", "i"],
-        rows: &[&["2", "2", "-1", "-1", "2", "4", "2", "9", "-1"]],
+        rows: &[&["2", "2", "2", "-1", "2", "4", "2", "9", "-1"]],
     },
     Fixture {
-        name: "source-strrep-published-coercion",
+        name: "strrep-published-coercion",
         query: "print a=strrep('ABC',2),b=strrep(123,3,'.'),c=strrep(3s,2,' ')",
         columns: &["a", "b", "c"],
         rows: &[&["ABCABC", "123.123.123", "00:00:03 00:00:03"]],
     },
     Fixture {
-        name: "source-replace-regex-published-capture",
+        name: "replace-regex-published-capture",
         query: r#"range x from 1 to 3 step 1 | extend text=strcat('Number is ',tostring(x)) | project text=replace_regex(text,@'is (\d+)',@'was: \1')"#,
         columns: &["text"],
         rows: &[&["Number was: 1"], &["Number was: 2"], &["Number was: 3"]],
     },
     Fixture {
-        name: "source-hexadecimal-long-literal",
-        query: "print value=tostring(0xf),kind=gettype(0xf)",
+        name: "hexadecimal-long-literal",
+        query: "print value=tostring(0xf),['kind']=gettype(0xf)",
         columns: &["value", "kind"],
         rows: &[&["15", "long"]],
     },
     Fixture {
-        name: "source-spelled-timespan-constructor",
+        name: "spelled-timespan-constructor",
         query: "print same=tostring(timespan(15 seconds)==15s),days=tostring(timespan(2)==2d)",
         columns: &["same", "days"],
         rows: &[&["True", "True"]],
+    },
+    Fixture {
+        name: "indexof-window-overlap-and-unicode",
+        query: "print a=tostring(indexof('ababa','aba',0,1)),b=tostring(indexof('ababa','aba',1,1)),c=tostring(indexof('ababa','aba',2,1)),d=tostring(indexof('ababa','aba',2,0)),e=tostring(indexof('abc','b',0,1)),f=tostring(indexof('ababab','ab',0,1,2)),g=tostring(indexof('aaaa','aa',0,-1,2)),h=tostring(indexof('abc','',0,-1,4)),i=tostring(indexof('é中🙂abc','a')),j=tostring(indexof('é中🙂abc','中🙂',1,1)),k=tostring(indexof('🙂a','a',1,1)),l=tostring(indexof('🙂a','🙂',1,-1)),m=tostring(indexof('é中🙂abc','🙂',-4,1)),n=tostring(strlen('é中🙂abc'))",
+        columns: &[
+            "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n",
+        ],
+        rows: &[&[
+            "0", "-1", "2", "-1", "-1", "-1", "1", "0", "3", "1", "1", "-1", "2", "6",
+        ]],
+    },
+    Fixture {
+        name: "indexof-empty-and-clamped-starts",
+        query: "print a=tostring(indexof('abc','',0,0)),b=tostring(indexof('abc','',3,0)),c=tostring(indexof('abc','',3,-1)),d=tostring(indexof('abc','',4,-1)),e=tostring(indexof('','',0,0)),f=tostring(indexof('abc','a',-4,-1)),g=tostring(indexof('abc','',-4,-1)),h=tostring(indexof('abc','b',0,9223372036854775807))",
+        columns: &["a", "b", "c", "d", "e", "f", "g", "h"],
+        rows: &[&["0", "0", "0", "0", "-1", "0", "0", "1"]],
+    },
+    Fixture {
+        name: "indexof-runtime-invalid-bounds",
+        query: "datatable(caseName:string,start:long,n:long)['negative-length',0,-2,'null-start',long(null),-1,'null-length',0,long(null)] | project caseName,pos=tostring(indexof('abc','a',start,n)),empty=tostring(indexof('abc','',start,n)) | order by caseName asc",
+        columns: &["caseName", "pos", "empty"],
+        rows: &[
+            &["negative-length", "", ""],
+            &["null-length", "", ""],
+            &["null-start", "", ""],
+        ],
     },
 ];
 
@@ -1058,20 +1082,6 @@ async fn captured_reference_fixtures_match_locally() -> TestResult<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn source_fixtures_match_published_contracts_locally() -> TestResult<()> {
-    let ctx = SessionContext::new();
-    for fixture in SOURCE_FIXTURES {
-        assert!(
-            !FIXTURES
-                .iter()
-                .any(|captured| captured.name == fixture.name)
-        );
-        check_expected(&ctx, fixture).await?;
-    }
-    Ok(())
-}
-
 #[test]
 fn reference_endpoint_validation_rejects_credential_leaks_and_nonlocal_plaintext() {
     assert!(endpoint("https://cluster.region.kusto.windows.net").is_ok());
@@ -1220,7 +1230,7 @@ fn reference_transport_local_http() -> TestResult<()> {
 async fn live_kusto_conformance() -> TestResult<()> {
     let client = Kusto::from_env()?;
     let ctx = SessionContext::new();
-    for fixture in FIXTURES.iter().chain(SOURCE_FIXTURES) {
+    for fixture in FIXTURES {
         let (columns, expected) = local(&ctx, fixture).await?;
         let actual = client
             .query(fixture.query, &columns)

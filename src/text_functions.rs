@@ -22,7 +22,7 @@ enum Rewrite {
 
 #[derive(Debug, Clone)]
 enum Mode {
-    IndexOf(Option<i64>),
+    IndexOf(i64),
     Repeat,
     TimespanText,
     Replace {
@@ -77,7 +77,7 @@ impl Hash for Function {
     }
 }
 
-pub(crate) fn indexof(values: Vec<Expr>, occurrence: Option<i64>) -> Expr {
+pub(crate) fn indexof(values: Vec<Expr>, occurrence: i64) -> Expr {
     ScalarUDF::from(Function {
         mode: Mode::IndexOf(occurrence),
         signature: Signature::exact(
@@ -229,6 +229,12 @@ fn find(source: &str, needle: &str, start: i64, length: i64, occurrence: i64) ->
     if length < -1 || occurrence <= 0 {
         return None;
     }
+    if source.is_empty() {
+        return Some(-1);
+    }
+    if needle.is_empty() {
+        return Some(0);
+    }
     let ascii = source.is_ascii();
     let count = if ascii {
         source.len()
@@ -236,13 +242,10 @@ fn find(source: &str, needle: &str, start: i64, length: i64, occurrence: i64) ->
         source.chars().count()
     } as i64;
     let start = if start < 0 {
-        count.checked_add(start)?
+        count.checked_add(start)?.max(0)
     } else {
         start
     };
-    if start < 0 {
-        return None;
-    }
     if start > count {
         return Some(-1);
     }
@@ -256,42 +259,79 @@ fn find(source: &str, needle: &str, start: i64, length: i64, occurrence: i64) ->
                 .map_or(source.len(), |(byte, _)| byte)
         }
     };
-    let mut byte_start = byte(start);
-    let mut position = start;
-    let needle_length = needle.chars().count() as i64;
-    if length != -1 && length < needle_length {
+    let byte_start = byte(start);
+    let limit = byte(if length == -1 {
+        count
+    } else {
+        start.saturating_add(length).min(count)
+    });
+    if byte_start >= limit {
         return Some(-1);
     }
-    for current in 1..=occurrence {
-        let window = &source[byte_start..];
-        let Some(offset) = window.find(needle) else {
-            return Some(-1);
-        };
-        let distance = if ascii {
-            offset
-        } else {
-            window[..offset].chars().count()
-        } as i64;
-        if length != -1 && distance.saturating_add(needle_length) > length {
-            return Some(-1);
-        };
-        position += distance;
-        if current == occurrence {
-            return Some(position);
-        };
-        byte_start += offset;
-        if needle.is_empty() {
-            let Some(ch) = source[byte_start..].chars().next() else {
-                return Some(-1);
-            };
-            byte_start += ch.len_utf8();
-            position += 1;
-        } else {
-            byte_start += needle.len();
-            position += needle_length;
+    let mut end = limit.saturating_add(needle.len() - 1).min(source.len());
+    let found = if occurrence == 1 {
+        while !source.is_char_boundary(end) {
+            end += 1;
+        }
+        source[byte_start..end].find(needle)
+    } else {
+        overlapping(
+            &source.as_bytes()[byte_start..end],
+            needle.as_bytes(),
+            occurrence,
+        )
+    };
+    let Some(offset) = found else {
+        return Some(-1);
+    };
+    if byte_start + offset >= limit {
+        return Some(-1);
+    }
+    Some(
+        start
+            + if ascii {
+                offset
+            } else {
+                source[byte_start..byte_start + offset].chars().count()
+            } as i64,
+    )
+}
+
+fn overlapping(source: &[u8], needle: &[u8], occurrence: i64) -> Option<usize> {
+    if needle.len() > source.len() {
+        return None;
+    }
+    // Prefix reuse keeps overlapping searches linear. Input byte budgets keep
+    // the failure-table offsets within u32.
+    let mut prefix = vec![0_u32; needle.len()];
+    let mut matched = 0;
+    for index in 1..needle.len() {
+        while matched > 0 && needle[index] != needle[matched] {
+            matched = prefix[matched - 1] as usize;
+        }
+        if needle[index] == needle[matched] {
+            matched += 1;
+        }
+        prefix[index] = matched as u32;
+    }
+    matched = 0;
+    let mut found = 0;
+    for (index, byte) in source.iter().enumerate() {
+        while matched > 0 && *byte != needle[matched] {
+            matched = prefix[matched - 1] as usize;
+        }
+        if *byte == needle[matched] {
+            matched += 1;
+        }
+        if matched == needle.len() {
+            found += 1;
+            if found == occurrence {
+                return Some(index + 1 - needle.len());
+            }
+            matched = prefix[matched - 1] as usize;
         }
     }
-    Some(-1)
+    None
 }
 
 impl ScalarUDFImpl for Function {
@@ -374,8 +414,8 @@ impl ScalarUDFImpl for Function {
                 Mode::IndexOf(occurrence) => {
                     let needle = string(1, row)?;
                     bounded(needle.len())?;
-                    let result = match (integer(2, row)?, integer(3, row)?, occurrence) {
-                        (Some(start), Some(length), Some(occurrence)) => {
+                    let result = match (integer(2, row)?, integer(3, row)?) {
+                        (Some(start), Some(length)) => {
                             find(source, needle, start, length, *occurrence)
                         }
                         _ => None,
@@ -458,5 +498,97 @@ impl ScalarUDFImpl for Function {
         } else {
             Ok(ColumnarValue::Array(output))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find;
+
+    fn reference(
+        source: &str,
+        needle: &str,
+        start: i64,
+        length: i64,
+        occurrence: i64,
+    ) -> Option<i64> {
+        if length < -1 || occurrence <= 0 {
+            return None;
+        }
+        if source.is_empty() {
+            return Some(-1);
+        }
+        if needle.is_empty() {
+            return Some(0);
+        }
+        let count = source.chars().count() as i64;
+        let start = if start < 0 {
+            (count + start).max(0)
+        } else {
+            start
+        };
+        let end = if length == -1 {
+            count
+        } else {
+            start.saturating_add(length)
+        };
+        Some(
+            source
+                .char_indices()
+                .enumerate()
+                .filter(|(position, (byte, _))| {
+                    (*position as i64) >= start
+                        && (*position as i64) < end
+                        && source[*byte..].starts_with(needle)
+                })
+                .nth((occurrence - 1) as usize)
+                .map_or(-1, |(position, _)| position as i64),
+        )
+    }
+
+    #[test]
+    fn overlapping_search_matches_a_character_position_oracle() {
+        for source in [
+            "",
+            "abc",
+            "aaaa",
+            "ababab",
+            "\u{e9}\u{e9}\u{e9}",
+            "\u{e9}\u{4e2d}\u{1f642}abc",
+            "\u{1f642}a\u{1f642}a",
+        ] {
+            for needle in [
+                "",
+                "a",
+                "ab",
+                "aa",
+                "b",
+                "\u{e9}\u{e9}",
+                "\u{4e2d}\u{1f642}",
+                "\u{1f642}a",
+                "missing",
+            ] {
+                for start in [-20, -6, -1, 0, 1, 2, 5, 20] {
+                    for length in [-2, -1, 0, 1, 2, 8] {
+                        for occurrence in [0, 1, 2, 4, 20] {
+                            assert_eq!(
+                                find(source, needle, start, length, occurrence),
+                                reference(source, needle, start, length, occurrence),
+                                "source={source:?},needle={needle:?},start={start},length={length},occurrence={occurrence}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_prefixes_do_not_require_repeated_full_pattern_scans() {
+        let source = "a".repeat(100_000);
+        let needle = "a".repeat(50_000);
+        assert_eq!(find(&source, &needle, 0, -1, 50_001), Some(50_000));
+        assert_eq!(find(&source, &needle, 0, -1, i64::MAX), Some(-1));
+        assert_eq!(find(&source, &needle, 0, 1, 2), Some(-1));
     }
 }

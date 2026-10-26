@@ -83,6 +83,52 @@ operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
 
+## Measured 0.10 bounded percentile workloads
+
+The distribution workloads were measured on 2026-10-26 on the Apple M4/arm64
+host, Rust 1.95.0, DataFusion 55.2.0, optimized bench profile, and four target
+partitions. Compilation and the other local checks completed before the final
+measurement:
+
+```bash
+cargo bench --locked --bench kql -j 2 -- \
+  'workloads/(bounded_percentiles|exact_percentiles|tdigest_rollup|percentile_groups)' \
+  --warm-up-time 2 --measurement-time 8 --sample-size 30
+```
+
+| Benchmark | Criterion estimate | 95% confidence interval | Input rows/second |
+| --- | --- | --- | --- |
+| Five bounded percentiles, 1,000,000 unique longs | 12.11 ms | 11.90-12.30 ms | 82.6 million |
+| Five explicit exact percentiles, same rows/ranks | 44.12 ms | 42.19-46.02 ms | 22.7 million |
+| Build/merge 32 t-digests and read five ranks, 1,000,000 rows | 20.78 ms | 20.24-21.23 ms | 48.1 million |
+| Medians over 100,000 ten-value groups | 226.48 ms | 221.42-232.17 ms | 4.42 million |
+
+Ranks are 0, 50, 95, 99 and 100. Preflight asserts exact extrema and at most
+1% interior **rank** error for bounded/rollup results; the exact extension must
+return every precise nearest rank. The rollup includes actual dynamic sketch
+serialization, native merge and accessor costs, not an average of precomputed
+percentiles. Direct and rolled-up approximate values need not be identical.
+The grouped fixture checks every sparse median and the exact group count.
+All benchmark preflights still run, including the original numeric KQL/SQL
+physical-plan equality assertion.
+
+The bounded path is about 3.6 times faster than the sample-storing exact
+extension on this fixture, with a different accuracy/memory contract. This is
+not an execution-speed claim against DataFusion or a universal speed guarantee.
+Exact-small states promote after 2,048 input entries; compressed states cap
+centroids and pending input independently of row count. Local tests check
+retained state bounds, native memory-pool charging and actual spill/replay.
+The number of groups is still data-dependent, and the many-group result shows
+that allocation/serialization costs remain meaningful scaling work.
+
+An earlier sample overlapped local compilation and measured roughly 18/73/27 ms
+for the first three workloads. The final table avoids that self-contention,
+but the shared host still varied and the grouped run reported an outlier.
+Criterion extended sampling when its time estimate exceeded the requested
+eight seconds. These are memory-resident local measurements; the separate
+small synthetic Kusto captures do not certify million-row accuracy or identical
+service digests.
+
 ## Measured 0.9 interoperability workloads
 
 The new Arrow/string paths at `8ba286f` were measured on 2026-10-25 on the same Apple
@@ -158,7 +204,8 @@ metrics after replay. Materialized query snapshots still do not spill.
 The shared host varied materially between runs, including for unchanged native
 DataFusion code. The native baseline also reported timing outliers. These are
 memory-resident local measurements, not universal throughput or statistical
-accuracy guarantees, and the new HLL cases have not been run against Kusto.
+accuracy guarantees. These million-row workloads have not been run against
+Kusto; the later four small-set HLL reference captures are recorded separately.
 
 ## Measured 0.7 decimal128 workloads
 

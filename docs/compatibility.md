@@ -267,11 +267,15 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
   `totimespan`/`totime`, and `todate`.
 - `indexof(source, match [, start [, length [, occurrence]]])` returns zero-based
   character positions, not SQL's one-based `strpos`. Start/length may vary by row;
-  occurrence is a constant integer. Negative starts are relative to the end.
-  Repeated nonoverlapping searches reapply the length at each occurrence, matching
-  the published optional-argument example. Not found returns -1; invalid/null
-  positions/counts return typed null. Unicode positions count scalar values;
-  supplementary-character parity still needs a live reference check.
+  occurrence must be a constant positive integer. Negative starts are relative
+  to the end and clamp at zero. Length bounds the eligible **match starts**,
+  not the entire matched substring, and applies to the original search window.
+  Occurrences may overlap. Empty source returns -1; an empty match against
+  nonempty source returns zero. Null bounds and lengths below -1 return typed
+  null. Unicode positions count scalar values, including supplementary
+  characters. Live captures corrected the previous window/overlap/empty behavior;
+  repeated-prefix searches use bounded linear-time byte matching rather than
+  repeatedly rescanning the full needle.
 - `strrep(value, multiplier [, delimiter])` produces a string, unlike dynamic
   `repeat`. Values/delimiters use scalar string conversion; counts are integral.
   Nonpositive/null counts produce empty strings. Counts above 67,108,864 and
@@ -953,11 +957,11 @@ The accuracy/budget semantics are grounded in the published
 [dcount](https://learn.microsoft.com/en-us/kusto/query/dcount-aggregation-function)
 and [HLL](https://learn.microsoft.com/en-us/kusto/query/hll-aggregation-function)
 contracts. Local regressions measure exact thresholds and six-sigma error
-checks across multiple deterministic hash populations. These new cases have
-not been compared to a live Kusto engine; they do not expand the captured
-reference baseline or promise identical service estimates.
-Four published-contract HLL fixtures are separately labelled in the conformance
-suite and included in the opt-in live runner; they remain pending live execution.
+checks across multiple deterministic hash populations. Four small-set
+HLL/merge/conditional/empty-count cases were captured against the public Kusto
+engine on 2026-10-26 and are ordinary conformance fixtures. The large-population
+error checks are still local algorithm tests, not identical service estimates
+or complete certification of all HLL overloads and empty-state representation.
 
 ## Type and execution boundaries
 
@@ -994,10 +998,10 @@ suite and included in the opt-in live runner; they remain pending live execution
 
 ## Opt-in Kusto reference checks
 
-The conformance suite in `tests/conformance.rs` runs 56 synthetic inline-data
+The conformance suite in `tests/conformance.rs` runs 68 synthetic inline-data
 fixtures locally by default, comparing exact column names and row multisets
 against results captured from the public Kusto help cluster (`Samples`) through
-Azure MCP on 2026-10-25 (49 fixtures) and 2026-10-26 (seven t-digest fixtures).
+Azure MCP on 2026-10-25 (49 fixtures) and 2026-10-26 (19 additional fixtures).
 It covers counts/nulls, expansion, per-row/per-key
 queries, scans, hierarchical tops, schema-declared plugins, scalar subqueries,
 ranges, GUIDs, parsing, decimal128 arithmetic/conversion/special values, rich nested tags,
@@ -1014,9 +1018,14 @@ and numeric JSON, scalar and vector evaluation, exponent boundaries, NaNs,
 infinities, signed zero, and arithmetic promotion have explicit fixtures.
 The rich-value fixture uses runtime packing rather than decimal syntax inside
 `dynamic(...)`. Fixture aliases and scan-step names avoid reserved keywords.
-Nine additional source-based fixtures (four HLL, three string, two literal)
-exercise published examples/contracts locally and are included in the opt-in
-live runner. They are not counted among the 56 captured engine results.
+The nine formerly source-based fixtures (four HLL, three string, two literal)
+were subsequently executed against the public engine and are now included in
+the captured set. Seven t-digest fixtures and three additional index-search
+fixtures complete the 2026-10-26 additions. The captures corrected reserved
+alias quoting and showed that a published `indexof` length example disagrees
+with engine behavior: eligible match starts, not full substrings, are bounded.
+Overlapping occurrences, clamped negative starts, empty strings, runtime invalid
+bounds and Unicode offsets now have actual captured results.
 
 To compare the same fixtures against an explicitly configured reference:
 

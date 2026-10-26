@@ -249,14 +249,18 @@ development dependency for comparison; the frontend does not require
 DataFusion's SQL feature at runtime.
 HLL regressions separately cover exact thresholds, probabilistic error checks,
 partial-state/filter/merge equivalence, malformed sketches, and host memory
-accounting; they are not represented as new live Kusto reference captures.
+accounting. Large-population and memory tests remain local algorithm checks;
+the small-set live reference fixtures are recorded separately.
 
-`tests/conformance.rs` compares 56 synthetic fixtures with captured public Kusto
+`tests/conformance.rs` compares 68 synthetic fixtures with captured public Kusto
 help-cluster results by default, and provides an opt-in live suite for a
 configured emulator or ADX test database. The formerly ignored decimal
 precision and JSON conversion cases are now ordinary regressions. Seven live
 t-digest captures cover weighted accessors, null defaults, temporal types,
-merge aliases, nonpositive weights, and array shape; they do not certify
+merge aliases, nonpositive weights, and array shape. The nine previously
+source-only HLL/string/literal cases now have live captures, together with three
+additional `indexof` edge fixtures that corrected window, overlap, empty-match
+and negative-start semantics. These finite captures do not certify
 identical large-population estimates or interoperable service blobs. CI also exercises curl
 transport against a self-owned loopback fixture, **not a Kusto engine**.
 See the compatibility contract for capture provenance, live-test setup, and

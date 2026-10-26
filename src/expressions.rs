@@ -1102,16 +1102,16 @@ impl Expressions<'_> {
                     }
                     let occurrence = if values.len() == 5 {
                         match self.constant(integer(4)?, args[4].span)? {
-                            ScalarValue::Int64(value) => value,
+                            ScalarValue::Int64(Some(value)) if value > 0 => value,
                             _ => {
                                 return Err(Error::syntax(
-                                    "indexof occurrence must be a constant integer",
+                                    "indexof occurrence must be a constant positive integer",
                                     args[4].span,
                                 ));
                             }
                         }
                     } else {
-                        Some(1)
+                        1
                     };
                     Ok(crate::text_functions::indexof(
                         vec![
