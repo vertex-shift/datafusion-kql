@@ -52,6 +52,7 @@ jobs:
       - run: cargo run --locked --example distinct_sketches
       - run: cargo run --locked --example arrow_interop
       - run: cargo run --locked --example percentile_sketches
+      - run: cargo run --locked --example materialized_snapshots
 
   package:
     name: Verify publishable crate

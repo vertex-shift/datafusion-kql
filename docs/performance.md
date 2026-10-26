@@ -64,6 +64,10 @@ capacity estimates.
 | `workloads/exact_percentiles` | The explicit sample-storing exact extension over the same five ranks and rows; assert exact nearest ranks |
 | `workloads/tdigest_rollup` | Build 32 weighted-distribution sketches over 1,000,000 rows, merge and read five ranks; assert extrema and rank error |
 | `workloads/percentile_groups` | Medians over 100,000 ten-value groups; assert every sparse median and exact group count |
+| `materialize/memory_cold` | Plan/initialize a fresh one-million-row snapshot, read two filtered fork legs and aggregate; 64 MiB pool, disk disabled |
+| `materialize/memory_warm` | Reset native operators and reuse the completed in-memory snapshot for the same forked aggregates |
+| `materialize/spill_cold` | Plan/initialize the same snapshot under a 256 KiB pool, using native disk spill and fresh files each iteration |
+| `materialize/spill_warm` | Replay the completed disk-backed snapshot through independent fork readers without reinitializing input |
 
 The fixture uses two non-null columns, four in-memory partitions, a filter,
 grouped sum, and top-k. Source data and physical planning are outside the
@@ -199,7 +203,8 @@ total. Each group stays sparse, avoiding a 256 KiB register allocation per key.
 The rollup includes dynamic sketch serialization/decoding and merge costs; it is
 not just adding precomputed counts. Separate regressions force native aggregation
 to spill under a 2 MiB host pool and assert exact results plus nonzero spill
-metrics after replay. Materialized query snapshots still do not spill.
+metrics after replay. That 0.8 milestone did not add snapshot spilling; 0.11 adds
+the separate materialized-snapshot path.
 
 The shared host varied materially between runs, including for unchanged native
 DataFusion code. The native baseline also reported timing outliers. These are
@@ -477,8 +482,13 @@ filters/projections early, inspect `into_optimized_plan()`/physical plans, and
 benchmark representative data rather than optimizing solely for inline examples.
 
 Use `materialize` only when reusing a sufficiently expensive common subquery.
-It buffers the full selected result and adds a cache boundary. Reduce rows and
-columns inside it, and configure a bounded memory pool. A planned query and its
+It retains the full selected result and adds a cache boundary. Reduce rows and
+columns inside it, and configure bounded memory and temporary disk budgets.
+Snapshots that exceed their host-pool reservation spill through DataFusion's
+native IPC machinery, respecting host directories, quotas and compression.
+Replays stream at the configured batch-row size, but wide values and the native
+IPC/source/downstream working sets still require memory. Resident snapshots are
+not subsequently evicted on unrelated query pressure. A planned query and its
 clones reuse the snapshot, so a benchmark of cold materialization must create a
 fresh query per iteration; resetting physical operator state alone deliberately
 does not invalidate that query's snapshot.

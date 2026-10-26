@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.10 implements the typed tabular and dynamic subset below. Keywords, function
+0.11 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -19,7 +19,7 @@ syntax/functions return an error; there is no SQL fallback.
 | `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan`, `guid`/`uuid`/`uniqueid`, `decimal`, `dynamic` columns |
 | `range` | Inclusive lazy native `generate_series`; integer, real, datetime, and timespan sequences, including descending ranges |
 | `union` | Source form and pipe form |
-| `materialize(...)` | Lazy shared Arrow snapshot, usable directly or in a tabular binding |
+| `materialize(...)` | Lazy shared Arrow snapshot with native memory/disk spill, usable directly or in a tabular binding |
 
 Ordinary tabular bindings are inlined plans, **not materialized results**.
 Reusing one can rescan its inputs; use explicit `materialize` when needed.
@@ -163,7 +163,8 @@ strategy or its service-specific right-side size limit.
 `materialize(T | ...)` and `as hint.materialized=true Name` create an opaque,
 lazy native source boundary. Logical and physical planning do not collect input
 rows. The first consumer executes the native input partitions in parallel;
-other consumers await and reuse the same Arrow buffers. Consumer filters and
+other consumers await and reuse the completed snapshot, in memory or on disk.
+Consumer filters and
 projections remain outside the snapshot, so different fork legs cannot cache
 incompatible subsets. Put common reducing operators inside `materialize`.
 Ordinary `let` and `as hint.materialized=false` remain nonmaterialized.
@@ -175,13 +176,55 @@ fresh snapshot, just as a new planning call obtains a fresh `now()` instant.
 This explicitly defines repeated-DataFrame execution, an API concept without
 a direct Kusto request equivalent.
 
-Retained buffers and batch bookkeeping use a native DataFusion
-`MemoryConsumer`. Exhausting the host memory pool fails the query; input errors
-are retained and surfaced to all consumers rather than converted to empty data.
-Dropping the snapshot releases its memory reservation. Configure a bounded
-host pool for production: the extension does not install Kusto's cluster-wide
-5 GB service cache limit or a separate allocator. Materialized buffers do not
-spill. Unbounded input plans are rejected.
+Retained Arrow buffers and vector bookkeeping use native DataFusion
+`MemoryConsumer` reservations, including spillable-consumer registration for fair
+memory pools. Small snapshots remain zero-copy in memory. If retaining another
+batch exhausts the host pool and the host disk manager permits temporary files,
+the snapshot switches to disk. Already completed resident partitions are also
+spilled before replay, freeing their reservations. There is at most one native
+temporary IPC file per nonempty input partition, not one file per batch.
+Conservative Arrow accounting can count shared/sliced buffers more than once
+and therefore spill sooner than their unique physical size.
+
+Spill files use DataFusion's `SpillManager` and the embedding runtime's
+`DiskManager`: configured directories, custom file factories, temporary-disk
+quotas and `datafusion.execution.spill_compression` are honored. No alternate
+storage service, global cache, persistent file format or Kusto-service blob is
+introduced. Writes run on blocking tasks holding a bounded resident prefix or
+one input batch, rather than performing synchronous disk I/O on async executor
+workers. Each consumer opens
+an independent unbuffered native read stream; spilled batches are split at the
+host's configured batch-row size. Dictionary replacement, rich dynamic values,
+native temporal/decimal/GUID types, schema metadata, empty inputs and
+zero-column row counts survive replay. Schema/decoder failures and unexpected
+replay row counts are explicit errors, not silently truncated results.
+
+**Budget boundary:** this bounds retained snapshot memory, not all process
+memory. Native IPC encoding/decoding, I/O buffers, returned batches and source
+providers still require working memory; a row limit does not bound the byte
+size of an individual value. Input/downstream operators need their own memory
+and native spill configuration. A completed in-memory snapshot is not later
+evicted just because an unrelated operator or query runs out of memory.
+Generic grouped-subquery buffers and state-machine scan buffers still do not
+gain spilling from this change. Configure bounded host memory/disk budgets and
+appropriate upstream batch/value sizes.
+
+Disabled disks, exhausted disk quotas, custom-backend failures and input errors
+fail explicitly. Initialization errors are shared with subsequent consumers;
+the snapshot is never replaced with empty or partially cached data. Canceling
+an unfinished initialization drops its partial files/reservations without
+publishing a snapshot; another consumer may retry initialization, so canceled
+attempts can reevaluate volatile input. Once a snapshot completes, fork legs,
+concurrent consumers and DataFrame clones replay it without reevaluating input.
+Files/reservations live until the last snapshot owner or active reader releases
+them. Cancellation of an in-flight blocking write releases its resources when
+that bounded write finishes. Snapshot spill metrics are exposed on
+`KqlMaterializeExec` and do not increase during warm replay.
+
+This is a host-controlled extension execution profile, not an emulation of
+Kusto's shared 5 GB-per-node service cache or its cache-exhaustion policy.
+Unbounded input plans are rejected before materialization execution.
+See `examples/materialized_snapshots.rs` for a bounded-runtime embedding.
 
 ## Cross-table search and find
 
@@ -874,7 +917,8 @@ do not bound the number of groups; configure host memory and disk budgets.
 Temporary sort/merge buffers are bounded per state, not separate query-local
 spill storage. Scalar accessors cache consecutive sketch inputs and results
 within each batch, avoiding repeated decode/estimation for frozen subqueries.
-Materialized query snapshots still do not spill.
+Materialized snapshots have their separate native spill/replay path described
+above; generic grouped-subquery buffers remain a distinct scaling boundary.
 
 Seven synthetic fixtures were captured from `help.kusto.windows.net/Samples`
 through Azure MCP on 2026-10-26, including the empty/default and nonpositive-weight
@@ -950,8 +994,8 @@ partial/final merge, grouped filters, state emission/reindexing, and
 DataFusion's pre-aggregation bypass. Sparse states avoid allocating 256 KiB
 for every tiny accuracy-4 group. Retained buffers are reported to the host
 memory pool; native aggregation can spill intermediate states when configured.
-This does not add spilling to materialized query snapshots or generic grouped
-subquery buffers.
+Materialized snapshots use the separate native spill path described above.
+Generic grouped-subquery buffers still require their own scaling work.
 
 The accuracy/budget semantics are grounded in the published
 [dcount](https://learn.microsoft.com/en-us/kusto/query/dcount-aggregation-function)

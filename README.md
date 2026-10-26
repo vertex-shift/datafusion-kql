@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.10 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.11 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -24,6 +24,7 @@ cargo run --example telemetry_functions
 cargo run --example distinct_sketches
 cargo run --example arrow_interop
 cargo run --example percentile_sketches
+cargo run --example materialized_snapshots
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -34,6 +35,8 @@ required.
 arrays with native `Unnest`, and aggregates the expanded measurements.
 `arrow_interop` queries native Arrow list columns directly, using a local table
 selector, hexadecimal threshold, regex normalization, and typed buffer expansion.
+`materialized_snapshots` reuses a larger-than-memory snapshot with the host's
+bounded memory pool and native temporary spill storage.
 
 ## Extend an existing DataFusion session
 
@@ -159,9 +162,13 @@ subqueries. Runtime scalar values can drive lazy native table ranges, and
 
 `materialize(...)` and `as hint.materialized=true` create lazy shared Arrow
 snapshots for repeated subqueries. Input partitions execute in parallel once,
-and cached buffers are charged to the host's DataFusion memory pool. Snapshots
+and cached buffers are charged to the host's DataFusion memory pool. When that
+pool cannot retain the snapshot, native Arrow IPC spill/replay uses the host's
+disk manager, quotas, and compression settings. Small snapshots stay in memory;
+disk-disabled or exhausted configurations still fail explicitly. Snapshots
 belong to the planned query/DataFrame, including its clones; plan a new query
-for a fresh snapshot. See the compatibility contract for lifetime and memory
+for a fresh snapshot. See the compatibility contract for lifetime, cancellation,
+and working-memory
 boundaries.
 
 `mv-apply` runs native per-row subqueries over zipped dynamic arrays. `partition`
