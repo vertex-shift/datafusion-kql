@@ -5,7 +5,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::TableReference;
 use datafusion::datasource::MemTable;
 use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
-use datafusion::execution::memory_pool::GreedyMemoryPool;
+use datafusion::execution::memory_pool::{FairSpillPool, GreedyMemoryPool, MemoryPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::physical_plan::execution_plan::reset_plan_states;
 use datafusion::physical_plan::{ExecutionPlan, collect, displayable};
@@ -226,12 +226,24 @@ fn arrow_context() -> SessionContext {
 }
 
 fn snapshot_context(spill: bool) -> SessionContext {
-    let runtime = RuntimeEnvBuilder::new()
-        .with_memory_pool(Arc::new(GreedyMemoryPool::new(if spill {
+    snapshot_context_with_pool(
+        spill,
+        Arc::new(GreedyMemoryPool::new(if spill {
             256 << 10
         } else {
             64 << 20
-        })))
+        })),
+        8192,
+    )
+}
+
+fn snapshot_context_with_pool(
+    spill: bool,
+    pool: Arc<dyn MemoryPool>,
+    batch_size: usize,
+) -> SessionContext {
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(pool)
         .with_disk_manager_builder(
             DiskManagerBuilder::default()
                 .with_mode(if spill {
@@ -245,7 +257,7 @@ fn snapshot_context(spill: bool) -> SessionContext {
         .unwrap();
     let mut config = SessionConfig::new()
         .with_target_partitions(4)
-        .with_batch_size(8192);
+        .with_batch_size(batch_size);
     config.options_mut().execution.sort_spill_reservation_bytes = 32 << 10;
     let ctx = SessionContext::new_with_config_rt(config, Arc::new(runtime));
     let mut partitions = vec![Vec::new(); 4];
@@ -429,7 +441,8 @@ fn benchmarks(c: &mut Criterion) {
     let cardinality = cardinality_context();
     let arrow = arrow_context();
     let grouped = snapshot_context(false);
-    let grouped_spill = snapshot_context(true);
+    let grouped_spill =
+        snapshot_context_with_pool(true, Arc::new(FairSpillPool::new(16 << 20)), 1024);
     let mut distinct_estimate = None;
     let mut workloads = c.benchmark_group("workloads");
     for (name, query, context, rows, expected_rows) in [

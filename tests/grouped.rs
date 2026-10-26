@@ -551,3 +551,30 @@ async fn arrow_key_ranges_match_grouped_aggregate_identity_for_reals_across_batc
     let actual = result(&ctx,"RealKeys | partition hint.strategy=native by k (where true | summarize N=count(),Total=sum(x)) | sort by Total asc").await;
     assert_eq!(actual, expected);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_native_groups_respect_a_fair_spill_pool() {
+    use datafusion::execution::memory_pool::FairSpillPool;
+    let pool: Arc<dyn MemoryPool> = Arc::new(FairSpillPool::new(16 << 20));
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(Arc::clone(&pool))
+        .build()
+        .unwrap();
+    let mut config = SessionConfig::new()
+        .with_target_partitions(4)
+        .with_batch_size(1024);
+    config.options_mut().execution.sort_spill_reservation_bytes = 32 << 10;
+    let ctx = SessionContext::new_with_config_rt(config, Arc::new(runtime));
+    register_groups(&ctx, 600_000);
+    let plan = ctx.kql("T | partition hint.strategy=native by g (extend v=2*x | summarize N=count(),Total=sum(v)) | summarize N=sum(N),Total=sum(Total),Groups=count()")
+        .await.unwrap().create_physical_plan().await.unwrap();
+    let result = collect(Arc::clone(&plan), ctx.task_ctx()).await.unwrap();
+    for (index, expected) in [(0, "600000"), (1, "359999400000"), (2, "3")] {
+        assert_eq!(
+            array_value_to_string(result[0].column(index), 0).unwrap(),
+            expected
+        );
+    }
+    assert!(grouped_spills(plan.as_ref()) > 0);
+    assert_released(&ctx, &pool).await;
+}

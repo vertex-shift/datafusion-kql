@@ -41,7 +41,7 @@ capacity estimates.
 | `workloads/scan_stateful` | Conditional state-machine scan over 10,000 rows, followed by a maximum |
 | `workloads/scan_stateful_100k` | The same state machine over 100,000 rows; assert state type and a valid reset peak |
 | `workloads/partition_template` | Generic per-key extend/aggregate templates over 1,000,000 rows and four keys with a 64 MiB pool |
-| `workloads/partition_template_spill` | The same generic templates under 256 KiB, asserting actual group-input spill metrics and exact totals |
+| `workloads/partition_template_spill` | The same generic templates under a 16 MiB fair pool, asserting actual group-input spill metrics and exact totals |
 | `workloads/mv_apply_top` | Parse 1,000 payloads and run native per-row top-two/aggregation subqueries |
 | `workloads/bag_unpack` | Parse/unpack 100,000 JSON payloads with a declared schema and aggregate array lengths by service |
 | `workloads/json_fields` | Equivalent service/latency extraction through ordinary property access over the same payloads |
@@ -89,6 +89,58 @@ Each execution iteration uses DataFusion's `reset_plan_states` to create fresh
 operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
+
+## Measured 0.12 grouped and stateful scaling
+
+Measured on 2026-10-26 on the same Apple M4/arm64 host, Rust 1.95.0,
+DataFusion 55.2.0 and optimized bench profile:
+
+```bash
+cargo bench --locked --bench kql -j 2 -- \
+  'workloads/(partition_template|scan_stateful)' \
+  --warm-up-time 1 --measurement-time 4 --sample-size 20
+```
+
+| Workload | Criterion estimate | 95% confidence interval |
+| --- | --- | --- |
+| Conditional state-machine scan, 10,000 rows | 9.76 ms | 9.61-9.98 ms |
+| Same state machine, 100,000 rows | 97.44 ms | 96.39-98.53 ms |
+| Four generic partition templates, 1,000,000 rows, resident | 9.51 ms | 9.35-9.73 ms |
+| Same templates with actual group-input spill/replay | 93.48 ms | 91.75-95.18 ms |
+
+The scan's reset-dependent state cannot use the cumulative-window fast path.
+Retained output sizes are now updated incrementally, rather than recounting
+the growing batch after every input row. The two sizes show roughly linear
+scaling at about one million input rows/second on this fixture. They assert
+native long state, a valid reset peak and the presence of `KqlScanExec`.
+Separate regressions compare exact results across batch sizes 1, 7, 256 and
+8,192. The earlier historical 10,000-row state-machine measurement below was
+273 ms, but it is not a same-run isolated attribution of every improvement.
+
+The partition fixture uses multi-operator extend/aggregate subqueries, so it
+must retain `KqlApplyExec` rather than silently benchmarking the vectorized
+single-aggregate specialization. Both profiles assert exactly one million
+rows, four groups and doubled-value total `999999000000`. The resident profile
+uses a 64 MiB greedy pool and 8,192-row batches. The spilling profile uses a
+16 MiB **fair** spill pool, 1,024-row batches and native sort merge reservation
+of 32 KiB per partition. It must record nonzero **group-input** spill metrics,
+not merely upstream-sort spilling, and release temporary files after output.
+The different memory/batch profiles and disk work are not an isolated cache
+overhead comparison or a speed advantage over DataFusion.
+
+Initial attempts with a 256 KiB or 2 MiB concurrent producer budget failed
+inside native external sorting before it could deliver the next batch. Group
+spilling does not remove producer/repartition/sort working-memory requirements,
+nor can it promise that every arbitrarily small host pool will work. Fair
+sharing and an adequate producer budget are deliberate embedding decisions,
+not hidden runtime overrides. Separate single-partition regressions force
+actual generic-group spilling under a 512 KiB pool.
+
+These are short shared-host measurements with timing outliers and variation
+between runs. Tiny-group template initialization remains a cost; this fixture
+does not establish performance for hundreds of thousands of distinct keys.
+The full benchmark preflight checks still run, including exact numeric
+SQL/KQL native-plan equivalence.
 
 ## Measured 0.11 materialized snapshots
 
