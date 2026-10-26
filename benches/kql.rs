@@ -1,9 +1,12 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use datafusion::arrow::array::{Int64Array, StringArray};
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::array::{Int64Array, ListArray, StringArray};
+use datafusion::arrow::datatypes::{DataType, Field, Int64Type, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::TableReference;
 use datafusion::datasource::MemTable;
+use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
+use datafusion::execution::memory_pool::GreedyMemoryPool;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::physical_plan::execution_plan::reset_plan_states;
 use datafusion::physical_plan::{collect, displayable};
 use datafusion::prelude::*;
@@ -42,6 +45,18 @@ const NATIVE_DCOUNT_QUERY: &str = "CardinalityEvents | summarize N=approx_distin
 const GROUPED_DCOUNT_QUERY: &str =
     "CardinalityEvents | summarize N=dcount(Id,4) by Group | summarize Total=sum(N),Groups=count()";
 const HLL_ROLLUP_QUERY: &str = "CardinalityEvents | summarize s=hll(Id,2) by Shard | summarize s=hll_merge(s) | project N=dcount_hll(s)";
+const ARROW_QUERY: &str =
+    "ArrowEvents | mv-expand Values to typeof(long) | summarize Total=sum(Values)";
+const ARROW_SQL: &str = "SELECT coalesce(sum(v),0) AS \"Total\" FROM (SELECT UNNEST(\"Values\") AS v FROM \"ArrowEvents\")";
+const ARROW_DYNAMIC_QUERY: &str = "ArrowEvents | extend d=todynamic(Values) | mv-expand d to typeof(long) | summarize Total=sum(d)";
+const INDEXOF_QUERY: &str = "Telemetry | summarize Total=sum(indexof(Message,' '))";
+const TEXT_REWRITE_QUERY: &str = "Telemetry | extend Rewritten=replace_regex(strrep(Message,2,';'),@'\\s+','_') | summarize N=countif(indexof(Rewritten,' ')==-1 and indexof(Rewritten,';')>=0)";
+const PERCENTILE_QUERY: &str = "CardinalityEvents | summarize percentiles(Id,0,50,95,99,100)";
+const EXACT_PERCENTILE_QUERY: &str =
+    "CardinalityEvents | summarize percentiles_exact(Id,0,50,95,99,100)";
+const TDIGEST_ROLLUP_QUERY: &str = "CardinalityEvents | summarize s=tdigest(Id) by Shard | summarize s=tdigest_merge(s) | extend a=percentiles_array_tdigest(s,0,50,95,99,100) | project low=tolong(a[0]),median=tolong(a[1]),p95=tolong(a[2]),p99=tolong(a[3]),high=tolong(a[4])";
+const GROUPED_PERCENTILE_QUERY: &str = "CardinalityEvents | summarize p=percentile(Id,50) by Group | summarize Bad=countif(p!=Group+400000),Groups=count()";
+const SNAPSHOT_QUERY: &str = "let T=materialize(SnapshotEvents); union (T | where Id<500000 | summarize Total=sum(Id),N=count()),(T | where Id>=500000 | summarize Total=sum(Id),N=count()) | summarize Total=sum(Total),N=sum(N)";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -191,6 +206,146 @@ fn cardinality_context() -> SessionContext {
     ctx
 }
 
+fn arrow_context() -> SessionContext {
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let values = ListArray::from_iter_primitive::<Int64Type, _, _>(
+        (0..JSON_ROWS).map(|_| Some(vec![Some(1), Some(2), Some(3)])),
+    );
+    let batch = RecordBatch::try_from_iter(vec![("Values", Arc::new(values) as _)]).unwrap();
+    let partitions = (0..4)
+        .map(|i| vec![batch.slice(i * JSON_ROWS / 4, JSON_ROWS / 4)])
+        .collect();
+    ctx.register_table(
+        TableReference::bare("ArrowEvents"),
+        Arc::new(MemTable::try_new(batch.schema(), partitions).unwrap()),
+    )
+    .unwrap();
+    ctx
+}
+
+fn snapshot_context(spill: bool) -> SessionContext {
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(Arc::new(GreedyMemoryPool::new(if spill {
+            256 << 10
+        } else {
+            64 << 20
+        })))
+        .with_disk_manager_builder(
+            DiskManagerBuilder::default()
+                .with_mode(if spill {
+                    DiskManagerMode::OsTmpDirectory
+                } else {
+                    DiskManagerMode::Disabled
+                })
+                .with_max_temp_directory_size(64 << 20),
+        )
+        .build()
+        .unwrap();
+    let ctx = SessionContext::new_with_config_rt(
+        SessionConfig::new()
+            .with_target_partitions(4)
+            .with_batch_size(8192),
+        Arc::new(runtime),
+    );
+    let mut partitions = vec![Vec::new(); 4];
+    for (index, start) in (0..ROWS).step_by(8192).enumerate() {
+        let batch = RecordBatch::try_from_iter(vec![(
+            "Id",
+            Arc::new(Int64Array::from_iter_values(
+                (start..ROWS.min(start + 8192)).map(|i| i as i64),
+            )) as _,
+        )])
+        .unwrap();
+        partitions[index % 4].push(batch);
+    }
+    let schema = partitions[0][0].schema();
+    ctx.register_table(
+        TableReference::bare("SnapshotEvents"),
+        Arc::new(MemTable::try_new(schema, partitions).unwrap()),
+    )
+    .unwrap();
+    ctx
+}
+
+fn snapshot_result(result: &[RecordBatch]) {
+    use datafusion::common::ScalarValue;
+    assert_eq!(result.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+    for (index, expected) in [(0, 499_999_500_000), (1, ROWS as i64)] {
+        assert_eq!(
+            ScalarValue::try_from_array(result[0].column(index), 0).unwrap(),
+            ScalarValue::Int64(Some(expected))
+        );
+    }
+}
+
+fn snapshot_benchmarks(c: &mut Criterion, runtime: &Runtime) {
+    let mut group = c.benchmark_group("materialize");
+    group.throughput(Throughput::Elements(ROWS as u64));
+    for (name, spill) in [("memory", false), ("spill", true)] {
+        let ctx = snapshot_context(spill);
+        let plan = runtime.block_on(async {
+            ctx.kql(SNAPSHOT_QUERY)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap()
+        });
+        let result = runtime
+            .block_on(collect(
+                reset_plan_states(Arc::clone(&plan)).unwrap(),
+                ctx.task_ctx(),
+            ))
+            .unwrap();
+        snapshot_result(&result);
+        let disk = Arc::clone(&ctx.runtime_env().disk_manager);
+        let retained_bytes = disk.used_disk_space();
+        assert_eq!(retained_bytes > 0, spill);
+        assert_eq!(
+            disk.spilling_progress().active_files_count,
+            if spill { 4 } else { 0 }
+        );
+        let replay = runtime
+            .block_on(collect(
+                reset_plan_states(Arc::clone(&plan)).unwrap(),
+                ctx.task_ctx(),
+            ))
+            .unwrap();
+        snapshot_result(&replay);
+        assert_eq!(disk.used_disk_space(), retained_bytes);
+        group.bench_function(format!("{name}_cold"), |b| {
+            b.to_async(runtime).iter(|| async {
+                ctx.kql(SNAPSHOT_QUERY)
+                    .await
+                    .unwrap()
+                    .collect()
+                    .await
+                    .unwrap()
+            })
+        });
+        assert_eq!(
+            disk.used_disk_space(),
+            retained_bytes,
+            "cold queries must release their files"
+        );
+        group.bench_function(format!("{name}_warm"), |b| {
+            b.to_async(runtime).iter(|| async {
+                collect(
+                    reset_plan_states(Arc::clone(&plan)).unwrap(),
+                    ctx.task_ctx(),
+                )
+                .await
+                .unwrap()
+            })
+        });
+        assert_eq!(disk.used_disk_space(), retained_bytes);
+        drop(plan);
+        assert_eq!(disk.used_disk_space(), 0);
+        assert_eq!(ctx.runtime_env().memory_pool.reserved(), 0);
+    }
+    group.finish();
+}
+
 fn benchmarks(c: &mut Criterion) {
     c.bench_function("parse/kql_pipeline", |b| {
         b.iter(|| parse(black_box(QUERY)).unwrap())
@@ -256,6 +411,7 @@ fn benchmarks(c: &mut Criterion) {
     let guids = guid_context();
     let telemetry = telemetry_context();
     let cardinality = cardinality_context();
+    let arrow = arrow_context();
     let mut distinct_estimate = None;
     let mut workloads = c.benchmark_group("workloads");
     for (name, query, context, rows, expected_rows) in [
@@ -280,17 +436,61 @@ fn benchmarks(c: &mut Criterion) {
         ("dcount_native", NATIVE_DCOUNT_QUERY, &cardinality, ROWS, 1),
         ("dcount_groups", GROUPED_DCOUNT_QUERY, &cardinality, ROWS, 1),
         ("hll_rollup", HLL_ROLLUP_QUERY, &cardinality, ROWS, 1),
+        ("arrow_expand", ARROW_QUERY, &arrow, JSON_ROWS, 1),
+        ("arrow_expand_sql", ARROW_SQL, &arrow, JSON_ROWS, 1),
+        (
+            "arrow_dynamic_expand",
+            ARROW_DYNAMIC_QUERY,
+            &arrow,
+            JSON_ROWS,
+            1,
+        ),
+        ("indexof", INDEXOF_QUERY, &telemetry, JSON_ROWS, 1),
+        ("text_rewrite", TEXT_REWRITE_QUERY, &telemetry, JSON_ROWS, 1),
+        (
+            "bounded_percentiles",
+            PERCENTILE_QUERY,
+            &cardinality,
+            ROWS,
+            1,
+        ),
+        (
+            "exact_percentiles",
+            EXACT_PERCENTILE_QUERY,
+            &cardinality,
+            ROWS,
+            1,
+        ),
+        (
+            "tdigest_rollup",
+            TDIGEST_ROLLUP_QUERY,
+            &cardinality,
+            ROWS,
+            1,
+        ),
+        (
+            "percentile_groups",
+            GROUPED_PERCENTILE_QUERY,
+            &cardinality,
+            ROWS,
+            1,
+        ),
     ] {
         let plan = runtime.block_on(async {
-            context
-                .kql(query)
-                .await
-                .unwrap()
-                .create_physical_plan()
-                .await
-                .unwrap()
+            let frame = if name == "arrow_expand_sql" {
+                context.sql(query).await.unwrap()
+            } else {
+                context.kql(query).await.unwrap()
+            };
+            frame.create_physical_plan().await.unwrap()
         });
         let native = displayable(plan.as_ref()).indent(false).to_string();
+        if name == "arrow_expand" {
+            assert!(
+                native.contains("__kql_native_expand_list"),
+                "typed Arrow expansion must not use the JSON conversion path"
+            );
+        }
         if name == "partition_top" {
             assert!(
                 !native.contains("KqlApplyExec"),
@@ -322,6 +522,25 @@ fn benchmarks(c: &mut Criterion) {
             expected_rows,
             "unexpected result cardinality for {name}",
         );
+        if matches!(
+            name,
+            "arrow_expand"
+                | "arrow_expand_sql"
+                | "arrow_dynamic_expand"
+                | "indexof"
+                | "text_rewrite"
+        ) {
+            let expected = match name {
+                "indexof" => 300_000,
+                "text_rewrite" => JSON_ROWS as i64,
+                _ => (JSON_ROWS * 6) as i64,
+            };
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(expected)),
+                "incorrect result for {name}"
+            );
+        }
         if matches!(name, "dcount_accuracy" | "dcount_native" | "hll_rollup") {
             let value =
                 datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap();
@@ -350,6 +569,40 @@ fn benchmarks(c: &mut Criterion) {
             assert_eq!(
                 datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
                 datafusion::common::ScalarValue::Int64(Some(ROWS as i64))
+            );
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(1), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(100_000))
+            );
+        }
+        if matches!(
+            name,
+            "bounded_percentiles" | "exact_percentiles" | "tdigest_rollup"
+        ) {
+            assert_eq!(result[0].num_columns(), 5);
+            for (index, p) in [0.0_f64, 50.0, 95.0, 99.0, 100.0].into_iter().enumerate() {
+                let value =
+                    datafusion::common::ScalarValue::try_from_array(result[0].column(index), 0)
+                        .unwrap();
+                let datafusion::common::ScalarValue::Int64(Some(estimate)) = value else {
+                    panic!("percentile benchmarks must preserve long output");
+                };
+                let target = (p / 100.0 * ROWS as f64).ceil().max(1.0) as i64 - 1;
+                let rank_error = (estimate - target).abs();
+                if name == "exact_percentiles" || p == 0.0 || p == 100.0 {
+                    assert_eq!(estimate, target, "{name},p={p}");
+                } else {
+                    assert!(
+                        rank_error <= ROWS as i64 / 100,
+                        "{name},p={p},estimate={estimate},rank error={rank_error}"
+                    );
+                }
+            }
+        }
+        if name == "percentile_groups" {
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(0))
             );
             assert_eq!(
                 datafusion::common::ScalarValue::try_from_array(result[0].column(1), 0).unwrap(),
@@ -424,6 +677,7 @@ fn benchmarks(c: &mut Criterion) {
         });
     }
     workloads.finish();
+    snapshot_benchmarks(c, &runtime);
 }
 
 criterion_group!(benches, benchmarks);

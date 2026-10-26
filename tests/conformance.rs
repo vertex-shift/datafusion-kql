@@ -18,7 +18,8 @@ struct Fixture {
     columns: &'static [&'static str],
     rows: &'static [&'static [&'static str]],
 }
-// Captured through Azure MCP from help.kusto.windows.net/Samples on 2026-10-25.
+// Baseline captured through Azure MCP from help.kusto.windows.net/Samples on
+// 2026-10-25; additional dated capture cohorts are marked below.
 const FIXTURES: &[Fixture] = &[
     Fixture {
         name: "exact-decimal-arithmetic",
@@ -657,33 +658,129 @@ const FIXTURES: &[Fixture] = &[
             "1E+37",
         ]],
     },
-];
-
-// Published-contract fixtures awaiting a live engine run, not captured results.
-const SOURCE_FIXTURES: &[Fixture] = &[
+    // Captured through Azure MCP from the same public cluster on 2026-10-26.
     Fixture {
-        name: "source-hll-published-scalar-merge",
+        name: "tdigest-weighted-accessors",
+        query: "datatable(x:long,w:long)[10,1,20,8,30,1] | summarize s=tdigest(x,w) | project p=tostring(percentile_tdigest(s,50)),dynamicType=gettype(percentile_tdigest(s,50)),typed=tostring(percentile_tdigest(s,50,typeof(long))),a=tostring(percentiles_array_tdigest(s,dynamic([0,50,100]))),typedArray=tostring(percentiles_array_tdigest(s,dynamic([0,50,100]),typeof(long)))",
+        columns: &["p", "dynamicType", "typed", "a", "typedArray"],
+        rows: &[&["20", "long", "20", "[10,20,30]", "[10,20,30]"]],
+    },
+    Fixture {
+        name: "tdigest-empty-defaults",
+        query: "datatable(x:long,w:long)[] | summarize p=percentile(x,50),a=percentiles_array(x,0,100),s=tdigest(x,w) | project pnull=tostring(isnull(p)),anull=tostring(isnull(a)),snull=tostring(isnull(s)),decoded=tostring(isnull(percentile_tdigest(s,50))),typed=tostring(isnull(percentile_tdigest(s,50,typeof(long))))",
+        columns: &["pnull", "anull", "snull", "decoded", "typed"],
+        rows: &[&["True", "True", "True", "True", "True"]],
+    },
+    Fixture {
+        name: "tdigest-datetime-types",
+        query: "datatable(t:datetime)[datetime(2025-01-01),datetime(2025-01-02),datetime(2025-01-03)] | summarize p=percentile(t,50),a=percentiles_array(t,0,100),s=tdigest(t) | project native=gettype(p),same=tostring(p==datetime(2025-01-02)),nested=gettype(a[0]),typed=tostring(percentile_tdigest(s,50,typeof(datetime))==p),nestedSketch=gettype(percentiles_array_tdigest(s,0,100)[0])",
+        columns: &["native", "same", "nested", "typed", "nestedSketch"],
+        rows: &[&["datetime", "True", "datetime", "True", "datetime"]],
+    },
+    Fixture {
+        name: "tdigest-timespan-types",
+        query: "datatable(t:timespan)[1h,2h,3h] | summarize p=percentile(t,50),s=tdigest(t) | project native=gettype(p),same=tostring(p==2h),typed=tostring(percentile_tdigest(s,50,typeof(timespan))==p),arrayType=gettype(percentiles_array_tdigest(s,dynamic([50]),typeof(timespan))[0])",
+        columns: &["native", "same", "typed", "arrayType"],
+        rows: &[&["timespan", "True", "True", "timespan"]],
+    },
+    Fixture {
+        name: "tdigest-nonpositive-weights",
+        query: "datatable(x:long,w:long)[10,-1,20,0,30,long(null),40,1] | summarize s=tdigest(x,w),p=percentilew(x,w,50) | project p=tostring(p),decoded=tostring(percentile_tdigest(s,50,typeof(long)))",
+        columns: &["p", "decoded"],
+        rows: &[&["40", "40"]],
+    },
+    Fixture {
+        name: "tdigest-scalar-merge-aliases",
+        query: "range x from 1 to 10 step 1 | summarize a=tdigest(x),b=tdigest(x+10) | project p=tostring(percentile_tdigest(tdigest_merge(a,b),50,typeof(long))),q=tostring(percentile_tdigest(merge_tdigest(a,b),50,typeof(long))),r=tostring(percentiles_array_tdigest(a,0,50,100))",
+        columns: &["p", "q", "r"],
+        rows: &[&["10", "10", "[1,5,10]"]],
+    },
+    Fixture {
+        name: "tdigest-single-rank-array-shape",
+        query: "range x from 1 to 3 step 1 | summarize s=tdigest(x) | extend untyped=percentiles_array_tdigest(s,dynamic([50])),typed=percentiles_array_tdigest(s,dynamic([50]),typeof(long)) | project untypedKind=gettype(untyped),untyped=tostring(untyped),typedKind=gettype(typed),typed=tostring(typed),element=gettype(typed[0])",
+        columns: &["untypedKind", "untyped", "typedKind", "typed", "element"],
+        rows: &[&["array", "[2]", "array", "[2]", "long"]],
+    },
+    // Former source-only fixtures, now captured on 2026-10-26.
+    Fixture {
+        name: "hll-published-scalar-merge",
         query: "range x from 1 to 10 step 1 | extend y=x+10 | summarize a=hll(x),b=hll(y) | project N=tostring(dcount_hll(hll_merge(a,b)))",
         columns: &["N"],
         rows: &[&["20"]],
     },
     Fixture {
-        name: "source-hll-exact-threshold",
+        name: "hll-exact-threshold",
         query: "range x from 1 to 1000 step 1 | summarize N=dcount(x,1),s=hll(x,1) | project N=tostring(N),Restored=tostring(dcount_hll(s))",
         columns: &["N", "Restored"],
         rows: &[&["1000", "1000"]],
     },
     Fixture {
-        name: "source-hll-conditional-grouped-merge",
+        name: "hll-conditional-grouped-merge",
         query: "range x from 1 to 20 step 1 | extend g=x%2 | summarize s=hll_if(x,x>10,2) by g | summarize s=hll_merge(s) | project N=tostring(dcount_hll(s))",
         columns: &["N"],
         rows: &[&["10"]],
     },
     Fixture {
-        name: "source-hll-empty-count",
+        name: "hll-empty-count",
         query: "datatable(x:long)[] | summarize N=dcount(x,2),s=hll(x,2) | project N=tostring(N),Restored=tostring(dcount_hll(s))",
         columns: &["N", "Restored"],
         rows: &[&["0", "0"]],
+    },
+    Fixture {
+        name: "indexof-reference-optional-arguments",
+        query: "print a=tostring(indexof('abcdefg','cde')),b=tostring(indexof('abcdefg','cde',1,4)),c=tostring(indexof('abcdefg','cde',1,2)),d=tostring(indexof('abcdefg','cde',3,4)),e=tostring(indexof('abcdefg','cde',-5)),f=tostring(indexof(1234567,5,1,4)),g=tostring(indexof('abcdefg','cde',2,-1)),h=tostring(indexof('abcdefgabcdefg','cde',1,10,2)),i=tostring(indexof('abcdefgabcdefg','cde',1,-1,3))",
+        columns: &["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        rows: &[&["2", "2", "2", "-1", "2", "4", "2", "9", "-1"]],
+    },
+    Fixture {
+        name: "strrep-published-coercion",
+        query: "print a=strrep('ABC',2),b=strrep(123,3,'.'),c=strrep(3s,2,' ')",
+        columns: &["a", "b", "c"],
+        rows: &[&["ABCABC", "123.123.123", "00:00:03 00:00:03"]],
+    },
+    Fixture {
+        name: "replace-regex-published-capture",
+        query: r#"range x from 1 to 3 step 1 | extend text=strcat('Number is ',tostring(x)) | project text=replace_regex(text,@'is (\d+)',@'was: \1')"#,
+        columns: &["text"],
+        rows: &[&["Number was: 1"], &["Number was: 2"], &["Number was: 3"]],
+    },
+    Fixture {
+        name: "hexadecimal-long-literal",
+        query: "print value=tostring(0xf),['kind']=gettype(0xf)",
+        columns: &["value", "kind"],
+        rows: &[&["15", "long"]],
+    },
+    Fixture {
+        name: "spelled-timespan-constructor",
+        query: "print same=tostring(timespan(15 seconds)==15s),days=tostring(timespan(2)==2d)",
+        columns: &["same", "days"],
+        rows: &[&["True", "True"]],
+    },
+    Fixture {
+        name: "indexof-window-overlap-and-unicode",
+        query: "print a=tostring(indexof('ababa','aba',0,1)),b=tostring(indexof('ababa','aba',1,1)),c=tostring(indexof('ababa','aba',2,1)),d=tostring(indexof('ababa','aba',2,0)),e=tostring(indexof('abc','b',0,1)),f=tostring(indexof('ababab','ab',0,1,2)),g=tostring(indexof('aaaa','aa',0,-1,2)),h=tostring(indexof('abc','',0,-1,4)),i=tostring(indexof('é中🙂abc','a')),j=tostring(indexof('é中🙂abc','中🙂',1,1)),k=tostring(indexof('🙂a','a',1,1)),l=tostring(indexof('🙂a','🙂',1,-1)),m=tostring(indexof('é中🙂abc','🙂',-4,1)),n=tostring(strlen('é中🙂abc'))",
+        columns: &[
+            "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n",
+        ],
+        rows: &[&[
+            "0", "-1", "2", "-1", "-1", "-1", "1", "0", "3", "1", "1", "-1", "2", "6",
+        ]],
+    },
+    Fixture {
+        name: "indexof-empty-and-clamped-starts",
+        query: "print a=tostring(indexof('abc','',0,0)),b=tostring(indexof('abc','',3,0)),c=tostring(indexof('abc','',3,-1)),d=tostring(indexof('abc','',4,-1)),e=tostring(indexof('','',0,0)),f=tostring(indexof('abc','a',-4,-1)),g=tostring(indexof('abc','',-4,-1)),h=tostring(indexof('abc','b',0,9223372036854775807))",
+        columns: &["a", "b", "c", "d", "e", "f", "g", "h"],
+        rows: &[&["0", "0", "0", "0", "-1", "0", "0", "1"]],
+    },
+    Fixture {
+        name: "indexof-runtime-invalid-bounds",
+        query: "datatable(caseName:string,start:long,n:long)['negative-length',0,-2,'null-start',long(null),-1,'null-length',0,long(null)] | project caseName,pos=tostring(indexof('abc','a',start,n)),empty=tostring(indexof('abc','',start,n)) | order by caseName asc",
+        columns: &["caseName", "pos", "empty"],
+        rows: &[
+            &["negative-length", "", ""],
+            &["null-length", "", ""],
+            &["null-start", "", ""],
+        ],
     },
 ];
 
@@ -985,20 +1082,6 @@ async fn captured_reference_fixtures_match_locally() -> TestResult<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn source_hll_fixtures_match_published_contracts_locally() -> TestResult<()> {
-    let ctx = SessionContext::new();
-    for fixture in SOURCE_FIXTURES {
-        assert!(
-            !FIXTURES
-                .iter()
-                .any(|captured| captured.name == fixture.name)
-        );
-        check_expected(&ctx, fixture).await?;
-    }
-    Ok(())
-}
-
 #[test]
 fn reference_endpoint_validation_rejects_credential_leaks_and_nonlocal_plaintext() {
     assert!(endpoint("https://cluster.region.kusto.windows.net").is_ok());
@@ -1147,7 +1230,7 @@ fn reference_transport_local_http() -> TestResult<()> {
 async fn live_kusto_conformance() -> TestResult<()> {
     let client = Kusto::from_env()?;
     let ctx = SessionContext::new();
-    for fixture in FIXTURES.iter().chain(SOURCE_FIXTURES) {
+    for fixture in FIXTURES {
         let (columns, expected) = local(&ctx, fixture).await?;
         let actual = client
             .query(fixture.query, &columns)

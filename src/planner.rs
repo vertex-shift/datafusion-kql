@@ -84,6 +84,9 @@ impl<'s> Planner<'s> {
         track_order: bool,
         parameters: &QueryParameters,
     ) -> Result<Self> {
+        for value in parameters.values() {
+            crate::arrow_dynamic::validate_nesting(&value.data_type())?;
+        }
         let now = state
             .execution_props()
             .query_execution_start_time
@@ -302,6 +305,9 @@ impl<'s> Planner<'s> {
             .table(reference.table())
             .await?
             .ok_or_else(|| Error::Plan(format!("unknown table '{reference}'")))?;
+        for field in provider.schema().fields() {
+            crate::arrow_dynamic::validate_nesting(field.data_type())?;
+        }
         let plan =
             LogicalPlanBuilder::scan(reference, provider_as_source(provider), None)?.build()?;
         self.normalize_strings(plan)
@@ -349,6 +355,9 @@ impl<'s> Planner<'s> {
                     let provider = schema.table(&name).await?.ok_or_else(|| {
                         Error::Plan(format!("table '{name}' was removed during planning"))
                     })?;
+                    for field in provider.schema().fields() {
+                        crate::arrow_dynamic::validate_nesting(field.data_type())?;
+                    }
                     let mut path = prefix.clone();
                     path.push(name);
                     let reference = table_reference(&path, *span)?;
@@ -2096,9 +2105,10 @@ impl<'s> Planner<'s> {
             let expression = self
                 .expressions()
                 .scalar(&column.value.expr, plan.schema())?;
-            if !dynamic::is_dynamic(&expression.get_type(plan.schema().as_ref())?) {
+            let ty = expression.get_type(plan.schema().as_ref())?;
+            if !dynamic::is_dynamic(&ty) && !crate::arrow_dynamic::is_collection(&ty) {
                 return Err(Error::syntax(
-                    "mv-expand requires a dynamic array or property bag",
+                    "mv-expand requires a dynamic or native Arrow collection",
                     column.value.expr.span,
                 ));
             }
@@ -2112,6 +2122,53 @@ impl<'s> Planner<'s> {
             return Err(Error::Plan(format!(
                 "mv-expand index column '{index}' already exists"
             )));
+        }
+        if sources.len() == 1
+            && index.is_none()
+            && !self.track_order
+            && limit > 0
+            && let Some(ty) = targets[0].2.filter(|ty| *ty != ast::ScalarType::Dynamic)
+            && let Some(mut value) = crate::arrow_dynamic::typed_list(
+                sources[0].clone(),
+                &sources[0].get_type(plan.schema())?,
+                &data_type(ty),
+            )
+        {
+            if limit < dynamic::MAX_COLLECTION_SIZE {
+                value = self
+                    .expressions()
+                    .function("array_slice", vec![value, lit(1_i64), lit(limit as i64)])?;
+            }
+            let temporary = self.temporary_name(&plan);
+            projection.push(value.alias(&temporary));
+            let expanded = LogicalPlanBuilder::from(plan.clone())
+                .project(projection)?
+                .unnest_column_with_options(
+                    Column::from_name(&temporary),
+                    datafusion::common::UnnestOptions::new().with_preserve_nulls(true),
+                )?
+                .build()?;
+            let name = &targets[0].0;
+            let value = Expr::Column(Column::from_name(temporary));
+            let mut outputs = plan
+                .schema()
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(i, field)| {
+                    if field.name() == name {
+                        value.clone().alias(name)
+                    } else {
+                        field_expr(&plan, i)
+                    }
+                })
+                .collect::<Vec<_>>();
+            if plan.schema().index_of_column_by_name(None, name).is_none() {
+                outputs.push(value.alias(name));
+            }
+            return Ok(LogicalPlanBuilder::from(expanded)
+                .project(outputs)?
+                .build()?);
         }
         let temporary = self.temporary_name(&plan);
         projection.push(
@@ -2550,8 +2607,13 @@ pub(crate) fn default_name(expr: &ast::Expr, index: usize) -> String {
     match &expr.kind {
         ExprKind::Identifier(parts) => parts.last().expect("identifiers are nonempty").clone(),
         ExprKind::Call { name, args } => {
-            if name == "hll_merge" && args.len() >= 2 {
-                return "hll_merged_result".into();
+            if args.len() >= 2 {
+                if name == "hll_merge" {
+                    return "hll_merged_result".into();
+                }
+                if matches!(name.as_str(), "tdigest_merge" | "merge_tdigest") {
+                    return "tdigests_merge_result".into();
+                }
             }
             let column = args.first().and_then(|arg| {
                 if let ExprKind::Identifier(parts) = &arg.kind {
@@ -2571,6 +2633,8 @@ pub(crate) fn default_name(expr: &ast::Expr, index: usize) -> String {
                 "make_bag" | "make_bag_if" | "make_dictionary" => "bag",
                 "take_any" | "any" | "take_anyif" => "any",
                 "percentiles_array" | "percentilesw_array" => "percentiles",
+                "tdigest_merge" | "merge_tdigest" => "merge_tdigests",
+                "percentiles_array_tdigest" | "percentile_array_tdigest" => "percentile_tdigest",
                 name => name,
             };
             if matches!(name, "percentile" | "percentilew") && args.len() >= 2 {

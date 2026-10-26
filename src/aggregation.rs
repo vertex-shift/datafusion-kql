@@ -107,7 +107,10 @@ pub(crate) fn plan(
                 }
                 continue;
             }
-            if matches!(name.as_str(), "percentiles" | "percentilesw") {
+            if matches!(
+                name.as_str(),
+                "percentiles" | "percentilesw" | "percentiles_exact" | "percentilesw_exact"
+            ) {
                 if item.name.is_some() {
                     return Err(Error::unsupported(
                         "rename multiple percentile outputs with project-rename after summarize",
@@ -122,8 +125,12 @@ pub(crate) fn plan(
                     "Column".into()
                 };
                 for (i, rank) in ranks.iter().enumerate() {
-                    let output =
-                        format!("percentile_{base}_{}", rank.to_string().replace('.', "_"));
+                    let prefix = if name.ends_with("_exact") {
+                        "percentile_exact"
+                    } else {
+                        "percentile"
+                    };
+                    let output = format!("{prefix}_{base}_{}", rank.to_string().replace('.', "_"));
                     let reference = collector.reference(
                         root.clone(),
                         Post::Field(format!("percentile_{i}")),
@@ -264,7 +271,10 @@ impl Collector<'_> {
     fn rewrite(&mut self, expression: &ast::Expr) -> Result<ast::Expr> {
         if let ExprKind::Call { name, args } = &expression.kind
             && is_aggregate(self.expressions.state, name)
-            && !(name == "hll_merge" && args.len() != 1)
+            && !(matches!(
+                name.as_str(),
+                "hll_merge" | "tdigest_merge" | "merge_tdigest"
+            ) && args.len() != 1)
         {
             let (root, post) = self.aggregate(name, args, expression.span)?;
             return self.reference(root, post, expression.span);
@@ -273,6 +283,32 @@ impl Collector<'_> {
     }
 
     fn aggregate(&self, name: &str, args: &[ast::Expr], span: Span) -> Result<(Expr, Post)> {
+        if matches!(name, "tdigest" | "tdigest_merge" | "merge_tdigest") {
+            let result = if name == "tdigest" {
+                if !(1..=2).contains(&args.len()) {
+                    return Err(Error::syntax(
+                        "tdigest expects a value and optional weight",
+                        span,
+                    ));
+                }
+                let (kind, value, weight) = self.percentile_input(args, args.len() == 2, false)?;
+                crate::tdigest_functions::build(kind, value, weight)
+            } else {
+                if args.len() != 1 {
+                    return Err(Error::syntax(
+                        "aggregate tdigest_merge expects one sketch column",
+                        span,
+                    ));
+                }
+                let value = self.expressions.scalar(&args[0], &self.schema)?;
+                crate::tdigest_functions::merge_aggregate(self.expressions.sketch_value(
+                    value,
+                    &self.schema,
+                    args[0].span,
+                )?)
+            };
+            return Ok((result, Post::Direct));
+        }
         if matches!(name, "dcount" | "dcountif" | "hll" | "hll_if" | "hll_merge") {
             return self
                 .hll(name, args, span)
@@ -280,9 +316,16 @@ impl Collector<'_> {
         }
         if matches!(
             name,
-            "percentile" | "percentilew" | "percentiles_array" | "percentilesw_array"
+            "percentile"
+                | "percentilew"
+                | "percentiles_array"
+                | "percentilesw_array"
+                | "percentile_exact"
+                | "percentilew_exact"
+                | "percentiles_array_exact"
+                | "percentilesw_array_exact"
         ) {
-            let output = if name.ends_with("_array") {
+            let output = if name.contains("_array") {
                 QuantileOutput::Array
             } else {
                 QuantileOutput::Single
@@ -461,7 +504,8 @@ impl Collector<'_> {
             );
         }
         if (native == "approx_distinct" || native == "count" && distinct)
-            && dynamic::is_dynamic(&values[0].get_type(self.schema.as_ref())?)
+            && (dynamic::is_dynamic(&values[0].get_type(self.schema.as_ref())?)
+                || crate::arrow_dynamic::is_collection(&values[0].get_type(self.schema.as_ref())?))
         {
             values[0] = when(values[0].clone().is_null(), lit(ScalarValue::Utf8(None)))
                 .otherwise(dynamic::call(Kernel::EncodeWire, vec![values[0].clone()]))?;
@@ -541,7 +585,7 @@ impl Collector<'_> {
             let value = self.expressions.scalar(&args[0], &self.schema)?;
             let value = self
                 .expressions
-                .hll_value(value, &self.schema, args[0].span)?;
+                .sketch_value(value, &self.schema, args[0].span)?;
             return Ok(aggregate(Kind::Merge, value, ""));
         }
         let conditional = matches!(name, "dcountif" | "hll_if");
@@ -585,7 +629,7 @@ impl Collector<'_> {
         let mut value = self.expressions.scalar(&args[0], &self.schema)?;
         let ty = value.get_type(self.schema.as_ref())?;
         let domain = crate::tabular::type_names(&ty).0;
-        if dynamic::is_dynamic(&ty) {
+        if dynamic::is_dynamic(&ty) || crate::arrow_dynamic::is_collection(&ty) {
             value = when(value.clone().is_null(), lit(ScalarValue::Utf8(None)))
                 .otherwise(dynamic::call(Kernel::EncodeWire, vec![value]))?;
         } else if crate::decimal::is_decimal(&ty) {
@@ -625,6 +669,57 @@ impl Collector<'_> {
         Ok(result)
     }
 
+    fn percentile_input(
+        &self,
+        args: &[ast::Expr],
+        weighted: bool,
+        exact: bool,
+    ) -> Result<(crate::tdigest::Kind, Expr, Expr)> {
+        use crate::tdigest::Kind;
+        let value = self.expressions.scalar(&args[0], &self.schema)?;
+        let ty = value.get_type(self.schema.as_ref())?;
+        let kind = if crate::decimal::is_decimal(&ty) {
+            Kind::Real
+        } else {
+            Kind::from_type(&ty).ok_or_else(|| {
+                Error::syntax(
+                    "percentile input must be numeric, datetime or timespan",
+                    args[0].span,
+                )
+            })?
+        };
+        let value = if crate::decimal::is_decimal(&ty) {
+            crate::decimal::cast(value, DataType::Float64)
+        } else if matches!(kind, Kind::Datetime | Kind::Timespan) {
+            cast(cast(value, kind.data_type()), DataType::Int64)
+        } else {
+            cast(value, kind.sample_type())
+        };
+        let weight = if weighted {
+            let value = self.expressions.scalar(&args[1], &self.schema)?;
+            let ty = value.get_type(self.schema.as_ref())?;
+            if !ty.is_integer() && ty != DataType::Null {
+                return Err(Error::syntax(
+                    "percentile weights must be integers",
+                    args[1].span,
+                ));
+            }
+            value
+        } else {
+            lit(1_i64)
+        };
+        let weight = cast(weight, DataType::Int64);
+        let weight = if exact {
+            cast(
+                when(weight.clone().gt(lit(0_i64)), weight).otherwise(lit(0_i64))?,
+                DataType::UInt64,
+            )
+        } else {
+            weight
+        };
+        Ok((kind, value, weight))
+    }
+
     fn quantile(
         &self,
         name: &str,
@@ -640,35 +735,8 @@ impl Collector<'_> {
                 span,
             ));
         }
-        let value = self.expressions.scalar(&args[0], &self.schema)?;
-        let ty = value.get_type(self.schema.as_ref())?;
-        if !ty.is_numeric() && !crate::decimal::is_decimal(&ty) {
-            return Err(Error::syntax(
-                "percentile input must be numeric",
-                args[0].span,
-            ));
-        }
-        let integer = ty.is_integer();
-        let value = if crate::decimal::is_decimal(&ty) {
-            crate::decimal::cast(value, DataType::Float64)
-        } else {
-            cast(
-                value,
-                if integer {
-                    DataType::Int64
-                } else {
-                    DataType::Float64
-                },
-            )
-        };
-        let weight = if weighted {
-            cast(
-                self.expressions.scalar(&args[1], &self.schema)?,
-                DataType::UInt64,
-            )
-        } else {
-            lit(1_u64)
-        };
+        let exact = name.ends_with("_exact");
+        let (kind, value, weight) = self.percentile_input(args, weighted, exact)?;
         let mut ranks = Vec::new();
         for rank in &args[first_rank..] {
             let value = self.expressions.scalar(rank, &DFSchema::empty())?;
@@ -712,7 +780,11 @@ impl Collector<'_> {
             ));
         }
         Ok((
-            aggregate_functions::quantile(integer, &ranks, output, value, weight),
+            if exact {
+                aggregate_functions::quantile(kind, &ranks, output, value, weight)
+            } else {
+                crate::tdigest_functions::quantile(kind, &ranks, output, value, weight)
+            },
             ranks,
         ))
     }
@@ -819,6 +891,9 @@ pub(crate) fn is_aggregate(state: &SessionState, name: &str) -> bool {
                 | "hll"
                 | "hll_if"
                 | "hll_merge"
+                | "tdigest"
+                | "tdigest_merge"
+                | "merge_tdigest"
                 | "count_distinct"
                 | "count_distinctif"
                 | "sumif"
@@ -856,5 +931,11 @@ pub(crate) fn is_aggregate(state: &SessionState, name: &str) -> bool {
                 | "percentilew"
                 | "percentilesw"
                 | "percentilesw_array"
+                | "percentile_exact"
+                | "percentiles_exact"
+                | "percentiles_array_exact"
+                | "percentilew_exact"
+                | "percentilesw_exact"
+                | "percentilesw_array_exact"
         )
 }

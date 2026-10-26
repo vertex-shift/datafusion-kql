@@ -188,6 +188,24 @@ impl<'a> Lexer<'a> {
 
     fn number(&mut self) -> Result<Kind<'a>> {
         let start = self.pos;
+        if self.query[start..].starts_with("0x") || self.query[start..].starts_with("0X") {
+            self.pos += 2;
+            let digits = self.pos;
+            while self.peek().is_some_and(|ch| ch.is_ascii_hexdigit()) {
+                self.bump();
+            }
+            if digits == self.pos
+                || self
+                    .peek()
+                    .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+            {
+                return Err(Error::syntax(
+                    "invalid hexadecimal integer literal",
+                    Span::new(start, self.pos),
+                ));
+            }
+            return Ok(Kind::Number(&self.query[start..self.pos]));
+        }
         while self.peek().is_some_and(|c| c.is_ascii_digit()) {
             self.bump();
         }
@@ -219,19 +237,7 @@ impl<'a> Lexer<'a> {
         }
         let text = &self.query[start..self.pos];
         if suffix != self.pos {
-            if !matches!(
-                &self.query[suffix..self.pos],
-                "d" | "h"
-                    | "m"
-                    | "s"
-                    | "ms"
-                    | "microsecond"
-                    | "microseconds"
-                    | "us"
-                    | "ns"
-                    | "tick"
-                    | "ticks"
-            ) {
+            if crate::literals::timespan_unit(&self.query[suffix..self.pos]).is_none() {
                 return Err(Error::syntax(
                     "unrecognized timespan unit",
                     Span::new(suffix, self.pos),

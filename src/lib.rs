@@ -16,6 +16,7 @@
 
 mod aggregate_functions;
 mod aggregation;
+mod arrow_dynamic;
 pub mod ast;
 mod calendar;
 mod decimal;
@@ -50,9 +51,12 @@ mod scan;
 mod search;
 mod series_functions;
 mod tabular;
+mod tdigest;
+mod tdigest_functions;
 mod telemetry_text;
 mod temporal;
 mod terms;
+mod text_functions;
 mod top;
 mod windows;
 

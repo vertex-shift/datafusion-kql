@@ -103,14 +103,22 @@ errors rather than silently execute with different semantics.
   tags and a bounded nonrecursive wire representation; ordinary JSON retains
   its lightweight path. Complete reference certification and full temporal
   ranges remain milestones.
+- Native Arrow lists, list views, structs, and string-keyed maps now enter
+  dynamic operations without erasing scalar types. Typed primitive expansion
+  retains Arrow buffers and native Unnest; mixed/rich expansion shares bounded
+  dynamic kernels. Schema-depth validation occurs before scan-plan construction.
 - Lookup, schema introspection, projection reordering, sampling, wildcard table
   discovery, source-labelled unions and conflicting-type schema splitting are
   implemented. Cross-table search/find, smart row packing, hierarchical
   top-nested (including reaggregated others), and exact heavy-hitter estimates
   are implemented. Accuracy-controlled HLL, reusable sketches, native
   vectorized grouped states, and bounded sparse-to-dense promotion are now
-  implemented. Remaining scaling work includes generic scans/grouped
-  subqueries, approximate percentile states, and spill-aware query snapshots.
+  implemented. Percentiles now use bounded exact-small/t-digest-large states,
+  reusable weighted distribution sketches and typed scalar/array accessors.
+  They reuse DataFusion's public t-digest machinery with checked normalized
+  coordinates, exact weight metadata, native grouped/partial states and spill
+  replay; explicit exact aliases retain sample-storing selection. Remaining
+  scaling work includes generic scans/grouped subqueries.
 - Explicit-schema bag_unpack and pivot compile to batch struct extraction and
   native conditional aggregation. Runtime pivot schema mismatches are explicit
   errors; implicit data-dependent schema discovery and additional service
@@ -124,6 +132,11 @@ errors rather than silently execute with different semantics.
   cache boundary. It preserves parallel input execution, reports retained
   memory to the host pool, and does not change the host's planner or registry.
   Snapshots are scoped to planned queries, including DataFrame clones.
+  Memory-pressure transitions use DataFusion's native IPC spill manager and
+  host disk quotas/compression, then independently replay immutable partitions.
+  Temporary files are query/reader-owned; initialization failures and
+  cancellation clean up partial state. This does not add generic grouped/scan
+  spilling or later eviction of an already resident snapshot.
 - Management commands, remote Kusto connectors, visualization metadata,
   CLI/Python bindings, and language tooling.
 - Common telemetry functions now include bounded compiled term-set search,
@@ -132,6 +145,12 @@ errors rather than silently execute with different semantics.
   their documented examples. A finite public-help reference baseline is captured
   in ordinary tests, including the former decimal precision/JSON disagreements.
   Full live certification is separate from this bounded baseline.
+- Literal/source compatibility includes hexadecimal longs, spelled duration
+  units, RFC date forms, and literal local table/catalog selectors. String
+  helpers implement optional-index search, delimited repetition, and global
+  capture-based regex rewriting rather than assuming SQL aliases have KQL
+  semantics. A standalone CLI/parser package remains a separate integration
+  milestone, not implied by these improvements.
 - Conformance fixtures against a real Kusto cluster and production workload
   benchmarks before claiming complete compatibility.
 

@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.6 implements the typed tabular and dynamic subset below. Keywords, function
+0.11 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -10,6 +10,7 @@ syntax/functions return an error; there is no SQL fallback.
 | Construct | Supported behavior |
 | --- | --- |
 | Tables | Existing session table providers; one-, two-, and three-component catalog paths |
+| Source selectors | Literal `table('T')`, `database('schema').T`, and `cluster('catalog').database('schema').table('T')`; local providers only |
 | Table patterns | `*` wildcards in the selected catalog/schema; discovery is limited to 1024 matching providers |
 | Escaped identifiers | `['column name']`, including literal dots |
 | `let` | Scalar expressions, tabular plans, aliases, nested lexical scopes |
@@ -18,13 +19,22 @@ syntax/functions return an error; there is no SQL fallback.
 | `datatable` | Explicit `bool`, `int`, `long`, `real`/`double`, `string`, `datetime`, `timespan`, `guid`/`uuid`/`uniqueid`, `decimal`, `dynamic` columns |
 | `range` | Inclusive lazy native `generate_series`; integer, real, datetime, and timespan sequences, including descending ranges |
 | `union` | Source form and pipe form |
-| `materialize(...)` | Lazy shared Arrow snapshot, usable directly or in a tabular binding |
+| `materialize(...)` | Lazy shared Arrow snapshot with native memory/disk spill, usable directly or in a tabular binding |
 
 Ordinary tabular bindings are inlined plans, **not materialized results**.
 Reusing one can rescan its inputs; use explicit `materialize` when needed.
 Scalar bindings retain expressions, matching KQL's binding
 rather than assignment model. Use a new pipe to reference a newly extended
 column; assignments in a single `extend` resolve against its input.
+
+Source selector spellings compile into the same local table references and add
+no execution operators or network connections. `database` selects a DataFusion
+schema and `cluster` selects a catalog; cluster selectors require an explicit
+database/schema selector. Names must be nonempty string literals. Extra scopes,
+datascope arguments, and dynamic table-name expressions are rejected, not
+silently redirected to another catalog. `table('name.with.dots')` preserves the
+name as one table identifier. Ordinary qualified paths and escaped names remain
+unchanged.
 
 ## Parameters and query-defined functions
 
@@ -153,7 +163,8 @@ strategy or its service-specific right-side size limit.
 `materialize(T | ...)` and `as hint.materialized=true Name` create an opaque,
 lazy native source boundary. Logical and physical planning do not collect input
 rows. The first consumer executes the native input partitions in parallel;
-other consumers await and reuse the same Arrow buffers. Consumer filters and
+other consumers await and reuse the completed snapshot, in memory or on disk.
+Consumer filters and
 projections remain outside the snapshot, so different fork legs cannot cache
 incompatible subsets. Put common reducing operators inside `materialize`.
 Ordinary `let` and `as hint.materialized=false` remain nonmaterialized.
@@ -165,13 +176,56 @@ fresh snapshot, just as a new planning call obtains a fresh `now()` instant.
 This explicitly defines repeated-DataFrame execution, an API concept without
 a direct Kusto request equivalent.
 
-Retained buffers and batch bookkeeping use a native DataFusion
-`MemoryConsumer`. Exhausting the host memory pool fails the query; input errors
-are retained and surfaced to all consumers rather than converted to empty data.
-Dropping the snapshot releases its memory reservation. Configure a bounded
-host pool for production: the extension does not install Kusto's cluster-wide
-5 GB service cache limit or a separate allocator. Materialized buffers do not
-spill. Unbounded input plans are rejected.
+Retained Arrow buffers and vector bookkeeping use native DataFusion
+`MemoryConsumer` reservations, including spillable-consumer registration for fair
+memory pools. Small snapshots remain zero-copy in memory. If retaining another
+batch exhausts the host pool and the host disk manager permits temporary files,
+the snapshot switches to disk. Already completed resident partitions are also
+spilled before replay, freeing their reservations. Each initialization attempt
+uses at most one native temporary IPC file per nonempty input partition, not
+one file per batch.
+Conservative Arrow accounting can count shared/sliced buffers more than once
+and therefore spill sooner than their unique physical size.
+
+Spill files use DataFusion's `SpillManager` and the embedding runtime's
+`DiskManager`: configured directories, custom file factories, temporary-disk
+quotas and `datafusion.execution.spill_compression` are honored. No alternate
+storage service, global cache, persistent file format or Kusto-service blob is
+introduced. Writes run on blocking tasks holding a bounded resident prefix or
+one input batch, rather than performing synchronous disk I/O on async executor
+workers. Each consumer opens
+an independent unbuffered native read stream; spilled batches are split at the
+host's configured batch-row size. Dictionary replacement, rich dynamic values,
+native temporal/decimal/GUID types, schema metadata, empty inputs and
+zero-column row counts survive replay. Schema/decoder failures and unexpected
+replay row counts are explicit errors, not silently truncated results.
+
+**Budget boundary:** this bounds retained snapshot memory, not all process
+memory. Native IPC encoding/decoding, I/O buffers, returned batches and source
+providers still require working memory; a row limit does not bound the byte
+size of an individual value. Input/downstream operators need their own memory
+and native spill configuration. A completed in-memory snapshot is not later
+evicted just because an unrelated operator or query runs out of memory.
+Generic grouped-subquery buffers and state-machine scan buffers still do not
+gain spilling from this change. Configure bounded host memory/disk budgets and
+appropriate upstream batch/value sizes.
+
+Disabled disks, exhausted disk quotas, custom-backend failures and input errors
+fail explicitly. Initialization errors are shared with subsequent consumers;
+the snapshot is never replaced with empty or partially cached data. Canceling
+an unfinished initialization drops its partial files/reservations without
+publishing a snapshot; another consumer may retry initialization, so canceled
+attempts can reevaluate volatile input. Once a snapshot completes, fork legs,
+concurrent consumers and DataFrame clones replay it without reevaluating input.
+Files/reservations live until the last snapshot owner or active reader releases
+them. Cancellation of an in-flight blocking write releases its resources when
+that bounded write finishes. Snapshot spill metrics are exposed on
+`KqlMaterializeExec` and do not increase during warm replay.
+
+This is a host-controlled extension execution profile, not an emulation of
+Kusto's shared 5 GB-per-node service cache or its cache-exhaustion policy.
+Unbounded input plans are rejected before materialization execution.
+See `examples/materialized_snapshots.rs` for a bounded-runtime embedding.
 
 ## Cross-table search and find
 
@@ -192,8 +246,8 @@ Column[:type], ... [, pack_all()]` fixes the output schema; its optional
 provider fields are handled explicitly, and conflicting projected types require
 a declared type. Unknown columns/providers and output-name conflicts error.
 
-Qualified DataFusion catalogs/schemas and provider wildcards are supported;
-Kusto-service `cluster()`/`database()` discovery syntax is not. Predicate
+Qualified DataFusion catalogs/schemas, local source selectors, and provider
+wildcards are supported; remote Kusto-service discovery is not. Predicate
 coercion for a column with different input types follows each provider's native
 DataFusion analysis rather than promising complete Kusto cross-type inference.
 
@@ -202,12 +256,18 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
 - Literals: signed 64-bit integers, floating point, booleans, single/double quoted
   strings, backslash escapes, verbatim `@` strings, typed null constructors,
   `datetime(...)`, and `timespan(...)`.
+- Hexadecimal `0x`/`0X` integers are exact longs, including typed numeric
+  constructors and negative signed-minimum literals. Values outside the signed
+  64-bit range are rejected rather than wrapped. Boolean constructors also
+  accept case-insensitive TRUE/FALSE tokens without changing column-name casing.
 - GUID literals (`guid(...)`, `uuid(...)`, `uniqueid(...)`) and typed nulls;
   nullable `toguid`, volatile `new_guid`, and canonical `tostring` formatting.
 - Exact `decimal(...)` literals/conversion and nonfinite real literals
   `real(nan)`, `real(inf)`, and `real(-inf)`.
 - Timespans: `d`, `h`, `m`, `s`, `ms`, `us`, `ns`, `tick`/`ticks`,
-  `microsecond(s)`, decimal quantities, and `[d.]hh:mm:ss[.fraction]`.
+  spelled day/hour/minute/second/millisecond/microsecond units and plurals,
+  `milli`/`micro`, decimal quantities, and `[d.]hh:mm:ss[.fraction]`.
+  Typed constructors and conversions allow whitespace between number and unit.
   Bare numbers inside `timespan(...)` represent days. Conversion uses integer
   arithmetic, not floating point.
 - Arithmetic `+ - * / %`, comparisons `== != < <= > >=`, `and`, `or`, unary
@@ -242,9 +302,35 @@ DataFusion analysis rather than promising complete Kusto cross-type inference.
   scalar type constructors; failed conversions use Arrow `TRY_CAST` semantics.
   Native boolean string conversion uses `True`/`False`; dynamic JSON boolean
   string conversion uses `true`/`false`. Null string conversion yields `""`.
+  Native and root dynamic timespans share clock-style string conversion rather
+  than Arrow's ISO duration display: optional day prefix, `hh:mm:ss`, and
+  fractional ticks/nanoseconds when present. Raw Arrow duration columns retain
+  their ordinary Arrow display; typed collection JSON retains its existing encoding.
 - `strcat`, `strlen`, `tolower`, `toupper`, `substring` (zero-based),
   `replace_string`, `extract`, `extract_all`/`extractall`, `extract_json`/`extractjson`,
   `totimespan`/`totime`, and `todate`.
+- `indexof(source, match [, start [, length [, occurrence]]])` returns zero-based
+  character positions, not SQL's one-based `strpos`. Start/length may vary by row;
+  occurrence must be a constant positive integer. Negative starts are relative
+  to the end and clamp at zero. Length bounds the eligible **match starts**,
+  not the entire matched substring, and applies to the original search window.
+  Occurrences may overlap. Empty source returns -1; an empty match against
+  nonempty source returns zero. Null bounds and lengths below -1 return typed
+  null. Unicode positions count scalar values, including supplementary
+  characters. Live captures corrected the previous window/overlap/empty behavior;
+  repeated-prefix searches use bounded linear-time byte matching rather than
+  repeatedly rescanning the full needle.
+- `strrep(value, multiplier [, delimiter])` produces a string, unlike dynamic
+  `repeat`. Values/delimiters use scalar string conversion; counts are integral.
+  Nonpositive/null counts produce empty strings. Counts above 67,108,864 and
+  outputs above the 16 MiB text budget error rather than truncate silently.
+  Microsoft's current page contradicts itself about a legacy 1024 cap; this
+  implementation follows its larger multiplier contract, pending live edge checks.
+- `replace_regex(source, constant_regex, constant_rewrite)` replaces every
+  nonoverlapping match. Rewrites use `\0` through `\9` capture references and
+  `\\` for a literal slash; dollar signs are literal. Invalid patterns/references
+  fail explicitly. Compiled expressions obey a 16 MiB regex budget, with bounded
+  input/output text and at most 1,048,576 replacements per value.
 - Other names already registered in the session scalar registry are callable
   with **their DataFusion-defined semantics**. This is an extension point, not
   a promise that every SQL function has Kusto semantics. The frontend does not
@@ -270,6 +356,27 @@ lost type information. Internal typed encodings are never recognized from
 ordinary user JSON. Typed collections enforce depth 128, per-collection element
 limits, and a total-node budget; malformed references and reused child nodes
 fail explicitly.
+
+Native Arrow `List`, `LargeList`, `FixedSizeList`, list-view layouts, structs,
+and string-keyed maps are accepted by dynamic operations, `pack_all`,
+`todynamic`/`parse_json`, collection aggregates, and `mv-expand`/`mv-apply`.
+Sliced offsets, parent nulls, dictionary-encoded children, nested decimals,
+GUIDs, timestamps and durations retain their logical values and scalar tags.
+Native arrays become dynamic arrays; structs/maps become property bags.
+Duplicate/null map keys, duplicate struct names, unsupported binary values,
+unsigned integers above signed-long range, and unrepresentable temporal values
+error instead of silently dropping information.
+
+The bridge checks collection/node/depth budgets and a cumulative 16 MiB text
+budget per value. Physical Arrow schema nesting is capped at 64 levels and is
+validated before constructing scan plans: recursive DataFusion processing can
+otherwise exhaust a small executor-thread stack before our kernels run. The
+separate typed dynamic value limit remains 128. Both the accepted schema
+boundary and the first rejected depth have regressions.
+A single explicitly typed primitive list expansion without item indices or
+serialized-order tracking uses checked native Arrow buffers and native Unnest,
+avoiding JSON conversion. More complex/zipped/rich cases use the shared dynamic
+batch path. Type-only expansion still does not parse strings into numeric values.
 
 `parse_json`/`todynamic`, dotted properties, arbitrary string-key subscripts,
 zero-based and negative array indices, `gettype`, and scalar conversion
@@ -603,6 +710,9 @@ a string capture. Dynamic capture types are not supported; extract a string and
 apply `parse_json`. Patterns are bounded to 256 segments.
 
 Nullable datetime conversion accepts ISO-8601 and common US log timestamps.
+RFC-822/RFC-2822 and numeric-offset RFC-850 date forms are accepted by literals
+and conversions; explicit offsets normalize to UTC. This does not widen the
+nanosecond timestamp range or add timezone-name inference.
 Timespan conversion accepts the same unit/day-clock formats as literals.
 Regex execution uses Rust regex syntax, not unsupported .NET backreferences or
 look-around.
@@ -732,15 +842,95 @@ modern functions default to, and are capped at, 1,048,576 items.
 Multi-column and wildcard selections use one native struct-valued aggregate,
 so returned columns come from the same row. Ties are unspecified.
 
+### Bounded percentiles and distribution sketches
+
 `percentile`, `percentiles`, `percentiles_array` and weighted variants
-`percentilew`, `percentilesw`, `percentilesw_array` implement nearest-rank
-selection, not linear interpolation. Multiple requested percentiles share one
-state. Integer samples preserve precision beyond `2^53`; zero weights are
-ignored and negative weights fail conversion. The implementation currently
-stores samples with memory accounting and performs exact rank selection rather
-than using Kusto's approximate t-digest. It therefore uses more memory for large
-groups. Ranks must be constant and within 0-100; at most 1024 ranks are allowed.
-Multi-column percentiles use generated output names; rename them afterward.
+`percentilew`, `percentilesw`, `percentilesw_array` now estimate nearest ranks
+using bounded native states. Multiple ranks share one state. Ranks must be
+constant finite numbers within 0-100, with 1-1024 ranks per call. Multi-column
+outputs use generated names; rename them afterward.
+
+**Behavior change from 0.9:** the first 2,048 positive-weight input entries per
+state retain exact samples, then promote to a t-digest capped at 1,024 centroids
+and a bounded pending buffer. Large groups no longer retain all source rows.
+Compressed estimates may interpolate between centroids and need not equal an
+input sample. Finite 0/100 endpoints retain exact extrema. This is an
+approximation profile, not a promise of identical Kusto-service estimates.
+
+When exact nearest-rank selection is required, use the extension names
+`percentile_exact`, `percentiles_exact`, `percentiles_array_exact`,
+`percentilew_exact`, `percentilesw_exact`, and `percentilesw_array_exact`.
+They retain all positive-weight samples with host memory accounting, and can
+therefore consume memory proportional to input size. Their multi-column names
+start with `percentile_exact_`.
+
+Long, real, datetime and timespan inputs are supported. Small integer sets
+preserve values beyond `2^53`; compressed integral states use a signed origin
+and normalized offsets to preserve narrow high-magnitude ranges. Interior
+quantiles over wide ranges remain approximate. Temporal outputs retain native
+Arrow types and rich dynamic tags, within the existing signed-nanosecond range.
+Decimal input is converted to real: this is not decimal128 quantile fidelity.
+Weights are signed longs; null/nonpositive weights and null samples are ignored,
+matching the captured Kusto behavior. Total weights use checked `u128` arithmetic,
+and exact ranks are computed from the binary64 rank argument without converting
+counts through `f64`.
+
+`tdigest(value[, weight])` builds a reusable dynamic distribution sketch.
+`summarize tdigest_merge(sketch)` and `merge_tdigest(sketch)` merge a column;
+the corresponding scalar overloads accept 2-16 sketch arguments. Unlike HLL
+union, distribution merge **adds weights**: merging a sketch twice counts its
+observations twice. Normalize logical input types before building rollups.
+
+`percentile_tdigest(sketch, rank[, typeof(type)])` accepts a runtime numeric rank
+and returns a dynamic scalar by default, or a typed nullable scalar with an
+explicit output type. `percentiles_array_tdigest(sketch, ranks...)` accepts
+numeric arguments or one dynamic/native rank array, with an optional trailing
+`typeof(type)`, and returns a dynamic array even for a single rank. Supported
+type annotations are int, long, real, datetime and timespan. The singular
+documentation spelling `percentile_array_tdigest` is also accepted as an alias.
+An empty/all-null/nonpositive-weight distribution produces null, as do its
+percentile accessors. Null sketches are ignored during merge.
+
+**Validation boundary:** output types must match the sketch's logical kind
+(`int` also accepts a long sketch). Mixed-kind merges, type mismatches,
+out-of-range/nonfinite ranks, empty/non-numeric rank arrays, malformed envelopes,
+and foreign/version/size-invalid payloads fail explicitly. Some Kusto-service
+invalid-input cases instead return null, including mixed long/real sketches and
+mismatched type annotations; this stricter local validation is not full error
+behavior parity. Decimal type annotations and rank/CDF accessors are not provided.
+
+Sketches survive `tostring`/`parse_json`, stored dynamic columns, materialization
+and query parameters. The `__datafusion_kql_tdigest_v1` envelope contains a
+bounded base64 payload, **not a Kusto-service t-digest blob**. The binary format
+is limited to 32,894 bytes; input JSON is limited to 1 MiB. Counts, bounds,
+centroid ordering/weights, type and coordinate scales are validated before
+calling DataFusion's public t-digest implementation. Do not edit sketch internals.
+Finite real values are normalized before weighted accumulation to avoid
+overflow. Nonfinite samples use an explicit local `f64::total_cmp` ordering;
+that profile is not certified against Kusto. JSON floating parsing enables
+round-trip fidelity so dynamic arrays do not lose an ULP at exact endpoints.
+
+Both ordinary and vectorized grouped accumulators support native partial/final
+merge, filters, prefix emission/reindexing and pre-aggregation bypass. Retained
+buffers are charged to DataFusion's memory pool, and configured native
+aggregation can spill/replay their binary intermediate states. Bounded states
+do not bound the number of groups; configure host memory and disk budgets.
+Temporary sort/merge buffers are bounded per state, not separate query-local
+spill storage. Scalar accessors cache consecutive sketch inputs and results
+within each batch, avoiding repeated decode/estimation for frozen subqueries.
+Materialized snapshots have their separate native spill/replay path described
+above; generic grouped-subquery buffers remain a distinct scaling boundary.
+
+Seven synthetic fixtures were captured from `help.kusto.windows.net/Samples`
+through Azure MCP on 2026-10-26, including the empty/default and nonpositive-weight
+corrections. The large-population checks are separate local rank-error tests:
+uniform, descending/shuffled, exponential, duplicate-heavy and weighted
+populations are checked against a 1% interval-rank threshold, including partial
+merges. This is measured regression coverage, **not a universal error guarantee**
+or an assertion that DataFusion and Kusto use the same digest algorithm.
+See the published [t-digest](https://learn.microsoft.com/en-us/kusto/query/tdigest-aggregation-function)
+and [percentile accessors](https://learn.microsoft.com/en-us/kusto/query/percentile-tdigest-function)
+for the service contracts.
 
 ### Accuracy-controlled distinct counts and sketches
 
@@ -805,18 +995,18 @@ partial/final merge, grouped filters, state emission/reindexing, and
 DataFusion's pre-aggregation bypass. Sparse states avoid allocating 256 KiB
 for every tiny accuracy-4 group. Retained buffers are reported to the host
 memory pool; native aggregation can spill intermediate states when configured.
-This does not add spilling to materialized query snapshots or generic grouped
-subquery buffers.
+Materialized snapshots use the separate native spill path described above.
+Generic grouped-subquery buffers still require their own scaling work.
 
 The accuracy/budget semantics are grounded in the published
 [dcount](https://learn.microsoft.com/en-us/kusto/query/dcount-aggregation-function)
 and [HLL](https://learn.microsoft.com/en-us/kusto/query/hll-aggregation-function)
 contracts. Local regressions measure exact thresholds and six-sigma error
-checks across multiple deterministic hash populations. These new cases have
-not been compared to a live Kusto engine; they do not expand the captured
-49-fixture reference baseline or promise identical service estimates.
-Four published-contract HLL fixtures are separately labelled in the conformance
-suite and included in the opt-in live runner; they remain pending live execution.
+checks across multiple deterministic hash populations. Four small-set
+HLL/merge/conditional/empty-count cases were captured against the public Kusto
+engine on 2026-10-26 and are ordinary conformance fixtures. The large-population
+error checks are still local algorithm tests, not identical service estimates
+or complete certification of all HLL overloads and empty-state representation.
 
 ## Type and execution boundaries
 
@@ -853,10 +1043,11 @@ suite and included in the opt-in live runner; they remain pending live execution
 
 ## Opt-in Kusto reference checks
 
-The conformance suite in `tests/conformance.rs` runs 49 synthetic inline-data
+The conformance suite in `tests/conformance.rs` runs 68 synthetic inline-data
 fixtures locally by default, comparing exact column names and row multisets
 against results captured from the public Kusto help cluster (`Samples`) through
-Azure MCP on 2026-10-25. It covers counts/nulls, expansion, per-row/per-key
+Azure MCP on 2026-10-25 (49 fixtures) and 2026-10-26 (19 additional fixtures).
+It covers counts/nulls, expansion, per-row/per-key
 queries, scans, hierarchical tops, schema-declared plugins, scalar subqueries,
 ranges, GUIDs, parsing, decimal128 arithmetic/conversion/special values, rich nested tags,
 term/IP/encoding helpers, documented NaN defaults, and series shape. The
@@ -872,6 +1063,14 @@ and numeric JSON, scalar and vector evaluation, exponent boundaries, NaNs,
 infinities, signed zero, and arithmetic promotion have explicit fixtures.
 The rich-value fixture uses runtime packing rather than decimal syntax inside
 `dynamic(...)`. Fixture aliases and scan-step names avoid reserved keywords.
+The nine formerly source-based fixtures (four HLL, three string, two literal)
+were subsequently executed against the public engine and are now included in
+the captured set. Seven t-digest fixtures and three additional index-search
+fixtures complete the 2026-10-26 additions. The captures corrected reserved
+alias quoting and showed that a published `indexof` length example disagrees
+with engine behavior: eligible match starts, not full substrings, are bounded.
+Overlapping occurrences, clamped negative starts, empty strings, runtime invalid
+bounds and Unicode offsets now have actual captured results.
 
 To compare the same fixtures against an explicitly configured reference:
 

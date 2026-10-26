@@ -1,0 +1,112 @@
+name: Publish crate
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag, for example v0.9.0
+        required: true
+        type: string
+      dry_run:
+        description: Validate and package without publishing
+        type: boolean
+        default: true
+      bootstrap:
+        description: First publication only, using CRATES_IO_BOOTSTRAP_TOKEN
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-io-publish
+  cancel-in-progress: false
+
+env:
+  CARGO_BUILD_JOBS: "2"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  release:
+    name: Validate immutable release
+    if: github.repository == 'vertex-shift/datafusion-kql' && (github.event_name == 'push' || github.ref_name == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refresh main
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      - id: release
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: python3 .github/scripts/release.py --tag "$RELEASE_TAG"
+
+  ci:
+    name: Release CI
+    needs: release
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.release.outputs.sha }}
+
+  publish:
+    name: Publish verified crate
+    needs: [release, ci]
+    if: github.event_name == 'push' || !inputs.dry_run
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Revalidate tag and main before obtaining credentials
+        env:
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          python3 .github/scripts/release.py --tag "$RELEASE_TAG"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: package
+      - name: Build the verified release archive before obtaining credentials
+        run: cargo package --locked --registry crates-io --package datafusion-kql-native
+      - name: Obtain a short-lived crates.io token
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.bootstrap) }}
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1
+      - name: Publish through trusted publishing
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.bootstrap) }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked --registry crates-io --package datafusion-kql-native
+      - name: Bootstrap the first publication
+        if: github.event_name == 'workflow_dispatch' && inputs.bootstrap
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+        run: |
+          if [[ -z "$CARGO_REGISTRY_TOKEN" ]]; then
+            echo "::error::Configure CRATES_IO_BOOTSTRAP_TOKEN in the crates-io environment for the first publication."
+            exit 1
+          fi
+          cargo publish --locked --registry crates-io --package datafusion-kql-native
+      - name: Verify published identity and archive checksum
+        run: python3 .github/scripts/release.py --verify-published

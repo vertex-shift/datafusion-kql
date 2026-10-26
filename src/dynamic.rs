@@ -116,6 +116,12 @@ pub(crate) fn is_dynamic(ty: &DataType) -> bool {
             && fields.iter().zip(FIELDS.iter()).all(|(a,b)|a==b))
 }
 
+pub(crate) fn node_at(array: &ArrayRef, row: usize) -> Result<Node> {
+    let union = downcast::<UnionArray>(array)?;
+    let id = union.type_id(row);
+    child_value(union.child(id), union.value_offset(row), id)?.node()
+}
+
 pub(crate) fn from_json(value: &Json) -> Result<ScalarValue> {
     let mut builder = Builder::new(1);
     builder.append_json(value)?;
@@ -426,6 +432,12 @@ impl Input {
     fn new(value: &ColumnarValue) -> Result<Self> {
         let scalar = matches!(value, ColumnarValue::Scalar(_));
         let mut array = value.to_array(1)?;
+        while let DataType::Dictionary(_, ty) = array.data_type() {
+            array = cast_with_options(&array, ty, &Default::default())?;
+        }
+        if crate::arrow_dynamic::is_collection(array.data_type()) {
+            array = crate::arrow_dynamic::convert(array)?;
+        }
         let ty = array.data_type();
         let normalized = match ty {
             DataType::Int8
@@ -436,9 +448,7 @@ impl Input {
             | DataType::UInt32
             | DataType::UInt64 => Some(DataType::Int64),
             DataType::Float16 | DataType::Float32 => Some(DataType::Float64),
-            DataType::LargeUtf8 | DataType::Utf8View | DataType::Dictionary(_, _) => {
-                Some(DataType::Utf8)
-            }
+            DataType::LargeUtf8 | DataType::Utf8View => Some(DataType::Utf8),
             DataType::Timestamp(_, _) => Some(DataType::Timestamp(TimeUnit::Nanosecond, None)),
             DataType::Duration(_) => Some(DataType::Duration(TimeUnit::Nanosecond)),
             _ => None,
@@ -1013,6 +1023,12 @@ fn convert(input: &Input, ty: &DataType, type_only: bool) -> Result<ArrayRef> {
         {
             return crate::decimal::format_array(&input.array);
         }
+        if *ty == DataType::Utf8
+            && matches!(input.array.data_type(), DataType::Duration(_))
+            && !type_only
+        {
+            return crate::text_functions::format_timespan(&input.array);
+        }
         if crate::decimal::is_decimal(input.array.data_type())
             && matches!(
                 ty,
@@ -1039,6 +1055,10 @@ fn convert(input: &Input, ty: &DataType, type_only: bool) -> Result<ArrayRef> {
     };
     for (id, _) in fields.iter() {
         let source = union.child(id);
+        if *ty == DataType::Utf8 && id == TIMESPAN && !type_only {
+            casted.push(crate::text_functions::format_timespan(source)?);
+            continue;
+        }
         if *ty == DataType::Utf8 && matches!(id, RICH_ARRAY | RICH_BAG) && !type_only {
             let strings = downcast::<StringArray>(source)?;
             let mut output = StringBuilder::new();

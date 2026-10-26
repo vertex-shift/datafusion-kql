@@ -835,13 +835,16 @@ impl Expressions<'_> {
                     .otherwise(index + lit(1_i64))?;
                 self.function("array_element", vec![value, index])
             }
+            ty if crate::arrow_dynamic::is_collection(&ty) => {
+                Ok(dynamic::call(Kernel::Get, vec![value, index]))
+            }
             ty => Err(Error::Plan(format!(
                 "cannot subscript {ty}; parse JSON or use a dynamic value"
             ))),
         }
     }
 
-    pub(crate) fn hll_value(&self, value: Expr, schema: &DFSchema, span: Span) -> Result<Expr> {
+    pub(crate) fn sketch_value(&self, value: Expr, schema: &DFSchema, span: Span) -> Result<Expr> {
         let ty = value.get_type(schema)?;
         if dynamic::is_dynamic(&ty) {
             Ok(dynamic::call(Kernel::EncodeJson, vec![value]))
@@ -849,27 +852,36 @@ impl Expressions<'_> {
             Ok(cast(value, DataType::Utf8))
         } else {
             Err(Error::syntax(
-                "HLL functions require a sketch or its serialized JSON string",
+                "sketch functions require a sketch or its serialized JSON string",
                 span,
             ))
         }
     }
 
     pub(crate) fn string_value(&self, value: Expr, schema: &DFSchema) -> Result<Expr> {
-        Ok(if dynamic::is_dynamic(&value.get_type(schema)?) {
-            dynamic::call(Kernel::Convert(DataType::Utf8), vec![value])
-        } else if value.get_type(schema)? == DataType::Boolean {
-            datafusion::logical_expr::expr_fn::case(value)
-                .when(lit(true), lit("True"))
-                .when(lit(false), lit("False"))
-                .otherwise(lit(ScalarValue::Utf8(None)))?
-        } else if crate::decimal::is_decimal(&value.get_type(schema)?) {
-            crate::decimal::call(crate::decimal::Op::Format, vec![value])
-        } else if value.get_type(schema)? == crate::guid::data_type() {
-            crate::guid::call(value, true)
-        } else {
-            value
-        })
+        Ok(
+            if dynamic::is_dynamic(&value.get_type(schema)?)
+                || crate::arrow_dynamic::is_collection(&value.get_type(schema)?)
+            {
+                dynamic::call(Kernel::Convert(DataType::Utf8), vec![value])
+            } else if value.get_type(schema)? == DataType::Boolean {
+                datafusion::logical_expr::expr_fn::case(value)
+                    .when(lit(true), lit("True"))
+                    .when(lit(false), lit("False"))
+                    .otherwise(lit(ScalarValue::Utf8(None)))?
+            } else if crate::decimal::is_decimal(&value.get_type(schema)?) {
+                crate::decimal::call(crate::decimal::Op::Format, vec![value])
+            } else if value.get_type(schema)? == crate::guid::data_type() {
+                crate::guid::call(value, true)
+            } else if matches!(value.get_type(schema)?, DataType::Duration(_)) {
+                crate::text_functions::timespan(cast(
+                    value,
+                    DataType::Duration(TimeUnit::Nanosecond),
+                ))
+            } else {
+                value
+            },
+        )
     }
 
     fn call(&self, name: &str, args: &[ast::Expr], span: Span, schema: &DFSchema) -> Result<Expr> {
@@ -963,6 +975,183 @@ impl Expressions<'_> {
                 ))
             }
         };
+        if matches!(
+            name,
+            "tdigest_merge"
+                | "merge_tdigest"
+                | "percentile_tdigest"
+                | "percentiles_array_tdigest"
+                | "percentile_array_tdigest"
+        ) {
+            let merge = matches!(name, "tdigest_merge" | "merge_tdigest");
+            if merge {
+                if !(2..=16).contains(&values.len()) {
+                    return Err(Error::syntax(
+                        "scalar tdigest_merge expects 2-16 sketches",
+                        span,
+                    ));
+                }
+                let values = values
+                    .into_iter()
+                    .zip(args)
+                    .map(|(value, arg)| self.sketch_value(value, schema, arg.span))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(crate::tdigest_functions::scalar(
+                    crate::tdigest_functions::Scalar::Merge,
+                    values,
+                ));
+            }
+            let array = name != "percentile_tdigest";
+            if values.len() < 2 || !array && values.len() > 3 {
+                return Err(Error::syntax(
+                    "percentile_tdigest expects a sketch, rank and optional typeof",
+                    span,
+                ));
+            }
+            let sketch = self.sketch_value(values[0].clone(), schema, args[0].span)?;
+            let mut end = values.len();
+            let ty = if let Some(ast::Expr {
+                kind: ExprKind::Type(ty),
+                ..
+            }) = args.last()
+            {
+                end -= 1;
+                let ty = data_type(*ty);
+                if crate::tdigest::Kind::from_type(&ty).is_none() {
+                    return Err(Error::syntax(
+                        "typed t-digest output requires int, long, real, datetime or timespan",
+                        span,
+                    ));
+                }
+                Some(ty)
+            } else {
+                None
+            };
+            if !array {
+                if end != 2 {
+                    return Err(Error::syntax(
+                        "percentile_tdigest third argument must be typeof",
+                        span,
+                    ));
+                }
+                let rank = &values[1];
+                if !rank.get_type(schema)?.is_numeric() && rank.get_type(schema)? != DataType::Null
+                {
+                    return Err(Error::syntax(
+                        "percentile rank must be numeric",
+                        args[1].span,
+                    ));
+                }
+                return Ok(crate::tdigest_functions::scalar(
+                    crate::tdigest_functions::Scalar::Percentile(ty),
+                    vec![sketch, cast(rank.clone(), DataType::Float64)],
+                ));
+            }
+            if !(2..=1025).contains(&end) {
+                return Err(Error::syntax(
+                    "t-digest requires 1-1024 percentile ranks",
+                    span,
+                ));
+            }
+            let ranks = if end == 2
+                && (dynamic::is_dynamic(&values[1].get_type(schema)?)
+                    || crate::arrow_dynamic::is_collection(&values[1].get_type(schema)?))
+            {
+                dynamic::call(Kernel::IntoDynamic, vec![values[1].clone()])
+            } else {
+                for (value, arg) in values[1..end].iter().zip(&args[1..end]) {
+                    if !value.get_type(schema)?.is_numeric() {
+                        return Err(Error::syntax("percentile ranks must be numeric", arg.span));
+                    }
+                }
+                dynamic::call(Kernel::PackArray, values[1..end].to_vec())
+            };
+            return Ok(crate::tdigest_functions::scalar(
+                crate::tdigest_functions::Scalar::Array(ty),
+                vec![sketch, ranks],
+            ));
+        }
+        if matches!(name, "indexof" | "strrep" | "replace_regex") {
+            let text = |index: usize| -> Result<Expr> {
+                let value = values[index].clone();
+                self.function(
+                    "coalesce",
+                    vec![
+                        cast(self.string_value(value, schema)?, DataType::Utf8),
+                        lit(""),
+                    ],
+                )
+            };
+            let integer = |index: usize| -> Result<Expr> {
+                let ty = values[index].get_type(schema)?;
+                if !ty.is_integer() && ty != DataType::Null {
+                    return Err(Error::syntax(
+                        format!("{name} requires integer position/count arguments"),
+                        args[index].span,
+                    ));
+                }
+                Ok(cast(values[index].clone(), DataType::Int64))
+            };
+            return match name {
+                "indexof" => {
+                    if !(2..=5).contains(&values.len()) {
+                        return Err(Error::syntax(
+                            "indexof expects source, match, and optional start, length, occurrence",
+                            span,
+                        ));
+                    }
+                    let occurrence = if values.len() == 5 {
+                        match self.constant(integer(4)?, args[4].span)? {
+                            ScalarValue::Int64(Some(value)) if value > 0 => value,
+                            _ => {
+                                return Err(Error::syntax(
+                                    "indexof occurrence must be a constant positive integer",
+                                    args[4].span,
+                                ));
+                            }
+                        }
+                    } else {
+                        1
+                    };
+                    Ok(crate::text_functions::indexof(
+                        vec![
+                            text(0)?,
+                            text(1)?,
+                            if values.len() > 2 {
+                                integer(2)?
+                            } else {
+                                lit(0_i64)
+                            },
+                            if values.len() > 3 {
+                                integer(3)?
+                            } else {
+                                lit(-1_i64)
+                            },
+                        ],
+                        occurrence,
+                    ))
+                }
+                "strrep" => {
+                    if !(2..=3).contains(&values.len()) {
+                        return Err(Error::syntax(
+                            "strrep expects value, multiplier, and an optional delimiter",
+                            span,
+                        ));
+                    }
+                    Ok(crate::text_functions::strrep(vec![
+                        text(0)?,
+                        integer(1)?,
+                        if values.len() == 3 { text(2)? } else { lit("") },
+                    ]))
+                }
+                _ => {
+                    arity(3)?;
+                    let pattern = self.constant_string(values[1].clone(), args[1].span)?;
+                    let replacement = self.constant_string(values[2].clone(), args[2].span)?;
+                    crate::text_functions::replace_regex(text(0)?, pattern, replacement, span)
+                }
+            };
+        }
         if matches!(name, "dcount_hll" | "hll_merge") {
             if name == "dcount_hll" {
                 arity(1)?;
@@ -975,7 +1164,7 @@ impl Expressions<'_> {
             let values = values
                 .into_iter()
                 .zip(args)
-                .map(|(value, argument)| self.hll_value(value, schema, argument.span))
+                .map(|(value, argument)| self.sketch_value(value, schema, argument.span))
                 .collect::<Result<Vec<_>>>()?;
             return Ok(crate::hll_functions::scalar(
                 if name == "dcount_hll" {

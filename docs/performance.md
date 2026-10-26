@@ -55,6 +55,19 @@ capacity estimates.
 | `workloads/dcount_native` | Native DataFusion `approx_distinct` over the same 1,000,000 longs, with its own precision/error check |
 | `workloads/dcount_groups` | Accuracy-4 distinct counts over 100,000 ten-value groups; assert the exact one-million total and group count |
 | `workloads/hll_rollup` | Build 32 accuracy-2 sketches over 1,000,000 rows, merge them, and assert equality with the one-pass HLL estimate |
+| `workloads/arrow_expand` | Expand 100,000 native Arrow three-long lists through the typed buffer path and assert a 600,000 total |
+| `workloads/arrow_expand_sql` | Native SQL Unnest/sum over the same Arrow lists and exact total |
+| `workloads/arrow_dynamic_expand` | Explicitly convert those lists to dynamic, expand, and assert the same total |
+| `workloads/indexof` | Zero-based string search over 100,000 telemetry messages; assert the exact position sum |
+| `workloads/text_rewrite` | Delimited repetition, regex rewriting and two substring checks over 100,000 messages |
+| `workloads/bounded_percentiles` | Five bounded percentile ranks over 1,000,000 unique longs; assert exact extrema and at most 1% interior rank error |
+| `workloads/exact_percentiles` | The explicit sample-storing exact extension over the same five ranks and rows; assert exact nearest ranks |
+| `workloads/tdigest_rollup` | Build 32 weighted-distribution sketches over 1,000,000 rows, merge and read five ranks; assert extrema and rank error |
+| `workloads/percentile_groups` | Medians over 100,000 ten-value groups; assert every sparse median and exact group count |
+| `materialize/memory_cold` | Plan/initialize a fresh one-million-row snapshot, read two filtered fork legs and aggregate; 64 MiB pool, disk disabled |
+| `materialize/memory_warm` | Reset native operators and reuse the completed in-memory snapshot for the same forked aggregates |
+| `materialize/spill_cold` | Plan/initialize the same snapshot under a 256 KiB pool, using native disk spill and fresh files each iteration |
+| `materialize/spill_warm` | Replay the completed disk-backed snapshot through independent fork readers without reinitializing input |
 
 The fixture uses two non-null columns, four in-memory partitions, a filter,
 grouped sum, and top-k. Source data and physical planning are outside the
@@ -73,6 +86,136 @@ Each execution iteration uses DataFusion's `reset_plan_states` to create fresh
 operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
+
+## Measured 0.11 materialized snapshots
+
+The snapshot workloads were measured on 2026-10-26 on the Apple M4/arm64 host,
+Rust 1.95.0, DataFusion 55.2.0, the optimized bench profile and four target
+partitions. No other local compilation ran during measurement:
+
+```bash
+cargo bench --locked --bench kql -j 2 -- '^materialize/' \
+  --warm-up-time 2 --measurement-time 5 --sample-size 30
+```
+
+| Snapshot path | Criterion estimate | 95% confidence interval |
+| --- | --- | --- |
+| Cold in-memory initialization and forked aggregation | 1.99 ms | 1.82-2.20 ms |
+| Warm in-memory replay and forked aggregation | 0.522 ms | 0.506-0.544 ms |
+| Cold disk-backed initialization and forked aggregation | 21.34 ms | 19.23-23.30 ms |
+| Warm disk-backed replay and forked aggregation | 2.33 ms | 2.26-2.41 ms |
+
+The source contains 1,000,000 unique longs in independently allocated 8,192-row
+Arrow batches. Each query uses two filtered fork legs and checks a total of
+`499999500000` and count of `1000000`. The in-memory path uses a 64 MiB host pool
+with disks disabled; the spill path uses a 256 KiB pool, native temporary IPC,
+uncompressed encoding and a 64 MiB disk quota. Preflight asserts actual disk
+usage and four live files for the spill path, none for the resident path, exact
+results on initial and repeat reads, stable file usage during warm replay, and
+complete reservation/file cleanup. The remaining benchmark preflights still
+execute, including numeric SQL/KQL physical-plan equality.
+
+**Cold** includes a fresh query's parsing, optimization, physical planning,
+snapshot initialization, forked reads, aggregation and snapshot cleanup for
+each iteration. **Warm** reuses the completed snapshot and cached physical plan
+with native operator-state reset. Thus the difference is not an isolated
+measurement of cache lookup overhead or a speed advantage over DataFusion.
+Throughput counts original source rows once; each fork reads the cached source,
+and the complementary predicates together return one million rows.
+
+The source fixture itself is memory-resident, and warm spill reads can use the
+OS page cache. These numbers do not represent remote storage or uncached
+physical-disk latency. A 256 KiB host reservation limit is **not a 256 KiB
+process-RAM claim**: source arrays, native IPC and downstream working buffers
+have their separate memory requirements. Criterion extended the cold spill
+sampling period beyond five seconds and reported timing outliers on the shared
+host. Measure representative providers, value widths, compression and fan-out
+before treating these results as capacity guidance.
+
+## Measured 0.10 bounded percentile workloads
+
+The distribution workloads were measured on 2026-10-26 on the Apple M4/arm64
+host, Rust 1.95.0, DataFusion 55.2.0, optimized bench profile, and four target
+partitions. Compilation and the other local checks completed before the final
+measurement:
+
+```bash
+cargo bench --locked --bench kql -j 2 -- \
+  'workloads/(bounded_percentiles|exact_percentiles|tdigest_rollup|percentile_groups)' \
+  --warm-up-time 2 --measurement-time 8 --sample-size 30
+```
+
+| Benchmark | Criterion estimate | 95% confidence interval | Input rows/second |
+| --- | --- | --- | --- |
+| Five bounded percentiles, 1,000,000 unique longs | 12.11 ms | 11.90-12.30 ms | 82.6 million |
+| Five explicit exact percentiles, same rows/ranks | 44.12 ms | 42.19-46.02 ms | 22.7 million |
+| Build/merge 32 t-digests and read five ranks, 1,000,000 rows | 20.78 ms | 20.24-21.23 ms | 48.1 million |
+| Medians over 100,000 ten-value groups | 226.48 ms | 221.42-232.17 ms | 4.42 million |
+
+Ranks are 0, 50, 95, 99 and 100. Preflight asserts exact extrema and at most
+1% interior **rank** error for bounded/rollup results; the exact extension must
+return every precise nearest rank. The rollup includes actual dynamic sketch
+serialization, native merge and accessor costs, not an average of precomputed
+percentiles. Direct and rolled-up approximate values need not be identical.
+The grouped fixture checks every sparse median and the exact group count.
+All benchmark preflights still run, including the original numeric KQL/SQL
+physical-plan equality assertion.
+
+The bounded path is about 3.6 times faster than the sample-storing exact
+extension on this fixture, with a different accuracy/memory contract. This is
+not an execution-speed claim against DataFusion or a universal speed guarantee.
+Exact-small states promote after 2,048 input entries; compressed states cap
+centroids and pending input independently of row count. Local tests check
+retained state bounds, native memory-pool charging and actual spill/replay.
+The number of groups is still data-dependent, and the many-group result shows
+that allocation/serialization costs remain meaningful scaling work.
+
+An earlier sample overlapped local compilation and measured roughly 18/73/27 ms
+for the first three workloads. The final table avoids that self-contention,
+but the shared host still varied and the grouped run reported an outlier.
+Criterion extended sampling when its time estimate exceeded the requested
+eight seconds. These are memory-resident local measurements; the separate
+small synthetic Kusto captures do not certify million-row accuracy or identical
+service digests.
+
+## Measured 0.9 interoperability workloads
+
+The new Arrow/string paths at `8ba286f` were measured on 2026-10-25 on the same Apple
+M4/arm64 host, Rust 1.95.0, DataFusion 55.2.0, optimized bench profile, and four
+target partitions:
+
+```bash
+cargo bench --locked --bench kql -j 2 -- \
+  'workloads/(arrow_expand|arrow_expand_sql|arrow_dynamic_expand|indexof|text_rewrite)' \
+  --warm-up-time 1 --measurement-time 3 --sample-size 30
+```
+
+| Benchmark | Criterion estimate | 95% confidence interval |
+| --- | --- | --- |
+| Typed Arrow list expansion/sum, 100,000 lists | 1.10 ms | 1.09-1.12 ms |
+| Native SQL Unnest/sum, same lists | 0.872 ms | 0.859-0.890 ms |
+| Explicit dynamic conversion/expansion, same lists | 25.15 ms | 24.90-25.41 ms |
+| Optional-index search, 100,000 strings | 1.75 ms | 1.74-1.77 ms |
+| Repeat/regex rewrite/search, 100,000 strings | 35.59 ms | 33.37-37.88 ms |
+
+Each list contains three longs; all three expansion plans assert the exact
+600,000 total, so throughput counts original lists, not expanded rows. The
+typed KQL path processes about 91 million lists/second on this fixture while
+retaining checked collection bounds. The untyped/general dynamic route supports
+broader mixed/rich data but is much more expensive. SQL is faster here, and these
+three plans are not identical: do not attribute an execution advantage to KQL.
+
+The string fixture contains four repeating messages and asserts a 300,000
+index-position sum plus 100,000 successful rewrite checks. Regex compilation,
+source construction and physical planning are outside the timed region.
+Every benchmark preflight still executes, including the original numeric
+KQL/SQL physical-plan equality assertion. Some runs reported timing outliers
+on the shared host. These are local memory-resident workload measurements,
+not production capacity guarantees or new live Kusto conformance evidence.
+An earlier implementation sample measured 1.03 ms for typed expansion and
+23.67 ms for the explicit dynamic path; the difference reinforces the shared-host
+comparison limits. The final source also avoids repeatedly rescanning ASCII
+classification during occurrence searches.
 
 ## Measured 0.8 bounded distinct-count workloads
 
@@ -105,12 +248,14 @@ total. Each group stays sparse, avoiding a 256 KiB register allocation per key.
 The rollup includes dynamic sketch serialization/decoding and merge costs; it is
 not just adding precomputed counts. Separate regressions force native aggregation
 to spill under a 2 MiB host pool and assert exact results plus nonzero spill
-metrics after replay. Materialized query snapshots still do not spill.
+metrics after replay. That 0.8 milestone did not add snapshot spilling; 0.11 adds
+the separate materialized-snapshot path.
 
 The shared host varied materially between runs, including for unchanged native
 DataFusion code. The native baseline also reported timing outliers. These are
 memory-resident local measurements, not universal throughput or statistical
-accuracy guarantees, and the new HLL cases have not been run against Kusto.
+accuracy guarantees. These million-row workloads have not been run against
+Kusto; the later four small-set HLL reference captures are recorded separately.
 
 ## Measured 0.7 decimal128 workloads
 
@@ -382,8 +527,13 @@ filters/projections early, inspect `into_optimized_plan()`/physical plans, and
 benchmark representative data rather than optimizing solely for inline examples.
 
 Use `materialize` only when reusing a sufficiently expensive common subquery.
-It buffers the full selected result and adds a cache boundary. Reduce rows and
-columns inside it, and configure a bounded memory pool. A planned query and its
+It retains the full selected result and adds a cache boundary. Reduce rows and
+columns inside it, and configure bounded memory and temporary disk budgets.
+Snapshots that exceed their host-pool reservation spill through DataFusion's
+native IPC machinery, respecting host directories, quotas and compression.
+Replays stream at the configured batch-row size, but wide values and the native
+IPC/source/downstream working sets still require memory. Resident snapshots are
+not subsequently evicted on unrelated query pressure. A planned query and its
 clones reuse the snapshot, so a benchmark of cold materialization must create a
 fresh query per iteration; resetting physical operator state alone deliberately
 does not invalidate that query's snapshot.
