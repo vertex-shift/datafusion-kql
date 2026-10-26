@@ -60,6 +60,10 @@ capacity estimates.
 | `workloads/arrow_dynamic_expand` | Explicitly convert those lists to dynamic, expand, and assert the same total |
 | `workloads/indexof` | Zero-based string search over 100,000 telemetry messages; assert the exact position sum |
 | `workloads/text_rewrite` | Delimited repetition, regex rewriting and two substring checks over 100,000 messages |
+| `workloads/bounded_percentiles` | Five bounded percentile ranks over 1,000,000 unique longs; assert exact extrema and at most 1% interior rank error |
+| `workloads/exact_percentiles` | The explicit sample-storing exact extension over the same five ranks and rows; assert exact nearest ranks |
+| `workloads/tdigest_rollup` | Build 32 weighted-distribution sketches over 1,000,000 rows, merge and read five ranks; assert extrema and rank error |
+| `workloads/percentile_groups` | Medians over 100,000 ten-value groups; assert every sparse median and exact group count |
 
 The fixture uses two non-null columns, four in-memory partitions, a filter,
 grouped sum, and top-k. Source data and physical planning are outside the

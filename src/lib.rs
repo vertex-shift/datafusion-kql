@@ -51,6 +51,8 @@ mod scan;
 mod search;
 mod series_functions;
 mod tabular;
+mod tdigest;
+mod tdigest_functions;
 mod telemetry_text;
 mod temporal;
 mod terms;

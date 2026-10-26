@@ -2607,8 +2607,13 @@ pub(crate) fn default_name(expr: &ast::Expr, index: usize) -> String {
     match &expr.kind {
         ExprKind::Identifier(parts) => parts.last().expect("identifiers are nonempty").clone(),
         ExprKind::Call { name, args } => {
-            if name == "hll_merge" && args.len() >= 2 {
-                return "hll_merged_result".into();
+            if args.len() >= 2 {
+                if name == "hll_merge" {
+                    return "hll_merged_result".into();
+                }
+                if matches!(name.as_str(), "tdigest_merge" | "merge_tdigest") {
+                    return "tdigests_merge_result".into();
+                }
             }
             let column = args.first().and_then(|arg| {
                 if let ExprKind::Identifier(parts) = &arg.kind {
@@ -2628,6 +2633,8 @@ pub(crate) fn default_name(expr: &ast::Expr, index: usize) -> String {
                 "make_bag" | "make_bag_if" | "make_dictionary" => "bag",
                 "take_any" | "any" | "take_anyif" => "any",
                 "percentiles_array" | "percentilesw_array" => "percentiles",
+                "tdigest_merge" | "merge_tdigest" => "merge_tdigests",
+                "percentiles_array_tdigest" | "percentile_array_tdigest" => "percentile_tdigest",
                 name => name,
             };
             if matches!(name, "percentile" | "percentilew") && args.len() >= 2 {

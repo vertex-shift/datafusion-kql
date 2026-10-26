@@ -657,6 +657,49 @@ const FIXTURES: &[Fixture] = &[
             "1E+37",
         ]],
     },
+    // Captured through Azure MCP from the same public cluster on 2026-10-26.
+    Fixture {
+        name: "tdigest-weighted-accessors",
+        query: "datatable(x:long,w:long)[10,1,20,8,30,1] | summarize s=tdigest(x,w) | project p=tostring(percentile_tdigest(s,50)),dynamicType=gettype(percentile_tdigest(s,50)),typed=tostring(percentile_tdigest(s,50,typeof(long))),a=tostring(percentiles_array_tdigest(s,dynamic([0,50,100]))),typedArray=tostring(percentiles_array_tdigest(s,dynamic([0,50,100]),typeof(long)))",
+        columns: &["p", "dynamicType", "typed", "a", "typedArray"],
+        rows: &[&["20", "long", "20", "[10,20,30]", "[10,20,30]"]],
+    },
+    Fixture {
+        name: "tdigest-empty-defaults",
+        query: "datatable(x:long,w:long)[] | summarize p=percentile(x,50),a=percentiles_array(x,0,100),s=tdigest(x,w) | project pnull=tostring(isnull(p)),anull=tostring(isnull(a)),snull=tostring(isnull(s)),decoded=tostring(isnull(percentile_tdigest(s,50))),typed=tostring(isnull(percentile_tdigest(s,50,typeof(long))))",
+        columns: &["pnull", "anull", "snull", "decoded", "typed"],
+        rows: &[&["True", "True", "True", "True", "True"]],
+    },
+    Fixture {
+        name: "tdigest-datetime-types",
+        query: "datatable(t:datetime)[datetime(2025-01-01),datetime(2025-01-02),datetime(2025-01-03)] | summarize p=percentile(t,50),a=percentiles_array(t,0,100),s=tdigest(t) | project native=gettype(p),same=tostring(p==datetime(2025-01-02)),nested=gettype(a[0]),typed=tostring(percentile_tdigest(s,50,typeof(datetime))==p),nestedSketch=gettype(percentiles_array_tdigest(s,0,100)[0])",
+        columns: &["native", "same", "nested", "typed", "nestedSketch"],
+        rows: &[&["datetime", "True", "datetime", "True", "datetime"]],
+    },
+    Fixture {
+        name: "tdigest-timespan-types",
+        query: "datatable(t:timespan)[1h,2h,3h] | summarize p=percentile(t,50),s=tdigest(t) | project native=gettype(p),same=tostring(p==2h),typed=tostring(percentile_tdigest(s,50,typeof(timespan))==p),arrayType=gettype(percentiles_array_tdigest(s,dynamic([50]),typeof(timespan))[0])",
+        columns: &["native", "same", "typed", "arrayType"],
+        rows: &[&["timespan", "True", "True", "timespan"]],
+    },
+    Fixture {
+        name: "tdigest-nonpositive-weights",
+        query: "datatable(x:long,w:long)[10,-1,20,0,30,long(null),40,1] | summarize s=tdigest(x,w),p=percentilew(x,w,50) | project p=tostring(p),decoded=tostring(percentile_tdigest(s,50,typeof(long)))",
+        columns: &["p", "decoded"],
+        rows: &[&["40", "40"]],
+    },
+    Fixture {
+        name: "tdigest-scalar-merge-aliases",
+        query: "range x from 1 to 10 step 1 | summarize a=tdigest(x),b=tdigest(x+10) | project p=tostring(percentile_tdigest(tdigest_merge(a,b),50,typeof(long))),q=tostring(percentile_tdigest(merge_tdigest(a,b),50,typeof(long))),r=tostring(percentiles_array_tdigest(a,0,50,100))",
+        columns: &["p", "q", "r"],
+        rows: &[&["10", "10", "[1,5,10]"]],
+    },
+    Fixture {
+        name: "tdigest-single-rank-array-shape",
+        query: "range x from 1 to 3 step 1 | summarize s=tdigest(x) | extend untyped=percentiles_array_tdigest(s,dynamic([50])),typed=percentiles_array_tdigest(s,dynamic([50]),typeof(long)) | project untypedKind=gettype(untyped),untyped=tostring(untyped),typedKind=gettype(typed),typed=tostring(typed),element=gettype(typed[0])",
+        columns: &["untypedKind", "untyped", "typedKind", "typed", "element"],
+        rows: &[&["array", "[2]", "array", "[2]", "long"]],
+    },
 ];
 
 // Published-contract fixtures awaiting a live engine run, not captured results.

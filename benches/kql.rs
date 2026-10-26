@@ -48,6 +48,11 @@ const ARROW_SQL: &str = "SELECT coalesce(sum(v),0) AS \"Total\" FROM (SELECT UNN
 const ARROW_DYNAMIC_QUERY: &str = "ArrowEvents | extend d=todynamic(Values) | mv-expand d to typeof(long) | summarize Total=sum(d)";
 const INDEXOF_QUERY: &str = "Telemetry | summarize Total=sum(indexof(Message,' '))";
 const TEXT_REWRITE_QUERY: &str = "Telemetry | extend Rewritten=replace_regex(strrep(Message,2,';'),@'\\s+','_') | summarize N=countif(indexof(Rewritten,' ')==-1 and indexof(Rewritten,';')>=0)";
+const PERCENTILE_QUERY: &str = "CardinalityEvents | summarize percentiles(Id,0,50,95,99,100)";
+const EXACT_PERCENTILE_QUERY: &str =
+    "CardinalityEvents | summarize percentiles_exact(Id,0,50,95,99,100)";
+const TDIGEST_ROLLUP_QUERY: &str = "CardinalityEvents | summarize s=tdigest(Id) by Shard | summarize s=tdigest_merge(s) | extend a=percentiles_array_tdigest(s,0,50,95,99,100) | project low=tolong(a[0]),median=tolong(a[1]),p95=tolong(a[2]),p99=tolong(a[3]),high=tolong(a[4])";
+const GROUPED_PERCENTILE_QUERY: &str = "CardinalityEvents | summarize p=percentile(Id,50) by Group | summarize Bad=countif(p!=Group+400000),Groups=count()";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -315,6 +320,34 @@ fn benchmarks(c: &mut Criterion) {
         ),
         ("indexof", INDEXOF_QUERY, &telemetry, JSON_ROWS, 1),
         ("text_rewrite", TEXT_REWRITE_QUERY, &telemetry, JSON_ROWS, 1),
+        (
+            "bounded_percentiles",
+            PERCENTILE_QUERY,
+            &cardinality,
+            ROWS,
+            1,
+        ),
+        (
+            "exact_percentiles",
+            EXACT_PERCENTILE_QUERY,
+            &cardinality,
+            ROWS,
+            1,
+        ),
+        (
+            "tdigest_rollup",
+            TDIGEST_ROLLUP_QUERY,
+            &cardinality,
+            ROWS,
+            1,
+        ),
+        (
+            "percentile_groups",
+            GROUPED_PERCENTILE_QUERY,
+            &cardinality,
+            ROWS,
+            1,
+        ),
     ] {
         let plan = runtime.block_on(async {
             let frame = if name == "arrow_expand_sql" {
@@ -409,6 +442,40 @@ fn benchmarks(c: &mut Criterion) {
             assert_eq!(
                 datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
                 datafusion::common::ScalarValue::Int64(Some(ROWS as i64))
+            );
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(1), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(100_000))
+            );
+        }
+        if matches!(
+            name,
+            "bounded_percentiles" | "exact_percentiles" | "tdigest_rollup"
+        ) {
+            assert_eq!(result[0].num_columns(), 5);
+            for (index, p) in [0.0_f64, 50.0, 95.0, 99.0, 100.0].into_iter().enumerate() {
+                let value =
+                    datafusion::common::ScalarValue::try_from_array(result[0].column(index), 0)
+                        .unwrap();
+                let datafusion::common::ScalarValue::Int64(Some(estimate)) = value else {
+                    panic!("percentile benchmarks must preserve long output");
+                };
+                let target = (p / 100.0 * ROWS as f64).ceil().max(1.0) as i64 - 1;
+                let rank_error = (estimate - target).abs();
+                if name == "exact_percentiles" || p == 0.0 || p == 100.0 {
+                    assert_eq!(estimate, target, "{name},p={p}");
+                } else {
+                    assert!(
+                        rank_error <= ROWS as i64 / 100,
+                        "{name},p={p},estimate={estimate},rank error={rank_error}"
+                    );
+                }
+            }
+        }
+        if name == "percentile_groups" {
+            assert_eq!(
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+                datafusion::common::ScalarValue::Int64(Some(0))
             );
             assert_eq!(
                 datafusion::common::ScalarValue::try_from_array(result[0].column(1), 0).unwrap(),

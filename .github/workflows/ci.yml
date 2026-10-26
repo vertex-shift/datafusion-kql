@@ -51,6 +51,7 @@ jobs:
       - run: cargo run --locked --example telemetry_functions
       - run: cargo run --locked --example distinct_sketches
       - run: cargo run --locked --example arrow_interop
+      - run: cargo run --locked --example percentile_sketches
 
   package:
     name: Verify publishable crate

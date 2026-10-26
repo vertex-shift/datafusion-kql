@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.9 implements the typed tabular and dynamic subset below. Keywords, function
+0.10 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -794,15 +794,94 @@ modern functions default to, and are capped at, 1,048,576 items.
 Multi-column and wildcard selections use one native struct-valued aggregate,
 so returned columns come from the same row. Ties are unspecified.
 
+### Bounded percentiles and distribution sketches
+
 `percentile`, `percentiles`, `percentiles_array` and weighted variants
-`percentilew`, `percentilesw`, `percentilesw_array` implement nearest-rank
-selection, not linear interpolation. Multiple requested percentiles share one
-state. Integer samples preserve precision beyond `2^53`; zero weights are
-ignored and negative weights fail conversion. The implementation currently
-stores samples with memory accounting and performs exact rank selection rather
-than using Kusto's approximate t-digest. It therefore uses more memory for large
-groups. Ranks must be constant and within 0-100; at most 1024 ranks are allowed.
-Multi-column percentiles use generated output names; rename them afterward.
+`percentilew`, `percentilesw`, `percentilesw_array` now estimate nearest ranks
+using bounded native states. Multiple ranks share one state. Ranks must be
+constant finite numbers within 0-100, with 1-1024 ranks per call. Multi-column
+outputs use generated names; rename them afterward.
+
+**Behavior change from 0.9:** the first 2,048 positive-weight input entries per
+state retain exact samples, then promote to a t-digest capped at 1,024 centroids
+and a bounded pending buffer. Large groups no longer retain all source rows.
+Compressed estimates may interpolate between centroids and need not equal an
+input sample. Finite 0/100 endpoints retain exact extrema. This is an
+approximation profile, not a promise of identical Kusto-service estimates.
+
+When exact nearest-rank selection is required, use the extension names
+`percentile_exact`, `percentiles_exact`, `percentiles_array_exact`,
+`percentilew_exact`, `percentilesw_exact`, and `percentilesw_array_exact`.
+They retain all positive-weight samples with host memory accounting, and can
+therefore consume memory proportional to input size. Their multi-column names
+start with `percentile_exact_`.
+
+Long, real, datetime and timespan inputs are supported. Small integer sets
+preserve values beyond `2^53`; compressed integral states use a signed origin
+and normalized offsets to preserve narrow high-magnitude ranges. Interior
+quantiles over wide ranges remain approximate. Temporal outputs retain native
+Arrow types and rich dynamic tags, within the existing signed-nanosecond range.
+Decimal input is converted to real: this is not decimal128 quantile fidelity.
+Weights are signed longs; null/nonpositive weights and null samples are ignored,
+matching the captured Kusto behavior. Total weights use checked `u128` arithmetic,
+and exact ranks are computed from the binary64 rank argument without converting
+counts through `f64`.
+
+`tdigest(value[, weight])` builds a reusable dynamic distribution sketch.
+`summarize tdigest_merge(sketch)` and `merge_tdigest(sketch)` merge a column;
+the corresponding scalar overloads accept 2-16 sketch arguments. Unlike HLL
+union, distribution merge **adds weights**: merging a sketch twice counts its
+observations twice. Normalize logical input types before building rollups.
+
+`percentile_tdigest(sketch, rank[, typeof(type)])` accepts a runtime numeric rank
+and returns a dynamic scalar by default, or a typed nullable scalar with an
+explicit output type. `percentiles_array_tdigest(sketch, ranks...)` accepts
+numeric arguments or one dynamic/native rank array, with an optional trailing
+`typeof(type)`, and returns a dynamic array even for a single rank. Supported
+type annotations are int, long, real, datetime and timespan. The singular
+documentation spelling `percentile_array_tdigest` is also accepted as an alias.
+An empty/all-null/nonpositive-weight distribution produces null, as do its
+percentile accessors. Null sketches are ignored during merge.
+
+**Validation boundary:** output types must match the sketch's logical kind
+(`int` also accepts a long sketch). Mixed-kind merges, type mismatches,
+out-of-range/nonfinite ranks, empty/non-numeric rank arrays, malformed envelopes,
+and foreign/version/size-invalid payloads fail explicitly. Some Kusto-service
+invalid-input cases instead return null, including mixed long/real sketches and
+mismatched type annotations; this stricter local validation is not full error
+behavior parity. Decimal type annotations and rank/CDF accessors are not provided.
+
+Sketches survive `tostring`/`parse_json`, stored dynamic columns, materialization
+and query parameters. The `__datafusion_kql_tdigest_v1` envelope contains a
+bounded base64 payload, **not a Kusto-service t-digest blob**. The binary format
+is limited to 32,894 bytes; input JSON is limited to 1 MiB. Counts, bounds,
+centroid ordering/weights, type and coordinate scales are validated before
+calling DataFusion's public t-digest implementation. Do not edit sketch internals.
+Finite real values are normalized before weighted accumulation to avoid
+overflow. Nonfinite samples use an explicit local `f64::total_cmp` ordering;
+that profile is not certified against Kusto. JSON floating parsing enables
+round-trip fidelity so dynamic arrays do not lose an ULP at exact endpoints.
+
+Both ordinary and vectorized grouped accumulators support native partial/final
+merge, filters, prefix emission/reindexing and pre-aggregation bypass. Retained
+buffers are charged to DataFusion's memory pool, and configured native
+aggregation can spill/replay their binary intermediate states. Bounded states
+do not bound the number of groups; configure host memory and disk budgets.
+Temporary sort/merge buffers are bounded per state, not separate query-local
+spill storage. Scalar accessors cache consecutive sketch inputs and results
+within each batch, avoiding repeated decode/estimation for frozen subqueries.
+Materialized query snapshots still do not spill.
+
+Seven synthetic fixtures were captured from `help.kusto.windows.net/Samples`
+through Azure MCP on 2026-10-26, including the empty/default and nonpositive-weight
+corrections. The large-population checks are separate local rank-error tests:
+uniform, descending/shuffled, exponential, duplicate-heavy and weighted
+populations are checked against a 1% interval-rank threshold, including partial
+merges. This is measured regression coverage, **not a universal error guarantee**
+or an assertion that DataFusion and Kusto use the same digest algorithm.
+See the published [t-digest](https://learn.microsoft.com/en-us/kusto/query/tdigest-aggregation-function)
+and [percentile accessors](https://learn.microsoft.com/en-us/kusto/query/percentile-tdigest-function)
+for the service contracts.
 
 ### Accuracy-controlled distinct counts and sketches
 
@@ -876,7 +955,7 @@ and [HLL](https://learn.microsoft.com/en-us/kusto/query/hll-aggregation-function
 contracts. Local regressions measure exact thresholds and six-sigma error
 checks across multiple deterministic hash populations. These new cases have
 not been compared to a live Kusto engine; they do not expand the captured
-49-fixture reference baseline or promise identical service estimates.
+reference baseline or promise identical service estimates.
 Four published-contract HLL fixtures are separately labelled in the conformance
 suite and included in the opt-in live runner; they remain pending live execution.
 
@@ -915,10 +994,11 @@ suite and included in the opt-in live runner; they remain pending live execution
 
 ## Opt-in Kusto reference checks
 
-The conformance suite in `tests/conformance.rs` runs 49 synthetic inline-data
+The conformance suite in `tests/conformance.rs` runs 56 synthetic inline-data
 fixtures locally by default, comparing exact column names and row multisets
 against results captured from the public Kusto help cluster (`Samples`) through
-Azure MCP on 2026-10-25. It covers counts/nulls, expansion, per-row/per-key
+Azure MCP on 2026-10-25 (49 fixtures) and 2026-10-26 (seven t-digest fixtures).
+It covers counts/nulls, expansion, per-row/per-key
 queries, scans, hierarchical tops, schema-declared plugins, scalar subqueries,
 ranges, GUIDs, parsing, decimal128 arithmetic/conversion/special values, rich nested tags,
 term/IP/encoding helpers, documented NaN defaults, and series shape. The
@@ -936,7 +1016,7 @@ The rich-value fixture uses runtime packing rather than decimal syntax inside
 `dynamic(...)`. Fixture aliases and scan-step names avoid reserved keywords.
 Nine additional source-based fixtures (four HLL, three string, two literal)
 exercise published examples/contracts locally and are included in the opt-in
-live runner. They are not counted among the 49 captured engine results.
+live runner. They are not counted among the 56 captured engine results.
 
 To compare the same fixtures against an explicitly configured reference:
 

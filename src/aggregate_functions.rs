@@ -210,34 +210,81 @@ pub(crate) enum QuantileOutput {
     Array,
 }
 
+impl QuantileOutput {
+    pub(crate) fn fields(kind: crate::tdigest::Kind, count: usize) -> Vec<FieldRef> {
+        (0..count)
+            .map(|index| {
+                Arc::new(Field::new(
+                    format!("percentile_{index}"),
+                    kind.data_type(),
+                    true,
+                ))
+            })
+            .collect()
+    }
+
+    pub(crate) fn data_type(self, kind: crate::tdigest::Kind, count: usize) -> DataType {
+        match self {
+            Self::Single => kind.data_type(),
+            Self::Columns => DataType::Struct(Self::fields(kind, count).into()),
+            Self::Array => dynamic::data_type(),
+        }
+    }
+
+    pub(crate) fn pack(
+        self,
+        kind: crate::tdigest::Kind,
+        values: Vec<Option<u64>>,
+        empty: bool,
+    ) -> Result<ScalarValue> {
+        match self {
+            Self::Single => Ok(kind.scalar(
+                values
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| error("percentile requires a rank"))?,
+            )),
+            Self::Columns => {
+                let arrays = values
+                    .iter()
+                    .map(|value| kind.scalar(*value).to_array())
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(ScalarValue::Struct(Arc::new(StructArray::try_new(
+                    Self::fields(kind, values.len()).into(),
+                    arrays,
+                    None,
+                )?)))
+            }
+            Self::Array => dynamic::from_node(&if empty {
+                Node::Null
+            } else {
+                Node::Array(values.into_iter().map(|value| kind.node(value)).collect())
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Quantile {
-    integer: bool,
+    kind: crate::tdigest::Kind,
     percentiles: Vec<u64>,
     output: QuantileOutput,
     signature: Signature,
 }
 
 pub(crate) fn quantile(
-    integer: bool,
+    kind: crate::tdigest::Kind,
     percentiles: &[f64],
     output: QuantileOutput,
     value: Expr,
     weight: Expr,
 ) -> Expr {
     AggregateUDF::from(Quantile {
-        integer,
+        kind,
         percentiles: percentiles.iter().map(|p| p.to_bits()).collect(),
         output,
         signature: Signature::exact(
-            vec![
-                if integer {
-                    DataType::Int64
-                } else {
-                    DataType::Float64
-                },
-                DataType::UInt64,
-            ],
+            vec![kind.sample_type(), DataType::UInt64],
             Volatility::Immutable,
         ),
     })
@@ -246,22 +293,7 @@ pub(crate) fn quantile(
 
 impl Quantile {
     fn sample_type(&self) -> DataType {
-        if self.integer {
-            DataType::Int64
-        } else {
-            DataType::Float64
-        }
-    }
-    fn fields(&self) -> Vec<Arc<Field>> {
-        (0..self.percentiles.len())
-            .map(|i| {
-                Arc::new(Field::new(
-                    format!("percentile_{i}"),
-                    self.sample_type(),
-                    true,
-                ))
-            })
-            .collect()
+        self.kind.sample_type()
     }
 }
 
@@ -273,11 +305,7 @@ impl AggregateUDFImpl for Quantile {
         &self.signature
     }
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(match self.output {
-            QuantileOutput::Single => self.sample_type(),
-            QuantileOutput::Columns => DataType::Struct(self.fields().into()),
-            QuantileOutput::Array => dynamic::data_type(),
-        })
+        Ok(self.output.data_type(self.kind, self.percentiles.len()))
     }
     fn accumulator(&self, _: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
         Ok(Box::new(QuantileState {
@@ -316,7 +344,7 @@ impl QuantileState {
     fn selected(&mut self) -> Result<Vec<ScalarValue>> {
         self.integers.sort_unstable_by_key(|(value, _)| *value);
         self.reals.sort_unstable_by(|(a, _), (b, _)| a.total_cmp(b));
-        let total = if self.function.integer {
+        let total = if self.function.kind != crate::tdigest::Kind::Real {
             self.integers
                 .iter()
                 .map(|(_, weight)| u128::from(*weight))
@@ -333,11 +361,9 @@ impl QuantileState {
                 result.push(ScalarValue::try_from(&self.function.sample_type())?);
                 continue;
             }
-            let rank = ((f64::from_bits(*percentile) / 100.0 * total as f64).ceil() as u128)
-                .max(1)
-                .min(total);
+            let rank = crate::tdigest::rank(f64::from_bits(*percentile), total);
             let mut accumulated = 0_u128;
-            let found = if self.function.integer {
+            let found = if self.function.kind != crate::tdigest::Kind::Real {
                 self.integers.iter().find_map(|(value, weight)| {
                     accumulated += u128::from(*weight);
                     (accumulated >= rank).then_some(ScalarValue::Int64(Some(*value)))
@@ -360,7 +386,7 @@ impl Accumulator for QuantileState {
             .as_any()
             .downcast_ref::<UInt64Array>()
             .ok_or_else(|| error("percentile weights must be unsigned integers"))?;
-        if self.function.integer {
+        if self.function.kind != crate::tdigest::Kind::Real {
             let samples = values[0]
                 .as_any()
                 .downcast_ref::<Int64Array>()
@@ -395,37 +421,19 @@ impl Accumulator for QuantileState {
     }
     fn evaluate(&mut self) -> Result<ScalarValue> {
         let values = self.selected()?;
-        match self.function.output {
-            QuantileOutput::Single => values
-                .into_iter()
-                .next()
-                .ok_or_else(|| error("percentile requires a rank")),
-            QuantileOutput::Columns => {
-                let arrays = values
-                    .iter()
-                    .map(ScalarValue::to_array)
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(ScalarValue::Struct(Arc::new(StructArray::try_new(
-                    self.function.fields().into(),
-                    arrays,
-                    None,
-                )?)))
-            }
-            QuantileOutput::Array => {
-                if self.integers.is_empty() && self.reals.is_empty() {
-                    return dynamic::from_json(&Json::Null);
-                }
-                let json = values
-                    .iter()
-                    .map(|value| match value {
-                        ScalarValue::Int64(Some(value)) => Json::from(*value),
-                        ScalarValue::Float64(Some(value)) => Json::from(*value),
-                        _ => Json::Null,
-                    })
-                    .collect();
-                dynamic::from_json(&Json::Array(json))
-            }
-        }
+        let values = values
+            .into_iter()
+            .map(|value| match value {
+                ScalarValue::Int64(value) => Ok(value.map(|value| value as u64)),
+                ScalarValue::Float64(value) => Ok(value.map(f64::to_bits)),
+                _ => Err(error("unexpected exact percentile result type")),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.function.output.pack(
+            self.function.kind,
+            values,
+            self.integers.is_empty() && self.reals.is_empty(),
+        )
     }
     fn size(&self) -> usize {
         size_of::<Self>()
@@ -435,7 +443,7 @@ impl Accumulator for QuantileState {
     }
     fn state(&mut self) -> Result<Vec<ScalarValue>> {
         let mut weights = ListBuilder::new(UInt64Builder::new());
-        let values = if self.function.integer {
+        let values = if self.function.kind != crate::tdigest::Kind::Real {
             let mut values = ListBuilder::new(Int64Builder::new());
             for (value, weight) in &self.integers {
                 values.values().append_value(*value);

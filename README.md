@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.9 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.10 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -23,6 +23,7 @@ cargo run --example schema_plugins
 cargo run --example telemetry_functions
 cargo run --example distinct_sketches
 cargo run --example arrow_interop
+cargo run --example percentile_sketches
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -195,6 +196,15 @@ Sketches use a versioned local format, not Kusto-service binary compatibility.
 Native vectorized grouped accumulators keep small groups sparse instead of
 allocating a full register array per key.
 
+Percentile families now use bounded exact-small/t-digest-large states instead
+of retaining every input sample. `tdigest`, scalar/aggregate `tdigest_merge`
+and `merge_tdigest`, and typed percentile accessors support distribution rollups.
+Longs and temporal values preserve their logical types; weighted rank arithmetic
+does not round counts through `f64`. Explicit `*_exact` percentile extensions
+retain the previous sample-storing behavior when exact ranks are required.
+See the compatibility contract for the intentional approximation change,
+strict sketch validation, and local-format boundary.
+
 Advanced signal processing, management commands, additional hints, and complete
 Kusto-service conformance are future milestones—not silently emulated.
 
@@ -241,10 +251,13 @@ HLL regressions separately cover exact thresholds, probabilistic error checks,
 partial-state/filter/merge equivalence, malformed sketches, and host memory
 accounting; they are not represented as new live Kusto reference captures.
 
-`tests/conformance.rs` compares 49 synthetic fixtures with captured public Kusto
+`tests/conformance.rs` compares 56 synthetic fixtures with captured public Kusto
 help-cluster results by default, and provides an opt-in live suite for a
 configured emulator or ADX test database. The formerly ignored decimal
-precision and JSON conversion cases are now ordinary regressions. CI also exercises curl
+precision and JSON conversion cases are now ordinary regressions. Seven live
+t-digest captures cover weighted accessors, null defaults, temporal types,
+merge aliases, nonpositive weights, and array shape; they do not certify
+identical large-population estimates or interoperable service blobs. CI also exercises curl
 transport against a self-owned loopback fixture, **not a Kusto engine**.
 See the compatibility contract for capture provenance, live-test setup, and
 remaining conformance boundaries.
