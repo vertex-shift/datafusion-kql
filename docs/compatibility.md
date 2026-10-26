@@ -181,8 +181,9 @@ Retained Arrow buffers and vector bookkeeping use native DataFusion
 memory pools. Small snapshots remain zero-copy in memory. If retaining another
 batch exhausts the host pool and the host disk manager permits temporary files,
 the snapshot switches to disk. Already completed resident partitions are also
-spilled before replay, freeing their reservations. There is at most one native
-temporary IPC file per nonempty input partition, not one file per batch.
+spilled before replay, freeing their reservations. Each initialization attempt
+uses at most one native temporary IPC file per nonempty input partition, not
+one file per batch.
 Conservative Arrow accounting can count shared/sliced buffers more than once
 and therefore spill sooner than their unique physical size.
 

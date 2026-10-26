@@ -87,6 +87,51 @@ operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
 
+## Measured 0.11 materialized snapshots
+
+The snapshot workloads were measured on 2026-10-26 on the Apple M4/arm64 host,
+Rust 1.95.0, DataFusion 55.2.0, the optimized bench profile and four target
+partitions. No other local compilation ran during measurement:
+
+```bash
+cargo bench --locked --bench kql -j 2 -- '^materialize/' \
+  --warm-up-time 2 --measurement-time 5 --sample-size 30
+```
+
+| Snapshot path | Criterion estimate | 95% confidence interval |
+| --- | --- | --- |
+| Cold in-memory initialization and forked aggregation | 1.99 ms | 1.82-2.20 ms |
+| Warm in-memory replay and forked aggregation | 0.522 ms | 0.506-0.544 ms |
+| Cold disk-backed initialization and forked aggregation | 21.34 ms | 19.23-23.30 ms |
+| Warm disk-backed replay and forked aggregation | 2.33 ms | 2.26-2.41 ms |
+
+The source contains 1,000,000 unique longs in independently allocated 8,192-row
+Arrow batches. Each query uses two filtered fork legs and checks a total of
+`499999500000` and count of `1000000`. The in-memory path uses a 64 MiB host pool
+with disks disabled; the spill path uses a 256 KiB pool, native temporary IPC,
+uncompressed encoding and a 64 MiB disk quota. Preflight asserts actual disk
+usage and four live files for the spill path, none for the resident path, exact
+results on initial and repeat reads, stable file usage during warm replay, and
+complete reservation/file cleanup. The remaining benchmark preflights still
+execute, including numeric SQL/KQL physical-plan equality.
+
+**Cold** includes a fresh query's parsing, optimization, physical planning,
+snapshot initialization, forked reads, aggregation and snapshot cleanup for
+each iteration. **Warm** reuses the completed snapshot and cached physical plan
+with native operator-state reset. Thus the difference is not an isolated
+measurement of cache lookup overhead or a speed advantage over DataFusion.
+Throughput counts original source rows once; each fork reads the cached source,
+and the complementary predicates together return one million rows.
+
+The source fixture itself is memory-resident, and warm spill reads can use the
+OS page cache. These numbers do not represent remote storage or uncached
+physical-disk latency. A 256 KiB host reservation limit is **not a 256 KiB
+process-RAM claim**: source arrays, native IPC and downstream working buffers
+have their separate memory requirements. Criterion extended the cold spill
+sampling period beyond five seconds and reported timing outliers on the shared
+host. Measure representative providers, value widths, compression and fan-out
+before treating these results as capacity guidance.
+
 ## Measured 0.10 bounded percentile workloads
 
 The distribution workloads were measured on 2026-10-26 on the Apple M4/arm64

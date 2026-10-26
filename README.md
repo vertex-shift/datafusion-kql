@@ -168,8 +168,7 @@ disk manager, quotas, and compression settings. Small snapshots stay in memory;
 disk-disabled or exhausted configurations still fail explicitly. Snapshots
 belong to the planned query/DataFrame, including its clones; plan a new query
 for a fresh snapshot. See the compatibility contract for lifetime, cancellation,
-and working-memory
-boundaries.
+and working-memory boundaries.
 
 `mv-apply` runs native per-row subqueries over zipped dynamic arrays. `partition`
 supports per-key transformations, with vectorized fast paths for common
@@ -248,6 +247,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo check --lib --no-default-features
+cargo test --no-default-features --test materialize
 ```
 
 Tests cover parser diagnostics/limits, KQL-specific semantics, SQL result parity,

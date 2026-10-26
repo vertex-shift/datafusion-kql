@@ -42,6 +42,7 @@ jobs:
       - run: cargo test --locked --all-features
       - run: cargo test --locked --test conformance reference_transport_local_http -- --ignored
       - run: cargo check --locked --lib --no-default-features
+      - run: cargo test --locked --no-default-features --test materialize
       - run: cargo run --locked --example quickstart
       - run: cargo run --locked --example telemetry_json
       - run: cargo run --locked --example time_series
