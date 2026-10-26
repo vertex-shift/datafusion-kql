@@ -8,7 +8,7 @@ use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
 use datafusion::execution::memory_pool::GreedyMemoryPool;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::physical_plan::execution_plan::reset_plan_states;
-use datafusion::physical_plan::{collect, displayable};
+use datafusion::physical_plan::{ExecutionPlan, collect, displayable};
 use datafusion::prelude::*;
 use datafusion_kql::{SessionContextKqlExt, parse};
 use std::hint::black_box;
@@ -26,6 +26,7 @@ const PARTITION_QUERY: &str =
     "Events | partition hint.strategy=native by Category (top 3 by Value) | summarize N=count()";
 const SCAN_QUERY: &str = "Events | scan declare(Total:long=0) with(step s:true=>Total=s.Total+Value;) | summarize Peak=max(Total)";
 const STATE_SCAN_QUERY: &str = "Events | take 10000 | scan declare(Total:long=0) with(step s:true=>Total=iff(s.Total>10000,Value,s.Total+Value);) | summarize Peak=max(Total)";
+const STATE_SCAN_LARGE_QUERY: &str = "Events | take 100000 | scan declare(Total:long=0) with(step s:true=>Total=iff(s.Total>10000,Value,s.Total+Value);) | summarize Peak=max(Total)";
 const APPLY_QUERY: &str = "JsonEvents | take 1000 | extend P=parse_json(Raw) | mv-apply v=P.latencies to typeof(long) on (top 2 by v | summarize Total=sum(v)) | summarize Total=sum(Total)";
 const UNPACK_QUERY: &str = "JsonEvents | extend P=parse_json(Raw) | evaluate bag_unpack(P):(service:string,latencies:dynamic) | summarize Measurements=sum(array_length(latencies)) by service";
 const PIVOT_QUERY: &str = "Events | evaluate pivot(Category):(Value:long,api:long,worker:long,frontend:long,scheduler:long) | summarize Total=sum(api)+sum(worker)+sum(frontend)+sum(scheduler)";
@@ -57,6 +58,7 @@ const EXACT_PERCENTILE_QUERY: &str =
 const TDIGEST_ROLLUP_QUERY: &str = "CardinalityEvents | summarize s=tdigest(Id) by Shard | summarize s=tdigest_merge(s) | extend a=percentiles_array_tdigest(s,0,50,95,99,100) | project low=tolong(a[0]),median=tolong(a[1]),p95=tolong(a[2]),p99=tolong(a[3]),high=tolong(a[4])";
 const GROUPED_PERCENTILE_QUERY: &str = "CardinalityEvents | summarize p=percentile(Id,50) by Group | summarize Bad=countif(p!=Group+400000),Groups=count()";
 const SNAPSHOT_QUERY: &str = "let T=materialize(SnapshotEvents); union (T | where Id<500000 | summarize Total=sum(Id),N=count()),(T | where Id>=500000 | summarize Total=sum(Id),N=count()) | summarize Total=sum(Total),N=sum(N)";
+const GROUP_TEMPLATE_QUERY: &str = "SnapshotEvents | extend g=Id%4 | partition hint.strategy=native by g (extend v=2*Id | summarize N=count(),Total=sum(v)) | summarize N=sum(N),Total=sum(Total),Groups=count()";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -241,12 +243,11 @@ fn snapshot_context(spill: bool) -> SessionContext {
         )
         .build()
         .unwrap();
-    let ctx = SessionContext::new_with_config_rt(
-        SessionConfig::new()
-            .with_target_partitions(4)
-            .with_batch_size(8192),
-        Arc::new(runtime),
-    );
+    let mut config = SessionConfig::new()
+        .with_target_partitions(4)
+        .with_batch_size(8192);
+    config.options_mut().execution.sort_spill_reservation_bytes = 32 << 10;
+    let ctx = SessionContext::new_with_config_rt(config, Arc::new(runtime));
     let mut partitions = vec![Vec::new(); 4];
     for (index, start) in (0..ROWS).step_by(8192).enumerate() {
         let batch = RecordBatch::try_from_iter(vec![(
@@ -346,6 +347,21 @@ fn snapshot_benchmarks(c: &mut Criterion, runtime: &Runtime) {
     group.finish();
 }
 
+fn group_spills(plan: &dyn ExecutionPlan) -> usize {
+    let own = if plan.name() == "KqlApplyExec" {
+        plan.metrics()
+            .and_then(|metrics| metrics.spill_count())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    own + plan
+        .children()
+        .into_iter()
+        .map(|child| group_spills(child.as_ref()))
+        .sum::<usize>()
+}
+
 fn benchmarks(c: &mut Criterion) {
     c.bench_function("parse/kql_pipeline", |b| {
         b.iter(|| parse(black_box(QUERY)).unwrap())
@@ -412,6 +428,8 @@ fn benchmarks(c: &mut Criterion) {
     let telemetry = telemetry_context();
     let cardinality = cardinality_context();
     let arrow = arrow_context();
+    let grouped = snapshot_context(false);
+    let grouped_spill = snapshot_context(true);
     let mut distinct_estimate = None;
     let mut workloads = c.benchmark_group("workloads");
     for (name, query, context, rows, expected_rows) in [
@@ -420,6 +438,27 @@ fn benchmarks(c: &mut Criterion) {
         ("partition_top", PARTITION_QUERY, &ctx, ROWS, 1),
         ("scan_cumulative", SCAN_QUERY, &ctx, ROWS, 1),
         ("scan_stateful", STATE_SCAN_QUERY, &ctx, 10_000, 1),
+        (
+            "scan_stateful_100k",
+            STATE_SCAN_LARGE_QUERY,
+            &ctx,
+            100_000,
+            1,
+        ),
+        (
+            "partition_template",
+            GROUP_TEMPLATE_QUERY,
+            &grouped,
+            ROWS,
+            1,
+        ),
+        (
+            "partition_template_spill",
+            GROUP_TEMPLATE_QUERY,
+            &grouped_spill,
+            ROWS,
+            1,
+        ),
         ("mv_apply_top", APPLY_QUERY, &json, 1_000, 1),
         ("bag_unpack", UNPACK_QUERY, &json, JSON_ROWS, 2),
         ("pivot", PIVOT_QUERY, &ctx, ROWS, 1),
@@ -522,6 +561,36 @@ fn benchmarks(c: &mut Criterion) {
             expected_rows,
             "unexpected result cardinality for {name}",
         );
+        if matches!(name, "partition_template" | "partition_template_spill") {
+            for (index, expected) in [(0, ROWS as i64), (1, 999_999_000_000), (2, 4)] {
+                assert_eq!(
+                    datafusion::common::ScalarValue::try_from_array(result[0].column(index), 0)
+                        .unwrap(),
+                    datafusion::common::ScalarValue::Int64(Some(expected))
+                );
+            }
+            assert!(
+                native.contains("KqlApplyExec"),
+                "benchmark must exercise the generic template"
+            );
+            assert_eq!(
+                group_spills(plan.as_ref()) > 0,
+                name == "partition_template_spill"
+            );
+            assert_eq!(context.runtime_env().disk_manager.used_disk_space(), 0);
+        }
+        if matches!(name, "scan_stateful" | "scan_stateful_100k") {
+            let value =
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap();
+            let datafusion::common::ScalarValue::Int64(Some(peak)) = value else {
+                panic!("scan must preserve long state");
+            };
+            assert!((10_001..=10_099).contains(&peak), "{name}: {peak}");
+            assert!(
+                native.contains("KqlScanExec"),
+                "benchmark must exercise the state machine"
+            );
+        }
         if matches!(
             name,
             "arrow_expand"

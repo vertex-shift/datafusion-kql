@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.11 implements the typed tabular and dynamic subset below. Keywords, function
+0.12 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -206,8 +206,8 @@ providers still require working memory; a row limit does not bound the byte
 size of an individual value. Input/downstream operators need their own memory
 and native spill configuration. A completed in-memory snapshot is not later
 evicted just because an unrelated operator or query runs out of memory.
-Generic grouped-subquery buffers and state-machine scan buffers still do not
-gain spilling from this change. Configure bounded host memory/disk budgets and
+Generic grouped-subquery inputs reuse this spill/replay buffer as described
+below; state-machine scan history/output still does not spill. Configure bounded host memory/disk budgets and
 appropriate upstream batch/value sizes.
 
 Disabled disks, exhausted disk quotas, custom-backend failures and input errors
@@ -584,11 +584,22 @@ not implemented.
 Simple native/shuffle `top`, `count`, and `summarize` transformations compile to
 one vectorized partitioned-window/grouped-aggregate plan, without instantiating
 one plan per key. More general transformations compile their physical template
-once, bind each subtable's Arrow batches to its native input, and reset native
+once, bind each subtable's replayable source to its native input, and reset native
 operator state between groups. Groups stream independently across hash
-partitions; retaining one group's input is charged to the host memory pool.
-Large individual groups require enough memory; those retained batches do not
-spill even though the upstream native sort can.
+partitions. Small groups retain zero-copy Arrow batches, charged to the host
+memory pool. Oversized per-key or per-row inputs spill through the same native
+buffer as materialized snapshots and honor host disk quotas/custom backends and
+compression. Every template fork gets an independent replay stream; files are
+released after that group's output/consumers finish, including early limits and
+failures. Group-input spill metrics are available on `KqlApplyExec`, separately
+from upstream sort spilling. Native `partition` sorting and template operators
+still need their own working-memory/spill budgets.
+
+Batch Arrow kernels find adjacent key runs, with scalar decoding only at run
+boundaries rather than for every row. Floating signed zero is normalized for
+hash/sort/boundary identity; NaN payload behavior follows native DataFusion
+grouping, not a newly certified Kusto profile. Native decimal struct keys are
+still outside the accepted `partition` key profile.
 
 This general path does not reparse KQL or run a separate query interpreter, but
 native-plan initialization has overhead for very many tiny groups. Prefer
@@ -629,7 +640,9 @@ State resets independently inside each `partition`/`mv-apply` subtable.
 The operator retains bounded step history rather than every input row, with
 at most 128 steps, 128 declarations, and 128 assignments per step. Variable-size
 state and buffered outputs are charged to the host memory pool. State does not
-spill. A nonnullable-long, zero-initialized additive single-step scan uses native
+spill. Buffered output sizes are maintained incrementally, so memory accounting
+does not become quadratic in the host batch-row count. A nonnullable-long,
+zero-initialized additive single-step scan uses native
 cumulative windows instead; nullable inputs use the state machine so null
 propagation is not accidentally changed into SQL SUM's null-skipping behavior.
 Compute row-window expressions in an earlier `extend`, not directly inside
@@ -918,8 +931,9 @@ do not bound the number of groups; configure host memory and disk budgets.
 Temporary sort/merge buffers are bounded per state, not separate query-local
 spill storage. Scalar accessors cache consecutive sketch inputs and results
 within each batch, avoiding repeated decode/estimation for frozen subqueries.
-Materialized snapshots have their separate native spill/replay path described
-above; generic grouped-subquery buffers remain a distinct scaling boundary.
+Materialized snapshots and generic grouped-subquery inputs share the native
+spill/replay buffer described above; their template/IPC working memory remains
+a distinct host budget boundary.
 
 Seven synthetic fixtures were captured from `help.kusto.windows.net/Samples`
 through Azure MCP on 2026-10-26, including the empty/default and nonpositive-weight
@@ -996,7 +1010,8 @@ DataFusion's pre-aggregation bypass. Sparse states avoid allocating 256 KiB
 for every tiny accuracy-4 group. Retained buffers are reported to the host
 memory pool; native aggregation can spill intermediate states when configured.
 Materialized snapshots use the separate native spill path described above.
-Generic grouped-subquery buffers still require their own scaling work.
+Generic grouped-subquery inputs also use that buffer; arbitrary template/state
+working sets still depend on their native operator budgets.
 
 The accuracy/budget semantics are grounded in the published
 [dcount](https://learn.microsoft.com/en-us/kusto/query/dcount-aggregation-function)

@@ -39,6 +39,9 @@ capacity estimates.
 | `workloads/partition_top` | Native per-category top-three windows over 1,000,000 rows, followed by a count |
 | `workloads/scan_cumulative` | Native cumulative-window scan over 1,000,000 nonnullable longs, followed by a maximum |
 | `workloads/scan_stateful` | Conditional state-machine scan over 10,000 rows, followed by a maximum |
+| `workloads/scan_stateful_100k` | The same state machine over 100,000 rows; assert state type and a valid reset peak |
+| `workloads/partition_template` | Generic per-key extend/aggregate templates over 1,000,000 rows and four keys with a 64 MiB pool |
+| `workloads/partition_template_spill` | The same generic templates under 256 KiB, asserting actual group-input spill metrics and exact totals |
 | `workloads/mv_apply_top` | Parse 1,000 payloads and run native per-row top-two/aggregation subqueries |
 | `workloads/bag_unpack` | Parse/unpack 100,000 JSON payloads with a declared schema and aggregate array lengths by service |
 | `workloads/json_fields` | Equivalent service/latency extraction through ordinary property access over the same payloads |

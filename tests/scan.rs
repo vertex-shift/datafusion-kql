@@ -242,3 +242,29 @@ async fn invalid_scan_definitions_fail_in_planning() {
         assert!(SessionContext::new().kql(query).await.is_err(), "{query}");
     }
 }
+
+#[tokio::test]
+async fn stateful_scan_results_are_independent_of_output_batch_size() {
+    let mut state = 0_i64;
+    let mut peak = 0_i64;
+    for value in 1..=20_000 {
+        state = if state >= 10_000 {
+            value
+        } else {
+            state + value
+        };
+        peak = peak.max(state);
+    }
+    for batch_size in [1, 7, 256, 8192] {
+        let ctx = SessionContext::new_with_config(SessionConfig::new().with_batch_size(batch_size));
+        let query = "range x from 1 to 20000 step 1 | scan declare(n:long=0) with(step s:true=>n=iff(s.n>=10000,x,s.n+x);) | summarize Rows=count(),Peak=max(n),Total=sum(x)";
+        assert_eq!(
+            result(&ctx, query).await,
+            vec![vec![
+                "20000".to_owned(),
+                peak.to_string(),
+                "200010000".to_owned()
+            ]]
+        );
+    }
+}

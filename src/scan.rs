@@ -623,6 +623,7 @@ impl ExecutionPlan for ScanExec {
             schema: self.schema(),
             match_id: self.match_id,
             output: Vec::new(),
+            output_bytes: 0,
             reservation,
             batch_size: context.session_config().batch_size(),
             finished: false,
@@ -644,9 +645,9 @@ impl ExecutionPlan for ScanExec {
                     state.pending = state.input.try_next().await?;
                     state.position = 0;
                     if state.pending.is_none() {
-                        for pending in &mut state.last {
-                            if let Some(row) = pending.take() {
-                                state.output.push(row);
+                        for index in 0..state.last.len() {
+                            if let Some(row) = state.last[index].take() {
+                                state.emit(row)?;
                             }
                         }
                         state.finished = true;
@@ -737,6 +738,7 @@ struct ScanStream {
     schema: SchemaRef,
     match_id: bool,
     output: Vec<Vec<ScalarValue>>,
+    output_bytes: usize,
     reservation: MemoryReservation,
     batch_size: usize,
     finished: bool,
@@ -822,10 +824,10 @@ impl ScanStream {
             };
             if promoted.is_some() {
                 if let Some(row) = self.last[index].take() {
-                    self.output.push(row);
+                    self.emit(row)?;
                 }
                 if let Some(row) = self.last[index - 1].take() {
-                    self.output.push(row);
+                    self.emit(row)?;
                 }
                 self.states[index] = self.states[index - 1].take();
             }
@@ -858,7 +860,7 @@ impl ScanStream {
                 .ok_or_else(|| DataFusionError::Execution("scan output order overflow".into()))?;
             row.push(ScalarValue::Int64(Some(ordinal)));
             match self.steps[index].output {
-                ScanOutput::All => self.output.push(row),
+                ScanOutput::All => self.emit(row)?,
                 ScanOutput::Last => self.last[index] = Some(row),
                 ScanOutput::None => {}
             }
@@ -866,11 +868,37 @@ impl ScanStream {
         self.account()
     }
 
+    fn emit(&mut self, row: Vec<ScalarValue>) -> Result<()> {
+        self.output_bytes = self
+            .output_bytes
+            .checked_add(ScalarValue::size_of_vec(&row) - size_of::<Vec<ScalarValue>>())
+            .ok_or_else(|| {
+                DataFusionError::ResourcesExhausted("scan output size overflow".into())
+            })?;
+        self.output.push(row);
+        Ok(())
+    }
+
     fn account(&self) -> Result<()> {
-        let mut bytes = self
-            .states
-            .len()
-            .saturating_mul(size_of::<Option<Sequence>>());
+        // Output rows are append-only until batch emission. Recounting all of
+        // them after every input row makes an otherwise linear scan quadratic.
+        let mut bytes = size_of::<Self>()
+            .saturating_add(
+                self.states
+                    .capacity()
+                    .saturating_mul(size_of::<Option<Sequence>>()),
+            )
+            .saturating_add(
+                self.last
+                    .capacity()
+                    .saturating_mul(size_of::<Option<Vec<ScalarValue>>>()),
+            )
+            .saturating_add(
+                self.output
+                    .capacity()
+                    .saturating_mul(size_of::<Vec<ScalarValue>>()),
+            )
+            .saturating_add(self.output_bytes);
         for sequence in self.states.iter().flatten() {
             bytes = bytes.saturating_add(
                 sequence
@@ -879,11 +907,12 @@ impl ScanStream {
                     .saturating_mul(size_of::<Option<Arc<Vec<ScalarValue>>>>()),
             );
             for row in sequence.records.iter().flatten() {
-                bytes = bytes.saturating_add(row.iter().map(ScalarValue::size).sum::<usize>());
+                bytes = bytes.saturating_add(ScalarValue::size_of_vec(row));
             }
         }
-        for row in self.last.iter().flatten().chain(&self.output) {
-            bytes = bytes.saturating_add(row.iter().map(ScalarValue::size).sum::<usize>());
+        for row in self.last.iter().flatten() {
+            bytes =
+                bytes.saturating_add(ScalarValue::size_of_vec(row) - size_of::<Vec<ScalarValue>>());
         }
         self.reservation.try_resize(bytes)
     }
@@ -901,6 +930,7 @@ impl ScanStream {
             &RecordBatchOptions::new().with_row_count(Some(count)),
         )?;
         self.output.clear();
+        self.output_bytes = 0;
         self.account()?;
         Ok(batch)
     }

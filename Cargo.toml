@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-kql-native"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 rust-version = "1.94"
 description = "A native Kusto Query Language frontend for Apache DataFusion"

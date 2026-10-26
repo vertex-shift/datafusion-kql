@@ -118,7 +118,10 @@ errors rather than silently execute with different semantics.
   They reuse DataFusion's public t-digest machinery with checked normalized
   coordinates, exact weight metadata, native grouped/partial states and spill
   replay; explicit exact aliases retain sample-storing selection. Remaining
-  scaling work includes generic scans/grouped subqueries.
+  scaling work includes broader batch specialization and per-template
+  initialization overhead. Generic grouped inputs now share the verified native
+  snapshot spill/replay buffer, key-run detection uses Arrow kernels, and scan
+  output accounting is incremental rather than quadratic in batch size.
 - Explicit-schema bag_unpack and pivot compile to batch struct extraction and
   native conditional aggregation. Runtime pivot schema mismatches are explicit
   errors; implicit data-dependent schema discovery and additional service
@@ -135,8 +138,9 @@ errors rather than silently execute with different semantics.
   Memory-pressure transitions use DataFusion's native IPC spill manager and
   host disk quotas/compression, then independently replay immutable partitions.
   Temporary files are query/reader-owned; initialization failures and
-  cancellation clean up partial state. This does not add generic grouped/scan
-  spilling or later eviction of an already resident snapshot.
+  cancellation clean up partial state. Generic grouped input buffering reuses
+  the same collector/replay path. Sequential scan state and later eviction of
+  an already resident snapshot remain separate concerns.
 - Management commands, remote Kusto connectors, visualization metadata,
   CLI/Python bindings, and language tooling.
 - Common telemetry functions now include bounded compiled term-set search,

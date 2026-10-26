@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.11 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.12 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -173,6 +173,10 @@ and working-memory boundaries.
 `mv-apply` runs native per-row subqueries over zipped dynamic arrays. `partition`
 supports per-key transformations, with vectorized fast paths for common
 aggregate/top-k workloads and reusable native templates for general subqueries.
+Oversized generic subtable inputs now spill/replay through the same host-budgeted
+native buffer used by snapshots; small groups stay in memory. Arrow kernels find
+key runs without decoding every row. Stateful scan output accounting is
+incremental rather than repeatedly walking the accumulated batch.
 `scan` adds typed state machines, step promotion, match IDs, simultaneous
 assignments, output modes, and native cumulative-window fast paths.
 Cross-table `search`/`find`, smart record packing, exact heavy-hitter estimates,
