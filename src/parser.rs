@@ -1422,6 +1422,36 @@ impl<'a> Parser<'a, '_> {
     }
 
     fn named_expr(&mut self) -> Result<NamedExpr> {
+        if self.column_names() {
+            let start = self.current().span.start;
+            self.expect(Kind::LParen)?;
+            let mut names = vec![self.identifier()?];
+            while self.eat(Kind::Comma) {
+                if names.len() == 1024 {
+                    return Err(self.expected("at most 1024 output names"));
+                }
+                names.push(self.identifier()?);
+            }
+            self.expect(Kind::RParen)?;
+            self.expect(Kind::Assign)?;
+            let expr = self.expr(0)?;
+            let depth = expr.depth + 1;
+            let span = Span {
+                start,
+                end: expr.span.end,
+            };
+            return Ok(NamedExpr {
+                name: None,
+                expr: self.node(
+                    ExprKind::ColumnNames {
+                        names,
+                        expr: Box::new(expr),
+                    },
+                    span,
+                    depth,
+                )?,
+            });
+        }
         let alias = match &self.current().kind {
             Kind::Ident(_) => self
                 .tokens
@@ -1444,6 +1474,40 @@ impl<'a> Parser<'a, '_> {
             name,
             expr: self.expr(0)?,
         })
+    }
+
+    fn column_names(&self) -> bool {
+        if self.current().kind != Kind::LParen {
+            return false;
+        }
+        let mut position = self.pos + 1;
+        loop {
+            match self.tokens.get(position).map(|token| &token.kind) {
+                Some(Kind::Ident(_)) => position += 1,
+                Some(Kind::LBracket)
+                    if matches!(
+                        self.tokens.get(position + 1).map(|token| &token.kind),
+                        Some(Kind::String(_))
+                    ) && self
+                        .tokens
+                        .get(position + 2)
+                        .is_some_and(|token| token.kind == Kind::RBracket) =>
+                {
+                    position += 3
+                }
+                _ => return false,
+            }
+            match self.tokens.get(position).map(|token| &token.kind) {
+                Some(Kind::Comma) => position += 1,
+                Some(Kind::RParen) => {
+                    return self
+                        .tokens
+                        .get(position + 1)
+                        .is_some_and(|token| token.kind == Kind::Assign);
+                }
+                _ => return false,
+            }
+        }
     }
 
     fn sort_key(&mut self) -> Result<SortKey> {

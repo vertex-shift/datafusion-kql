@@ -78,8 +78,28 @@ impl fmt::Debug for CachedPartition {
 }
 
 #[derive(Debug)]
-struct CachedData {
+pub(crate) struct CachedData {
     partitions: Vec<CachedPartition>,
+}
+
+impl CachedData {
+    pub(crate) fn replay(
+        self: &Arc<Self>,
+        schema: SchemaRef,
+        partition: usize,
+        stride: usize,
+    ) -> SendableRecordBatchStream {
+        Box::pin(CachedStream {
+            data: Arc::clone(self),
+            schema,
+            partition,
+            index: 0,
+            stride,
+            active: None,
+            read_rows: 0,
+            finished: false,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -246,16 +266,7 @@ impl ExecutionPlan for MaterializeExec {
                 .await
                 .as_ref()
                 .map_err(|error| DataFusionError::Shared(Arc::clone(error)))?;
-            Ok::<_, DataFusionError>(CachedStream {
-                data: Arc::clone(data),
-                schema,
-                partition,
-                index: 0,
-                stride,
-                active: None,
-                read_rows: 0,
-                finished: false,
-            })
+            Ok::<_, DataFusionError>(data.replay(schema, partition, stride))
         })
         .try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
@@ -294,61 +305,23 @@ async fn materialize(
         .collect::<Vec<_>>();
     let mut tasks = JoinSet::new();
     let mut partitions = (0..streams.len()).map(|_| None).collect::<Vec<_>>();
-    for (index, mut stream) in streams.into_iter().enumerate() {
+    for (index, stream) in streams.into_iter().enumerate() {
         let reservation = MemoryConsumer::new(format!("KQL materialization[{index}]"))
             .with_can_spill(spill_enabled)
             .register(context.memory_pool());
         let spilling = Arc::clone(&spilling);
         let manager = managers[index].clone();
         tasks.spawn(async move {
-            let mut batches = Vec::new();
-            while let Some(batch) = stream.try_next().await? {
-                if batch.num_rows() == 0 {
-                    continue;
-                }
-                let previous_capacity = batches.capacity();
-                batches.try_reserve(1).map_err(|error| {
-                    DataFusionError::ResourcesExhausted(format!(
-                        "materialization batch bookkeeping allocation failed: {error}"
-                    ))
-                })?;
-                let spill = if spilling.load(Ordering::Relaxed) {
-                    true
-                } else {
-                    match reservation.try_grow(batch_size_bytes(
-                        &batch,
-                        batches.capacity() - previous_capacity,
-                    )?) {
-                        Ok(()) => false,
-                        Err(DataFusionError::ResourcesExhausted(_)) if spill_enabled => {
-                            spilling.store(true, Ordering::Relaxed);
-                            true
-                        }
-                        Err(error) => return Err(error),
-                    }
-                };
-                batches.push(batch);
-                if spill {
-                    let partition = spill_partition(
-                        MemoryPartition {
-                            batches,
-                            reservation,
-                        },
-                        Some(stream),
-                        manager,
-                        batch_size,
-                    )
-                    .await?;
-                    return Ok::<_, DataFusionError>((index, partition));
-                }
-            }
-            Ok((
-                index,
-                CachedPartition::Memory(MemoryPartition {
-                    batches,
-                    reservation,
-                }),
-            ))
+            let partition = collect_partition(
+                stream,
+                reservation,
+                manager,
+                batch_size,
+                spill_enabled,
+                &spilling,
+            )
+            .await?;
+            Ok::<_, DataFusionError>((index, partition))
         });
     }
     while let Some(result) = tasks.join_next().await {
@@ -382,7 +355,7 @@ async fn materialize(
             CachedPartition::Memory(memory)
                 if spilling.load(Ordering::Relaxed) && !memory.batches.is_empty() =>
             {
-                spill_partition(memory, None, manager, batch_size).await?
+                spill_partition(memory, futures::stream::empty(), manager, batch_size).await?
             }
             partition => partition,
         });
@@ -390,6 +363,81 @@ async fn materialize(
     Ok(CachedData {
         partitions: completed,
     })
+}
+
+pub(crate) async fn buffer_input(
+    input: impl Stream<Item = Result<RecordBatch>> + Send,
+    reservation: MemoryReservation,
+    manager: SpillManager,
+    batch_size: usize,
+    spill_enabled: bool,
+) -> Result<Arc<CachedData>> {
+    let partition = collect_partition(
+        Box::pin(input),
+        reservation,
+        manager,
+        batch_size,
+        spill_enabled,
+        &AtomicBool::new(false),
+    )
+    .await?;
+    Ok(Arc::new(CachedData {
+        partitions: vec![partition],
+    }))
+}
+
+async fn collect_partition(
+    mut input: impl Stream<Item = Result<RecordBatch>> + Unpin,
+    reservation: MemoryReservation,
+    manager: SpillManager,
+    batch_size: usize,
+    spill_enabled: bool,
+    spilling: &AtomicBool,
+) -> Result<CachedPartition> {
+    let mut batches = Vec::new();
+    while let Some(batch) = input.try_next().await? {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let previous_capacity = batches.capacity();
+        batches.try_reserve(1).map_err(|error| {
+            DataFusionError::ResourcesExhausted(format!(
+                "materialization batch bookkeeping allocation failed: {error}"
+            ))
+        })?;
+        let spill = if spilling.load(Ordering::Relaxed) {
+            true
+        } else {
+            match reservation.try_grow(batch_size_bytes(
+                &batch,
+                batches.capacity() - previous_capacity,
+            )?) {
+                Ok(()) => false,
+                Err(DataFusionError::ResourcesExhausted(_)) if spill_enabled => {
+                    spilling.store(true, Ordering::Relaxed);
+                    true
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        batches.push(batch);
+        if spill {
+            return spill_partition(
+                MemoryPartition {
+                    batches,
+                    reservation,
+                },
+                input,
+                manager,
+                batch_size,
+            )
+            .await;
+        }
+    }
+    Ok(CachedPartition::Memory(MemoryPartition {
+        batches,
+        reservation,
+    }))
 }
 
 fn batch_size_bytes(batch: &RecordBatch, additional_slots: usize) -> Result<usize> {
@@ -420,7 +468,7 @@ async fn blocking<T: Send + 'static>(
 
 async fn spill_partition(
     memory: MemoryPartition,
-    mut input: Option<SendableRecordBatchStream>,
+    mut input: impl Stream<Item = Result<RecordBatch>> + Unpin,
     manager: SpillManager,
     batch_size: usize,
 ) -> Result<CachedPartition> {
@@ -442,21 +490,19 @@ async fn spill_partition(
         Ok((writer, rows))
     })
     .await?;
-    if let Some(input) = input.as_mut() {
-        while let Some(batch) = input.try_next().await? {
-            rows = rows.checked_add(batch.num_rows()).ok_or_else(|| {
-                DataFusionError::ResourcesExhausted("materialization row count overflow".into())
-            })?;
-            writer = blocking(move || {
-                for offset in (0..batch.num_rows()).step_by(batch_size) {
-                    writer.append_batch(
-                        &batch.slice(offset, batch_size.min(batch.num_rows() - offset)),
-                    )?;
-                }
-                Ok(writer)
-            })
-            .await?;
-        }
+    while let Some(batch) = input.try_next().await? {
+        rows = rows.checked_add(batch.num_rows()).ok_or_else(|| {
+            DataFusionError::ResourcesExhausted("materialization row count overflow".into())
+        })?;
+        writer = blocking(move || {
+            for offset in (0..batch.num_rows()).step_by(batch_size) {
+                writer.append_batch(
+                    &batch.slice(offset, batch_size.min(batch.num_rows() - offset)),
+                )?;
+            }
+            Ok(writer)
+        })
+        .await?;
     }
     let file = blocking(move || writer.finish())
         .await?
@@ -598,7 +644,7 @@ mod tests {
                 batches: vec![batch],
                 reservation,
             },
-            Some(input),
+            input,
             manager,
             128,
         ));

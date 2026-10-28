@@ -1,14 +1,14 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use datafusion::arrow::array::{Int64Array, ListArray, StringArray};
-use datafusion::arrow::datatypes::{DataType, Field, Int64Type, Schema};
+use datafusion::arrow::datatypes::{DataType, Field, Float64Type, Int64Type, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::TableReference;
 use datafusion::datasource::MemTable;
 use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
-use datafusion::execution::memory_pool::GreedyMemoryPool;
+use datafusion::execution::memory_pool::{FairSpillPool, GreedyMemoryPool, MemoryPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::physical_plan::execution_plan::reset_plan_states;
-use datafusion::physical_plan::{collect, displayable};
+use datafusion::physical_plan::{ExecutionPlan, collect, displayable};
 use datafusion::prelude::*;
 use datafusion_kql::{SessionContextKqlExt, parse};
 use std::hint::black_box;
@@ -20,12 +20,16 @@ const QUERY: &str =
 const SQL: &str = "SELECT \"Category\", coalesce(sum(\"Value\"), 0) AS \"Total\" FROM \"Events\" WHERE \"Value\" > 42 GROUP BY \"Category\" ORDER BY \"Total\" DESC NULLS LAST LIMIT 10";
 const ROWS: usize = 1_000_000;
 const JSON_ROWS: usize = 100_000;
+const SIGNAL_ROWS: usize = 1024;
+const SIGNAL_LEN: usize = 128;
+const GROUP_SPILL_ROWS: usize = 4_800_000;
 const JSON_QUERY: &str = "JsonEvents | extend Payload=parse_json(Raw) | project Service=tostring(Payload.service), Latency=Payload.latencies | mv-expand Latency to typeof(long) | summarize Total=sum(Latency) by Service";
 const SERIES_QUERY: &str = "Events | make-series Total=sum(Value) default=0 on Value from 0 to 100 step 1 by Category | project Category, Smoothed=series_fir(Total, dynamic([1,2,1]))";
 const PARTITION_QUERY: &str =
     "Events | partition hint.strategy=native by Category (top 3 by Value) | summarize N=count()";
 const SCAN_QUERY: &str = "Events | scan declare(Total:long=0) with(step s:true=>Total=s.Total+Value;) | summarize Peak=max(Total)";
 const STATE_SCAN_QUERY: &str = "Events | take 10000 | scan declare(Total:long=0) with(step s:true=>Total=iff(s.Total>10000,Value,s.Total+Value);) | summarize Peak=max(Total)";
+const STATE_SCAN_LARGE_QUERY: &str = "Events | take 100000 | scan declare(Total:long=0) with(step s:true=>Total=iff(s.Total>10000,Value,s.Total+Value);) | summarize Peak=max(Total)";
 const APPLY_QUERY: &str = "JsonEvents | take 1000 | extend P=parse_json(Raw) | mv-apply v=P.latencies to typeof(long) on (top 2 by v | summarize Total=sum(v)) | summarize Total=sum(Total)";
 const UNPACK_QUERY: &str = "JsonEvents | extend P=parse_json(Raw) | evaluate bag_unpack(P):(service:string,latencies:dynamic) | summarize Measurements=sum(array_length(latencies)) by service";
 const PIVOT_QUERY: &str = "Events | evaluate pivot(Category):(Value:long,api:long,worker:long,frontend:long,scheduler:long) | summarize Total=sum(api)+sum(worker)+sum(frontend)+sum(scheduler)";
@@ -57,6 +61,9 @@ const EXACT_PERCENTILE_QUERY: &str =
 const TDIGEST_ROLLUP_QUERY: &str = "CardinalityEvents | summarize s=tdigest(Id) by Shard | summarize s=tdigest_merge(s) | extend a=percentiles_array_tdigest(s,0,50,95,99,100) | project low=tolong(a[0]),median=tolong(a[1]),p95=tolong(a[2]),p99=tolong(a[3]),high=tolong(a[4])";
 const GROUPED_PERCENTILE_QUERY: &str = "CardinalityEvents | summarize p=percentile(Id,50) by Group | summarize Bad=countif(p!=Group+400000),Groups=count()";
 const SNAPSHOT_QUERY: &str = "let T=materialize(SnapshotEvents); union (T | where Id<500000 | summarize Total=sum(Id),N=count()),(T | where Id>=500000 | summarize Total=sum(Id),N=count()) | summarize Total=sum(Total),N=sum(N)";
+const GROUP_TEMPLATE_QUERY: &str = "SnapshotEvents | extend g=Id%4 | partition hint.strategy=native by g (extend v=2*Id | summarize N=count(),Total=sum(v)) | summarize N=sum(N),Total=sum(Total),Groups=count()";
+const FFT_QUERY: &str = "SpectralEvents | project (r,i)=series_fft(Signal) | summarize Energy=sum(toreal(array_sum(series_add(series_multiply(r,r),series_multiply(i,i)))))";
+const FFT_ROUNDTRIP_QUERY: &str = "SpectralEvents | extend (r,i)=series_fft(Signal) | extend (back,z)=series_ifft(r,i) | summarize Bad=countif(toreal(array_sum(series_abs(series_subtract(back,Signal))))>0.00000001),Rows=count()";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -224,12 +231,28 @@ fn arrow_context() -> SessionContext {
 }
 
 fn snapshot_context(spill: bool) -> SessionContext {
-    let runtime = RuntimeEnvBuilder::new()
-        .with_memory_pool(Arc::new(GreedyMemoryPool::new(if spill {
+    snapshot_context_with_pool(
+        spill,
+        Arc::new(GreedyMemoryPool::new(if spill {
             256 << 10
         } else {
             64 << 20
-        })))
+        })),
+        8192,
+        ROWS,
+        64 << 20,
+    )
+}
+
+fn snapshot_context_with_pool(
+    spill: bool,
+    pool: Arc<dyn MemoryPool>,
+    batch_size: usize,
+    rows: usize,
+    disk_quota: u64,
+) -> SessionContext {
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(pool)
         .with_disk_manager_builder(
             DiskManagerBuilder::default()
                 .with_mode(if spill {
@@ -237,22 +260,21 @@ fn snapshot_context(spill: bool) -> SessionContext {
                 } else {
                     DiskManagerMode::Disabled
                 })
-                .with_max_temp_directory_size(64 << 20),
+                .with_max_temp_directory_size(disk_quota),
         )
         .build()
         .unwrap();
-    let ctx = SessionContext::new_with_config_rt(
-        SessionConfig::new()
-            .with_target_partitions(4)
-            .with_batch_size(8192),
-        Arc::new(runtime),
-    );
+    let mut config = SessionConfig::new()
+        .with_target_partitions(4)
+        .with_batch_size(batch_size);
+    config.options_mut().execution.sort_spill_reservation_bytes = 32 << 10;
+    let ctx = SessionContext::new_with_config_rt(config, Arc::new(runtime));
     let mut partitions = vec![Vec::new(); 4];
-    for (index, start) in (0..ROWS).step_by(8192).enumerate() {
+    for (index, start) in (0..rows).step_by(8192).enumerate() {
         let batch = RecordBatch::try_from_iter(vec![(
             "Id",
             Arc::new(Int64Array::from_iter_values(
-                (start..ROWS.min(start + 8192)).map(|i| i as i64),
+                (start..rows.min(start + 8192)).map(|i| i as i64),
             )) as _,
         )])
         .unwrap();
@@ -346,6 +368,41 @@ fn snapshot_benchmarks(c: &mut Criterion, runtime: &Runtime) {
     group.finish();
 }
 
+fn group_spills(plan: &dyn ExecutionPlan) -> usize {
+    let own = if plan.name() == "KqlApplyExec" {
+        plan.metrics()
+            .and_then(|metrics| metrics.spill_count())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    own + plan
+        .children()
+        .into_iter()
+        .map(|child| group_spills(child.as_ref()))
+        .sum::<usize>()
+}
+
+fn spectral_context() -> SessionContext {
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let signal = (0..SIGNAL_LEN)
+        .map(|index| Some((2.0 * std::f64::consts::PI * index as f64 / 16.0).sin()))
+        .collect::<Vec<_>>();
+    let values = ListArray::from_iter_primitive::<Float64Type, _, _>(
+        (0..SIGNAL_ROWS).map(|_| Some(signal.clone())),
+    );
+    let batch = RecordBatch::try_from_iter(vec![("Signal", Arc::new(values) as _)]).unwrap();
+    let partitions = (0..4)
+        .map(|index| vec![batch.slice(index * SIGNAL_ROWS / 4, SIGNAL_ROWS / 4)])
+        .collect();
+    ctx.register_table(
+        TableReference::bare("SpectralEvents"),
+        Arc::new(MemTable::try_new(batch.schema(), partitions).unwrap()),
+    )
+    .unwrap();
+    ctx
+}
+
 fn benchmarks(c: &mut Criterion) {
     c.bench_function("parse/kql_pipeline", |b| {
         b.iter(|| parse(black_box(QUERY)).unwrap())
@@ -412,6 +469,15 @@ fn benchmarks(c: &mut Criterion) {
     let telemetry = telemetry_context();
     let cardinality = cardinality_context();
     let arrow = arrow_context();
+    let grouped = snapshot_context(false);
+    let grouped_spill = snapshot_context_with_pool(
+        true,
+        Arc::new(FairSpillPool::new(16 << 20)),
+        1024,
+        GROUP_SPILL_ROWS,
+        256 << 20,
+    );
+    let spectral = spectral_context();
     let mut distinct_estimate = None;
     let mut workloads = c.benchmark_group("workloads");
     for (name, query, context, rows, expected_rows) in [
@@ -420,6 +486,41 @@ fn benchmarks(c: &mut Criterion) {
         ("partition_top", PARTITION_QUERY, &ctx, ROWS, 1),
         ("scan_cumulative", SCAN_QUERY, &ctx, ROWS, 1),
         ("scan_stateful", STATE_SCAN_QUERY, &ctx, 10_000, 1),
+        (
+            "scan_stateful_100k",
+            STATE_SCAN_LARGE_QUERY,
+            &ctx,
+            100_000,
+            1,
+        ),
+        (
+            "partition_template",
+            GROUP_TEMPLATE_QUERY,
+            &grouped,
+            ROWS,
+            1,
+        ),
+        (
+            "partition_template_spill",
+            GROUP_TEMPLATE_QUERY,
+            &grouped_spill,
+            GROUP_SPILL_ROWS,
+            1,
+        ),
+        (
+            "series_fft",
+            FFT_QUERY,
+            &spectral,
+            SIGNAL_ROWS * SIGNAL_LEN,
+            1,
+        ),
+        (
+            "series_fft_roundtrip",
+            FFT_ROUNDTRIP_QUERY,
+            &spectral,
+            SIGNAL_ROWS * SIGNAL_LEN,
+            1,
+        ),
         ("mv_apply_top", APPLY_QUERY, &json, 1_000, 1),
         ("bag_unpack", UNPACK_QUERY, &json, JSON_ROWS, 2),
         ("pivot", PIVOT_QUERY, &ctx, ROWS, 1),
@@ -522,6 +623,68 @@ fn benchmarks(c: &mut Criterion) {
             expected_rows,
             "unexpected result cardinality for {name}",
         );
+        if matches!(name, "partition_template" | "partition_template_spill") {
+            for (index, expected) in [
+                (0, rows as i64),
+                (1, rows as i64 * (rows as i64 - 1)),
+                (2, 4),
+            ] {
+                assert_eq!(
+                    datafusion::common::ScalarValue::try_from_array(result[0].column(index), 0)
+                        .unwrap(),
+                    datafusion::common::ScalarValue::Int64(Some(expected))
+                );
+            }
+            assert!(
+                native.contains("KqlApplyExec"),
+                "benchmark must exercise the generic template"
+            );
+            assert_eq!(
+                group_spills(plan.as_ref()) > 0,
+                name == "partition_template_spill"
+            );
+            if name == "partition_template_spill" {
+                assert!(
+                    rows / 4 * 2 * size_of::<i64>() > 16 << 20,
+                    "the retained group itself must exceed the pool, not depend on concurrent reservations"
+                );
+            }
+            assert_eq!(context.runtime_env().disk_manager.used_disk_space(), 0);
+        }
+        if matches!(name, "scan_stateful" | "scan_stateful_100k") {
+            let value =
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap();
+            let datafusion::common::ScalarValue::Int64(Some(peak)) = value else {
+                panic!("scan must preserve long state");
+            };
+            assert!((10_001..=10_099).contains(&peak), "{name}: {peak}");
+            assert!(
+                native.contains("KqlScanExec"),
+                "benchmark must exercise the state machine"
+            );
+        }
+        if name == "series_fft" {
+            let value =
+                datafusion::common::ScalarValue::try_from_array(result[0].column(0), 0).unwrap();
+            let datafusion::common::ScalarValue::Float64(Some(energy)) = value else {
+                panic!("FFT energy must be real");
+            };
+            assert!((energy - (SIGNAL_ROWS * SIGNAL_LEN * SIGNAL_LEN / 2) as f64).abs() < 1E-6);
+            assert_eq!(
+                native.matches("__kql_series_fft_columns").count(),
+                1,
+                "{native}"
+            );
+        }
+        if name == "series_fft_roundtrip" {
+            for (index, expected) in [(0, 0), (1, SIGNAL_ROWS as i64)] {
+                assert_eq!(
+                    datafusion::common::ScalarValue::try_from_array(result[0].column(index), 0)
+                        .unwrap(),
+                    datafusion::common::ScalarValue::Int64(Some(expected))
+                );
+            }
+        }
         if matches!(
             name,
             "arrow_expand"

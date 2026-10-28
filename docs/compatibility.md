@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.11 implements the typed tabular and dynamic subset below. Keywords, function
+0.13 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -206,8 +206,8 @@ providers still require working memory; a row limit does not bound the byte
 size of an individual value. Input/downstream operators need their own memory
 and native spill configuration. A completed in-memory snapshot is not later
 evicted just because an unrelated operator or query runs out of memory.
-Generic grouped-subquery buffers and state-machine scan buffers still do not
-gain spilling from this change. Configure bounded host memory/disk budgets and
+Generic grouped-subquery inputs reuse this spill/replay buffer as described
+below; state-machine scan history/output still does not spill. Configure bounded host memory/disk budgets and
 appropriate upstream batch/value sizes.
 
 Disabled disks, exhausted disk quotas, custom-backend failures and input errors
@@ -584,11 +584,22 @@ not implemented.
 Simple native/shuffle `top`, `count`, and `summarize` transformations compile to
 one vectorized partitioned-window/grouped-aggregate plan, without instantiating
 one plan per key. More general transformations compile their physical template
-once, bind each subtable's Arrow batches to its native input, and reset native
+once, bind each subtable's replayable source to its native input, and reset native
 operator state between groups. Groups stream independently across hash
-partitions; retaining one group's input is charged to the host memory pool.
-Large individual groups require enough memory; those retained batches do not
-spill even though the upstream native sort can.
+partitions. Small groups retain zero-copy Arrow batches, charged to the host
+memory pool. Oversized per-key or per-row inputs spill through the same native
+buffer as materialized snapshots and honor host disk quotas/custom backends and
+compression. Every template fork gets an independent replay stream; files are
+released after that group's output/consumers finish, including early limits and
+failures. Group-input spill metrics are available on `KqlApplyExec`, separately
+from upstream sort spilling. Native `partition` sorting and template operators
+still need their own working-memory/spill budgets.
+
+Batch Arrow kernels find adjacent key runs, with scalar decoding only at run
+boundaries rather than for every row. Floating signed zero is normalized for
+hash/sort/boundary identity; NaN payload behavior follows native DataFusion
+grouping, not a newly certified Kusto profile. Native decimal struct keys are
+still outside the accepted `partition` key profile.
 
 This general path does not reparse KQL or run a separate query interpreter, but
 native-plan initialization has overhead for very many tiny groups. Prefer
@@ -629,7 +640,9 @@ State resets independently inside each `partition`/`mv-apply` subtable.
 The operator retains bounded step history rather than every input row, with
 at most 128 steps, 128 declarations, and 128 assignments per step. Variable-size
 state and buffered outputs are charged to the host memory pool. State does not
-spill. A nonnullable-long, zero-initialized additive single-step scan uses native
+spill. Buffered output sizes are maintained incrementally, so memory accounting
+does not become quadratic in the host batch-row count. A nonnullable-long,
+zero-initialized additive single-step scan uses native
 cumulative windows instead; nullable inputs use the state machine so null
 propagation is not accidentally changed into SQL SUM's null-skipping behavior.
 Compute row-window expressions in an earlier `extend`, not directly inside
@@ -795,10 +808,74 @@ original positions, with explicit nonfinite-value handling. FIR normalization,
 centering, and IIR denominator rules follow KQL conventions.
 
 Generic FIR/IIR filtering has a per-row budget of 67,108,864 multiply-add
-operations and errors beyond it. Seasonal decomposition, FFT/period detection,
-forecasting, and multiple-output tuple variants remain future work. Numeric
+operations and errors beyond it. Seasonal decomposition, outlier/period
+detection, forecasting, polynomial/two-line fitting, and other multi-output
+variants remain future work. Numeric
 JSON serialization of nonfinite values retains the broader dynamic
 representation limitations described below.
+
+### Multi-output statistics, regression and spectral transforms
+
+`series_stats(series[, ignore_nonfinite])` and `series_fit_line(series)` now
+provide native typed columns in addition to the existing dynamic-bag variants.
+Output order for statistics is `min, min_idx, max, max_idx, avg, stdev, variance`;
+indices are longs and the other fields are reals. Line fitting returns
+`rsquare, slope, variance, rvariance, interception, line_fit`, with real-valued
+metrics and a dynamic real array for the fitted series. They share the existing
+sample-variance, original-index and missing-value kernels.
+`ignore_nonfinite` must be a nonnull constant bool, default false; lexical
+bindings and typed query parameters may supply it.
+
+`series_fft(real[, imaginary])` and `series_ifft(real[, imaginary])` return two
+dynamic real arrays, in **real, imaginary** order. Numeric dynamic arrays and
+native Arrow list-family inputs use binary64 calculations; they do not
+preserve decimal128 or integer-exact arithmetic. The imaginary input defaults
+to zeros and, when supplied, must have the same length. Arbitrary lengths,
+including prime/non-power-of-two lengths, are supported through RustFFT.
+Forward transforms use the conventional negative exponent without scaling;
+the inverse uses the positive exponent and divides by the signal length.
+Empty arrays produce two empty arrays. Null/non-array signals and arrays
+containing nonnumeric or nonfinite points produce null outputs; shape
+mismatches, exceeded budgets and nonfinite calculated outputs fail explicitly.
+This strict shape/overflow profile is not certified Kusto error-behavior parity.
+
+Multi-output functions are accepted as top-level projection calls, not as
+scalar arguments to another function. `print`, `project`, `extend` and
+`serialize` support output lists such as
+`(RealPart,ImaginaryPart)=series_fft(signal)` and quoted identifiers. Excess
+names and duplicate explicit outputs error. Without explicit names, output
+names use the function, simple input column and field, for example
+`series_fft_signal_real`; a single alias becomes a result prefix.
+For a partial output-name list, `extend`/`serialize` return only the named
+prefix, while `project`/`print` retain the remaining generated columns.
+Siblings still refer to the original input schema, not newly created outputs.
+Tuple syntax does not add arbitrary tuple scalar values or destructuring to
+other operators.
+
+The planner builds one expression-local struct-valued batch function per call
+and flattens it through native struct `Unnest`. This keeps all fields shared
+even when projection simplification would otherwise repeat field evaluation;
+volatile input arguments are evaluated once per source row. No session
+functions or optimizer settings are overwritten. DataFrame clones,
+group-local templates, materialized snapshots, request parameters and
+lexical function expansion retain ordinary native plan behavior.
+
+The FFT numeric input-plus-scratch budget is 128 MiB per transform, with a
+1,048,576-point limit. A single most-recent-length FFT plan is reused within
+each batch invocation, not globally cached. Native Arrow conversion, dynamic
+serialization, output text and nested-node budgets also apply; this is **not**
+a bound on total process memory or the RustFFT planner's internal allocations.
+Large values can exceed the existing 16 MiB text limit before reaching the
+point-count limit. Configure host memory and application-level query timeouts.
+
+Tuple field types/order are grounded in Microsoft's
+[public Kusto signatures](https://github.com/microsoft/Kusto-Query-Language/blob/328e05d10d6c73654e416675fc75af7ed0e05ffd/src/Kusto.Language/Functions.cs).
+Four separately labeled source/oracle fixtures and independent complex-DFT,
+round-trip and API-boundary regressions cover this milestone. They are **not**
+new live Kusto captures: the current query-tool route was unavailable and the
+existing Azure CLI reference credential had expired. The 68 captured reference
+fixtures remain separate; no emulator terms or new Azure resources are needed
+for these local tests.
 
 ## Aggregations
 
@@ -918,8 +995,9 @@ do not bound the number of groups; configure host memory and disk budgets.
 Temporary sort/merge buffers are bounded per state, not separate query-local
 spill storage. Scalar accessors cache consecutive sketch inputs and results
 within each batch, avoiding repeated decode/estimation for frozen subqueries.
-Materialized snapshots have their separate native spill/replay path described
-above; generic grouped-subquery buffers remain a distinct scaling boundary.
+Materialized snapshots and generic grouped-subquery inputs share the native
+spill/replay buffer described above; their template/IPC working memory remains
+a distinct host budget boundary.
 
 Seven synthetic fixtures were captured from `help.kusto.windows.net/Samples`
 through Azure MCP on 2026-10-26, including the empty/default and nonpositive-weight
@@ -996,7 +1074,8 @@ DataFusion's pre-aggregation bypass. Sparse states avoid allocating 256 KiB
 for every tiny accuracy-4 group. Retained buffers are reported to the host
 memory pool; native aggregation can spill intermediate states when configured.
 Materialized snapshots use the separate native spill path described above.
-Generic grouped-subquery buffers still require their own scaling work.
+Generic grouped-subquery inputs also use that buffer; arbitrary template/state
+working sets still depend on their native operator budgets.
 
 The accuracy/budget semantics are grounded in the published
 [dcount](https://learn.microsoft.com/en-us/kusto/query/dcount-aggregation-function)
@@ -1071,6 +1150,9 @@ alias quoting and showed that a published `indexof` length example disagrees
 with engine behavior: eligible match starts, not full substrings, are bounded.
 Overlapping occurrences, clamped negative starts, empty strings, runtime invalid
 bounds and Unicode offsets now have actual captured results.
+Four additional source/documentation and mathematical-oracle fixtures cover
+FFT/IFFT and multi-column statistics/line fitting. They run locally and in the
+opt-in reference suite but are not counted among the 68 captured results.
 
 To compare the same fixtures against an explicitly configured reference:
 

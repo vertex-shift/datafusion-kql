@@ -432,6 +432,11 @@ pub enum ExprKind {
         name: String,
         value: Box<Expr>,
     },
+    /// An output-name list on a top-level projection expression.
+    ColumnNames {
+        names: Vec<String>,
+        expr: Box<Expr>,
+    },
     Call {
         name: String,
         args: Vec<Expr>,
@@ -562,6 +567,7 @@ impl Expr {
             | ExprKind::Cast { expr, .. }
             | ExprKind::Unary { expr, .. }
             | ExprKind::NamedArgument { value: expr, .. }
+            | ExprKind::ColumnNames { expr, .. }
             | ExprKind::InPrepared { expr, .. }
             | ExprKind::InTabular { expr, .. } => expr.any(predicate),
             ExprKind::Binary { left, right, .. }
@@ -596,6 +602,10 @@ impl Expr {
             ExprKind::NamedArgument { name, value } => ExprKind::NamedArgument {
                 name: name.clone(),
                 value: Box::new(map(value)?),
+            },
+            ExprKind::ColumnNames { names, expr } => ExprKind::ColumnNames {
+                names: names.clone(),
+                expr: Box::new(map(expr)?),
             },
             ExprKind::ToScalar(value) => ExprKind::ToScalar(Box::new(match value.as_ref() {
                 ArgumentValue::Scalar(expr) => ArgumentValue::Scalar(map(expr)?),

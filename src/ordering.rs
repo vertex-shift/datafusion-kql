@@ -170,9 +170,10 @@ fn any_expression(expression: &ast::Expr, predicate: fn(&str) -> bool) -> bool {
         ExprKind::Call { name, args } => {
             predicate(name) || args.iter().any(|e| any_expression(e, predicate))
         }
-        ExprKind::Unary { expr, .. } | ExprKind::Dynamic(expr) | ExprKind::Cast { expr, .. } => {
-            any_expression(expr, predicate)
-        }
+        ExprKind::Unary { expr, .. }
+        | ExprKind::Dynamic(expr)
+        | ExprKind::Cast { expr, .. }
+        | ExprKind::ColumnNames { expr, .. } => any_expression(expr, predicate),
         ExprKind::NamedArgument { value, .. } => any_expression(value, predicate),
         ExprKind::ToScalar(value) => match value.as_ref() {
             ast::ArgumentValue::Scalar(expr) => any_expression(expr, predicate),

@@ -5,6 +5,10 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::util::display::array_value_to_string;
 use datafusion::common::TableReference;
 use datafusion::datasource::MemTable;
+use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+use datafusion::physical_plan::{ExecutionPlan, collect};
 use datafusion::prelude::*;
 use datafusion_kql::SessionContextKqlExt;
 
@@ -296,4 +300,292 @@ async fn malformed_grouped_syntax_is_rejected() {
     ] {
         assert!(SessionContext::new().kql(query).await.is_err(), "{query}");
     }
+}
+
+fn bounded_context(
+    memory: usize,
+    disk: DiskManagerBuilder,
+) -> (SessionContext, Arc<dyn MemoryPool>) {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(memory));
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(Arc::clone(&pool))
+        .with_disk_manager_builder(disk)
+        .build()
+        .unwrap();
+    let mut config = SessionConfig::new()
+        .with_target_partitions(1)
+        .with_batch_size(256);
+    config.options_mut().execution.sort_spill_reservation_bytes = 32 << 10;
+    (
+        SessionContext::new_with_config_rt(config, Arc::new(runtime)),
+        pool,
+    )
+}
+
+fn register_groups(ctx: &SessionContext, count: usize) {
+    let batches = (0..count)
+        .step_by(256)
+        .map(|start| {
+            let end = count.min(start + 256);
+            RecordBatch::try_from_iter(vec![
+                (
+                    "x",
+                    Arc::new(Int64Array::from_iter_values((start..end).map(|i| i as i64))) as _,
+                ),
+                (
+                    "g",
+                    Arc::new(Int64Array::from_iter_values(
+                        (start..end).map(|i| (i % 3) as i64),
+                    )) as _,
+                ),
+            ])
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    ctx.register_table(
+        TableReference::bare("T"),
+        Arc::new(MemTable::try_new(batches[0].schema(), vec![batches]).unwrap()),
+    )
+    .unwrap();
+}
+
+fn grouped_spills(plan: &dyn ExecutionPlan) -> usize {
+    let own = if plan.name() == "KqlApplyExec" {
+        plan.metrics()
+            .and_then(|metrics| metrics.spill_count())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    own + plan
+        .children()
+        .into_iter()
+        .map(|child| grouped_spills(child.as_ref()))
+        .sum::<usize>()
+}
+
+async fn assert_released(ctx: &SessionContext, pool: &Arc<dyn MemoryPool>) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let disk = ctx.runtime_env().disk_manager.spilling_progress();
+            if pool.reserved() == 0 && disk.current_bytes == 0 && disk.active_files_count == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("group buffers and native sort resources must be released");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversized_generic_groups_spill_and_replay_without_stale_template_state() {
+    for strategy in ["", "hint.strategy=native", "hint.strategy=shuffle"] {
+        let (ctx, pool) = bounded_context(512 << 10, DiskManagerBuilder::default());
+        register_groups(&ctx, 180_000);
+        let query = format!(
+            "T | partition {strategy} by g (extend doubled=2*x | summarize N=count(),Total=sum(doubled)) | summarize Groups=count(),N=sum(N),Total=sum(Total)"
+        );
+        let plan = ctx
+            .kql(&query)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let batches = collect(
+                datafusion::physical_plan::execution_plan::reset_plan_states(Arc::clone(&plan))
+                    .unwrap(),
+                ctx.task_ctx(),
+            )
+            .await
+            .unwrap();
+            for (index, expected) in [(0, "3"), (1, "180000"), (2, "32399820000")] {
+                assert_eq!(
+                    array_value_to_string(batches[0].column(index), 0).unwrap(),
+                    expected
+                );
+            }
+            assert!(
+                grouped_spills(plan.as_ref()) > 0,
+                "generic group buffering, not just upstream sorting, must spill"
+            );
+            assert_released(&ctx, &pool).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn row_templates_can_spill_large_arrays_without_losing_restored_columns() {
+    let (ctx, pool) = bounded_context(512 << 10, DiskManagerBuilder::default());
+    let frame = ctx.kql("print id=7,source=range(1,200000,1) | mv-apply v=source to typeof(long) on (where true | summarize N=count(),Total=sum(v)) | project id,N,Total").await.unwrap();
+    let plan = frame.create_physical_plan().await.unwrap();
+    let batches = collect(Arc::clone(&plan), ctx.task_ctx()).await.unwrap();
+    for (index, expected) in [(0, "7"), (1, "200000"), (2, "20000100000")] {
+        assert_eq!(
+            array_value_to_string(batches[0].column(index), 0).unwrap(),
+            expected
+        );
+    }
+    assert!(grouped_spills(plan.as_ref()) > 0);
+    assert_released(&ctx, &pool).await;
+    let (ctx, pool) = bounded_context(
+        512 << 10,
+        DiskManagerBuilder::default().with_mode(DiskManagerMode::Disabled),
+    );
+    let frame = ctx.kql("print source=range(1,200000,1) | mv-apply v=source to typeof(long) on (where true | summarize N=count())").await.unwrap();
+    let error = frame.collect().await.unwrap_err().to_string();
+    assert!(error.contains("KQL grouped subquery"), "{error}");
+    assert_released(&ctx, &pool).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn generic_spill_quotas_fail_explicitly_and_clean_up() {
+    let (ctx, pool) = bounded_context(
+        0,
+        DiskManagerBuilder::default().with_max_temp_directory_size(4096),
+    );
+    let frame = ctx.kql("print source=range(1,10000,1) | mv-apply v=source to typeof(long) on (where true | summarize N=count())").await.unwrap();
+    let error = frame.collect().await.unwrap_err().to_string();
+    assert!(error.contains("exceeded the allowable limit"), "{error}");
+    assert_released(&ctx, &pool).await;
+}
+
+#[tokio::test]
+async fn grouped_arrow_boundaries_preserve_null_and_guid_key_identity() {
+    for key in ["k", "toguid(k)"] {
+        let input = if key == "toguid(k)" {
+            "datatable(k:string,x:long)['74be27de-1e4e-49d9-b579-fe0b331d3642',1,'00000000-0000-0000-0000-000000000000',2,'74be27de-1e4e-49d9-b579-fe0b331d3642',3]"
+        } else {
+            "datatable(k:long,x:long)[long(null),1,1,2,long(null),3]"
+        };
+        let query = format!(
+            "{input} | extend key={key} | partition hint.strategy=native by key (where true | summarize N=count(),Total=sum(x)) | sort by Total asc"
+        );
+        check(&query, &[&["1", "2"], &["2", "4"]]).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn early_output_limit_releases_group_files() {
+    let (ctx, pool) = bounded_context(512 << 10, DiskManagerBuilder::default());
+    register_groups(&ctx, 180_000);
+    let frame = ctx
+        .kql("T | partition hint.strategy=native by g (where true | project x) | take 1")
+        .await
+        .unwrap();
+    assert_eq!(
+        frame
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    assert_released(&ctx, &pool).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn template_errors_after_input_spill_release_all_native_resources() {
+    use datafusion::arrow::datatypes::DataType;
+    use datafusion::common::DataFusionError;
+    use datafusion::logical_expr::{Volatility, create_udf};
+    let (ctx, pool) = bounded_context(512 << 10, DiskManagerBuilder::default());
+    register_groups(&ctx, 180_000);
+    ctx.register_udf(create_udf(
+        "fail_group",
+        vec![DataType::Int64],
+        DataType::Int64,
+        Volatility::Volatile,
+        Arc::new(|_| {
+            Err(DataFusionError::Execution(
+                "group template fixture failed".into(),
+            ))
+        }),
+    ));
+    let plan = ctx.kql("T | partition hint.strategy=native by g (extend v=fail_group(x) | summarize Total=sum(v))")
+        .await.unwrap().create_physical_plan().await.unwrap();
+    let error = collect(Arc::clone(&plan), ctx.task_ctx())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("group template fixture failed"), "{error}");
+    assert!(grouped_spills(plan.as_ref()) > 0);
+    assert_released(&ctx, &pool).await;
+}
+
+#[tokio::test]
+async fn arrow_key_ranges_match_grouped_aggregate_identity_for_reals_across_batches() {
+    use datafusion::arrow::array::Float64Array;
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_batch_size(2));
+    let make = |keys: Vec<Option<f64>>, values: Vec<i64>| {
+        RecordBatch::try_from_iter(vec![
+            ("k", Arc::new(Float64Array::from(keys)) as _),
+            ("x", Arc::new(Int64Array::from(values)) as _),
+        ])
+        .unwrap()
+    };
+    let first = make(vec![Some(-0.0), Some(-f64::NAN), None], vec![1, 2, 3]);
+    let second = make(vec![Some(0.0), Some(f64::NAN), None], vec![4, 5, 6]);
+    let third = make(
+        vec![
+            Some(2.0),
+            Some(f64::from_bits(f64::NAN.to_bits() + 1)),
+            Some(2.0),
+        ],
+        vec![7, 8, 9],
+    );
+    ctx.register_table(
+        TableReference::bare("RealKeys"),
+        Arc::new(MemTable::try_new(first.schema(), vec![vec![first, second, third]]).unwrap()),
+    )
+    .unwrap();
+    let expected = result(
+        &ctx,
+        "RealKeys | summarize N=count(),Total=sum(x) by k | project N,Total | sort by Total asc",
+    )
+    .await;
+    let actual = result(&ctx,"RealKeys | partition hint.strategy=native by k (where true | summarize N=count(),Total=sum(x)) | sort by Total asc").await;
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_native_groups_respect_a_fair_spill_pool() {
+    use datafusion::execution::memory_pool::FairSpillPool;
+    let pool: Arc<dyn MemoryPool> = Arc::new(FairSpillPool::new(16 << 20));
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(Arc::clone(&pool))
+        .build()
+        .unwrap();
+    let mut config = SessionConfig::new()
+        .with_target_partitions(4)
+        .with_batch_size(1024);
+    config.options_mut().execution.sort_spill_reservation_bytes = 32 << 10;
+    let ctx = SessionContext::new_with_config_rt(config, Arc::new(runtime));
+    const ROWS: usize = 3_600_000;
+    const {
+        assert!(
+            ROWS / 3 * 2 * size_of::<i64>() > 16 << 20,
+            "each group must exceed the whole pool, regardless of parallel scheduling"
+        );
+    }
+    register_groups(&ctx, ROWS);
+    let plan = ctx.kql("T | partition hint.strategy=native by g (extend v=2*x | summarize N=count(),Total=sum(v)) | summarize N=sum(N),Total=sum(Total),Groups=count()")
+        .await.unwrap().create_physical_plan().await.unwrap();
+    let result = collect(Arc::clone(&plan), ctx.task_ctx()).await.unwrap();
+    for (index, expected) in [
+        (0, ROWS.to_string()),
+        (1, (ROWS as i64 * (ROWS as i64 - 1)).to_string()),
+        (2, "3".to_owned()),
+    ] {
+        assert_eq!(
+            array_value_to_string(result[0].column(index), 0).unwrap(),
+            expected
+        );
+    }
+    assert!(grouped_spills(plan.as_ref()) > 0);
+    assert_released(&ctx, &pool).await;
 }

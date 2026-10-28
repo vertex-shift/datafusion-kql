@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.11 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.13 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -25,6 +25,7 @@ cargo run --example distinct_sketches
 cargo run --example arrow_interop
 cargo run --example percentile_sketches
 cargo run --example materialized_snapshots
+cargo run --example spectral_series
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -37,6 +38,8 @@ arrays with native `Unnest`, and aggregates the expanded measurements.
 selector, hexadecimal threshold, regex normalization, and typed buffer expansion.
 `materialized_snapshots` reuses a larger-than-memory snapshot with the host's
 bounded memory pool and native temporary spill storage.
+`spectral_series` demonstrates complex FFT/IFFT and typed multi-column statistics
+and regression results with KQL output-name lists.
 
 ## Extend an existing DataFusion session
 
@@ -143,7 +146,11 @@ sources, and source-labelled/type-splitting unions extend the tabular surface.
 Limits and top-k counts can use constant `let` bindings and arithmetic.
 `make-series` supports sparse native aggregation, exact time/numeric axes,
 defaults and group bounds; series functions add interpolation, statistics,
-line fitting, arithmetic and FIR/IIR processing.
+line fitting, arithmetic and FIR/IIR processing. `series_fft`/`series_ifft` add
+arbitrary-length complex spectral transforms, with typed multi-output
+`series_stats` and `series_fit_line` projections. KQL column lists such as
+`extend (real_part,imag_part)=series_fft(signal)` evaluate the transform once
+through native struct Unnest, not once per returned field.
 Calendar arithmetic, period boundaries, Unix conversions, constructors, and
 compiled KQL date/time formatting are supported. Both tabular and scalar ranges
 handle numeric, datetime, and timespan values.
@@ -173,6 +180,10 @@ and working-memory boundaries.
 `mv-apply` runs native per-row subqueries over zipped dynamic arrays. `partition`
 supports per-key transformations, with vectorized fast paths for common
 aggregate/top-k workloads and reusable native templates for general subqueries.
+Oversized generic subtable inputs now spill/replay through the same host-budgeted
+native buffer used by snapshots; small groups stay in memory. Arrow kernels find
+key runs without decoding every row. Stateful scan output accounting is
+incremental rather than repeatedly walking the accumulated batch.
 `scan` adds typed state machines, step promotion, match IDs, simultaneous
 assignments, output modes, and native cumulative-window fast paths.
 Cross-table `search`/`find`, smart record packing, exact heavy-hitter estimates,
@@ -247,7 +258,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo check --lib --no-default-features
-cargo test --no-default-features --test materialize
+cargo test --no-default-features --test materialize --test grouped --test scan --test series_multi
 ```
 
 Tests cover parser diagnostics/limits, KQL-specific semantics, SQL result parity,
@@ -270,6 +281,9 @@ additional `indexof` edge fixtures that corrected window, overlap, empty-match
 and negative-start semantics. These finite captures do not certify
 identical large-population estimates or interoperable service blobs. CI also exercises curl
 transport against a self-owned loopback fixture, **not a Kusto engine**.
+Four spectral/statistical tuple fixtures are separately source/oracle-based,
+not new engine captures. FFT checks also compare independent complex DFTs,
+round trips, exact API array limits and shared volatile-input evaluation.
 See the compatibility contract for capture provenance, live-test setup, and
 remaining conformance boundaries.
 

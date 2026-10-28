@@ -1,20 +1,21 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use datafusion::arrow::array::{ArrayRef, UInt32Array};
-use datafusion::arrow::compute::{SortOptions, take};
-use datafusion::arrow::datatypes::{Schema, SchemaRef};
+use datafusion::arrow::compute::{SortOptions, partition as partition_ranges, take};
+use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{DataFusionError, Result, ScalarValue};
-use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::provider_as_source;
 use datafusion::execution::TaskContext;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
+use datafusion::logical_expr::expr_fn::{cast, when};
 use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, TableType};
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_expr::{
@@ -22,17 +23,20 @@ use datafusion::physical_expr::{
 };
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType, reset_plan_states};
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet, SpillMetrics};
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
-    PlanProperties, SendableRecordBatchStream, execute_stream,
+    PlanProperties, SendableRecordBatchStream, SpillManager, execute_stream,
 };
-use futures::TryStreamExt;
+use datafusion::prelude::lit;
+use futures::{StreamExt, TryStreamExt};
 
 use crate::ast::PartitionStrategy;
+use crate::materialize::CachedData;
 
 static NEXT_SLOT: AtomicU64 = AtomicU64::new(0);
 
@@ -108,6 +112,7 @@ impl TableProvider for GroupTable {
             input_schema: Arc::clone(&self.schema),
             projection: projection.cloned(),
             properties: properties(schema, 1),
+            bound: None,
         }))
     }
 }
@@ -127,6 +132,7 @@ struct GroupInputExec {
     input_schema: SchemaRef,
     projection: Option<Vec<usize>>,
     properties: Arc<PlanProperties>,
+    bound: Option<Arc<CachedData>>,
 }
 
 impl DisplayAs for GroupInputExec {
@@ -165,7 +171,22 @@ impl ExecutionPlan for GroupInputExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        Err(DataFusionError::Internal("unbound KQL group input".into()))
+        let data = self
+            .bound
+            .as_ref()
+            .ok_or_else(|| DataFusionError::Internal("unbound KQL group input".into()))?;
+        let stream = data.replay(Arc::clone(&self.input_schema), 0, 1);
+        if let Some(projection) = self.projection.clone() {
+            let stream = stream.and_then(move |batch| {
+                futures::future::ready(batch.project(&projection).map_err(DataFusionError::from))
+            });
+            Ok(Box::pin(RecordBatchStreamAdapter::new(
+                self.schema(),
+                stream,
+            )))
+        } else {
+            Ok(stream)
+        }
     }
 }
 
@@ -201,8 +222,21 @@ impl TableProvider for ApplyTable {
             ));
         }
         if let Mode::Key { index, strategy } = self.mode {
-            let column: Arc<dyn PhysicalExpr> =
-                Arc::new(Column::new(input.schema().field(index).name(), index));
+            let column: Arc<dyn PhysicalExpr> = if matches!(
+                input.schema().field(index).data_type(),
+                DataType::Float16 | DataType::Float32 | DataType::Float64
+            ) {
+                let value = cast(
+                    Expr::Column(datafusion::common::Column::from(
+                        self.input.schema().qualified_field(index),
+                    )),
+                    DataType::Float64,
+                );
+                let key = when(value.clone().eq(lit(0.0_f64)), lit(0.0_f64)).otherwise(value)?;
+                state.create_physical_expr(key, self.input.schema())?
+            } else {
+                Arc::new(Column::new(input.schema().field(index).name(), index))
+            };
             input = if strategy == PartitionStrategy::Legacy {
                 Arc::new(CoalescePartitionsExec::new(input))
             } else {
@@ -229,6 +263,7 @@ impl TableProvider for ApplyTable {
             slot: self.slot,
             mode: self.mode.clone(),
             restore: self.restore.clone(),
+            metrics: ExecutionPlanMetricsSet::new(),
         });
         project(apply, projection)
     }
@@ -260,6 +295,7 @@ struct ApplyExec {
     mode: Mode,
     restore: Vec<usize>,
     properties: Arc<PlanProperties>,
+    metrics: ExecutionPlanMetricsSet,
 }
 
 impl DisplayAs for ApplyExec {
@@ -274,6 +310,9 @@ impl ExecutionPlan for ApplyExec {
     }
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
+    }
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
     }
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         Vec::new()
@@ -301,6 +340,7 @@ impl ExecutionPlan for ApplyExec {
             mode: self.mode.clone(),
             restore: self.restore.clone(),
             properties: Arc::clone(&self.properties),
+            metrics: self.metrics.clone(),
         }))
     }
     fn execute(
@@ -309,12 +349,30 @@ impl ExecutionPlan for ApplyExec {
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let input = self.input.execute(partition, Arc::clone(&context))?;
-        let reservation =
-            MemoryConsumer::new("KQL grouped subquery").register(context.memory_pool());
+        let spill_enabled = context.runtime_env().disk_manager.tmp_files_enabled();
+        let reservation = MemoryConsumer::new("KQL grouped subquery")
+            .with_can_spill(spill_enabled)
+            .register(context.memory_pool());
+        let ranges_reservation =
+            MemoryConsumer::new("KQL grouped boundaries").register(context.memory_pool());
+        let manager = SpillManager::new(
+            context.runtime_env(),
+            SpillMetrics::new(&self.metrics, partition),
+            input.schema(),
+        )
+        .with_compression_type(
+            context
+                .session_config()
+                .options()
+                .execution
+                .spill_compression,
+        );
         let state = ApplyStream {
             input,
             pending: None,
             position: 0,
+            ranges: Vec::new(),
+            range_index: 0,
             mode: self.mode.clone(),
             template: Arc::clone(&self.template),
             slot: self.slot,
@@ -325,6 +383,10 @@ impl ExecutionPlan for ApplyExec {
             original: None,
             groups: 0,
             reservation,
+            ranges_reservation,
+            manager,
+            spill_enabled,
+            data: None,
         };
         let stream = futures::stream::try_unfold(state, |mut state| async move {
             loop {
@@ -335,11 +397,10 @@ impl ExecutionPlan for ApplyExec {
                 }
                 state.output = None;
                 state.original = None;
-                state.reservation.free();
-                let batches = state.next_group().await?;
-                if batches.is_empty() {
+                state.data = None;
+                let Some(data) = state.next_group().await? else {
                     return Ok(None);
-                }
+                };
                 state.groups += 1;
                 if matches!(
                     state.mode,
@@ -351,9 +412,9 @@ impl ExecutionPlan for ApplyExec {
                 {
                     return Err(DataFusionError::Execution("legacy partition is limited to 64 keys; use hint.strategy=native or shuffle".into()));
                 }
-                state.original = batches.first().cloned();
-                let plan = bind(Arc::clone(&state.template), state.slot, &batches)?;
+                let plan = bind(Arc::clone(&state.template), state.slot, &data)?;
                 let plan = reset_plan_states(plan)?;
+                state.data = Some(data);
                 state.output = Some(execute_stream(plan, Arc::clone(&state.context))?);
             }
         });
@@ -367,31 +428,32 @@ impl ExecutionPlan for ApplyExec {
 fn bind(
     plan: Arc<dyn ExecutionPlan>,
     slot: u64,
-    batches: &[RecordBatch],
+    data: &Arc<CachedData>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    Ok(bind_changes(plan, slot, batches, &mut HashMap::new())?.data)
+    Ok(bind_changes(plan, slot, data, &mut HashMap::new())?.data)
 }
 
 fn bind_changes(
     plan: Arc<dyn ExecutionPlan>,
     slot: u64,
-    batches: &[RecordBatch],
+    data: &Arc<CachedData>,
     caches: &mut HashMap<usize, Arc<dyn ExecutionPlan>>,
 ) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
     plan.transform_up(|plan| {
         if let Some(input) = plan.downcast_ref::<GroupInputExec>()
             && input.slot == slot
         {
-            let source = MemorySourceConfig::try_new_exec(
-                &[batches.to_vec()],
-                Arc::clone(&input.input_schema),
-                input.projection.clone(),
-            )?;
-            return Ok(Transformed::yes(source as Arc<dyn ExecutionPlan>));
+            return Ok(Transformed::yes(Arc::new(GroupInputExec {
+                slot: input.slot,
+                input_schema: Arc::clone(&input.input_schema),
+                projection: input.projection.clone(),
+                properties: Arc::clone(&input.properties),
+                bound: Some(Arc::clone(data)),
+            }) as Arc<dyn ExecutionPlan>));
         }
         if let Some(apply) = plan.downcast_ref::<ApplyExec>() {
-            let input = bind_changes(Arc::clone(&apply.input), slot, batches, caches)?;
-            let template = bind_changes(Arc::clone(&apply.template), slot, batches, caches)?;
+            let input = bind_changes(Arc::clone(&apply.input), slot, data, caches)?;
+            let template = bind_changes(Arc::clone(&apply.template), slot, data, caches)?;
             if !input.transformed && !template.transformed {
                 return Ok(Transformed::no(plan));
             }
@@ -402,6 +464,7 @@ fn bind_changes(
                 mode: apply.mode.clone(),
                 restore: apply.restore.clone(),
                 properties: Arc::clone(&apply.properties),
+                metrics: apply.metrics.clone(),
             }) as Arc<dyn ExecutionPlan>));
         }
         if let Some(id) = crate::materialize::cache_id(&plan) {
@@ -409,7 +472,7 @@ fn bind_changes(
                 return Ok(Transformed::yes(Arc::clone(cached)));
             }
             if let Some(bound) = crate::materialize::bind_input(&plan, |input| {
-                bind_changes(input, slot, batches, caches)
+                bind_changes(input, slot, data, caches)
             })? {
                 if bound.transformed {
                     caches.insert(id, Arc::clone(&bound.data));
@@ -418,7 +481,7 @@ fn bind_changes(
             }
         }
         if let Some(bound) =
-            crate::scan::bind_input(&plan, |input| bind_changes(input, slot, batches, caches))?
+            crate::scan::bind_input(&plan, |input| bind_changes(input, slot, data, caches))?
         {
             return Ok(bound);
         }
@@ -430,6 +493,8 @@ struct ApplyStream {
     input: SendableRecordBatchStream,
     pending: Option<RecordBatch>,
     position: usize,
+    ranges: Vec<Range<usize>>,
+    range_index: usize,
     mode: Mode,
     template: Arc<dyn ExecutionPlan>,
     slot: u64,
@@ -440,12 +505,44 @@ struct ApplyStream {
     original: Option<RecordBatch>,
     groups: usize,
     reservation: MemoryReservation,
+    ranges_reservation: MemoryReservation,
+    manager: SpillManager,
+    spill_enabled: bool,
+    data: Option<Arc<CachedData>>,
 }
 
 impl ApplyStream {
-    async fn next_group(&mut self) -> Result<Vec<RecordBatch>> {
-        let mut batches = Vec::new();
+    async fn next_group(&mut self) -> Result<Option<Arc<CachedData>>> {
         let mut key = None;
+        let Some(first) = self.next_segment(&mut key).await? else {
+            return Ok(None);
+        };
+        self.original = if self.restore.is_empty() {
+            None
+        } else {
+            Some(first.project(&self.restore)?.slice(0, 1))
+        };
+        let reservation = self.reservation.new_empty();
+        let manager = self.manager.clone();
+        let batch_size = self.context.session_config().batch_size();
+        let spill_enabled = self.spill_enabled;
+        let row = matches!(self.mode, Mode::Row);
+        let rest = futures::stream::try_unfold((self, key), move |(state, mut key)| async move {
+            if row {
+                return Ok(None);
+            }
+            Ok(state
+                .next_segment(&mut key)
+                .await?
+                .map(|batch| (batch, (state, key))))
+        });
+        let stream = futures::stream::once(futures::future::ready(Ok(first))).chain(rest);
+        crate::materialize::buffer_input(stream, reservation, manager, batch_size, spill_enabled)
+            .await
+            .map(Some)
+    }
+
+    async fn next_segment(&mut self, key: &mut Option<ScalarValue>) -> Result<Option<RecordBatch>> {
         loop {
             if self
                 .pending
@@ -454,43 +551,64 @@ impl ApplyStream {
             {
                 self.pending = self.input.try_next().await?;
                 self.position = 0;
+                self.range_index = 0;
+                self.ranges.clear();
+                if let Some(batch) = &self.pending
+                    && let Mode::Key { index, .. } = self.mode
+                {
+                    self.ranges = partition_ranges(&[Arc::clone(batch.column(index))])?.ranges();
+                }
+                self.ranges_reservation.try_resize(
+                    self.ranges
+                        .capacity()
+                        .checked_mul(size_of::<Range<usize>>())
+                        .ok_or_else(|| {
+                            DataFusionError::ResourcesExhausted(
+                                "grouped boundary size overflow".into(),
+                            )
+                        })?,
+                )?;
             }
             let Some(batch) = &self.pending else {
-                return Ok(batches);
+                return Ok(None);
             };
             if batch.num_rows() == 0 {
                 continue;
             }
             let start = self.position;
             if let Mode::Key { index, .. } = self.mode {
-                let current = ScalarValue::try_from_array(batch.column(index), start)?;
+                let current =
+                    canonical_key(ScalarValue::try_from_array(batch.column(index), start)?);
                 if key.as_ref().is_some_and(|key| key != &current) {
-                    return Ok(batches);
+                    return Ok(None);
                 }
-                key = Some(current);
-                while self.position < batch.num_rows()
-                    && Some(ScalarValue::try_from_array(
-                        batch.column(index),
-                        self.position,
-                    )?) == key
-                {
-                    self.position += 1;
+
+                fn canonical_key(value: ScalarValue) -> ScalarValue {
+                    let normalize = |value: f64| {
+                        if value == 0.0 { 0.0 } else { value }
+                    };
+                    match value {
+                        ScalarValue::Float16(value) => {
+                            ScalarValue::Float64(value.map(|value| normalize(value.to_f64())))
+                        }
+                        ScalarValue::Float32(value) => {
+                            ScalarValue::Float64(value.map(|value| normalize(f64::from(value))))
+                        }
+                        ScalarValue::Float64(value) => ScalarValue::Float64(value.map(normalize)),
+                        value => value,
+                    }
                 }
+                *key = Some(current);
+                let range = self.ranges.get(self.range_index).ok_or_else(|| {
+                    DataFusionError::Internal("missing grouped key boundary".into())
+                })?;
+                self.position = range.end;
+                self.range_index += 1;
             } else {
                 self.position += 1;
             }
             let segment = batch.slice(start, self.position - start);
-            let bytes = segment
-                .get_array_memory_size()
-                .checked_add(size_of::<RecordBatch>())
-                .ok_or_else(|| {
-                    DataFusionError::ResourcesExhausted("grouped input size overflow".into())
-                })?;
-            self.reservation.try_grow(bytes)?;
-            batches.push(segment);
-            if matches!(self.mode, Mode::Row) {
-                return Ok(batches);
-            }
+            return Ok(Some(segment));
         }
     }
 
@@ -503,12 +621,10 @@ impl ApplyStream {
             .as_ref()
             .ok_or_else(|| DataFusionError::Internal("missing original mv-apply row".into()))?;
         let indices = UInt32Array::from_value(0, batch.num_rows());
-        let mut arrays = self
-            .restore
+        let mut arrays = original
+            .columns()
             .iter()
-            .map(|&i| {
-                take(original.column(i).as_ref(), &indices, None).map_err(DataFusionError::from)
-            })
+            .map(|array| take(array.as_ref(), &indices, None).map_err(DataFusionError::from))
             .collect::<Result<Vec<ArrayRef>>>()?;
         arrays.extend(batch.columns().iter().cloned());
         Ok(RecordBatch::try_new_with_options(

@@ -413,10 +413,7 @@ impl<'s> Planner<'s> {
                         plan = input;
                         item.expr = expr;
                     }
-                    let expressions = self.named_expressions(&items, plan.schema())?;
-                    Ok(LogicalPlanBuilder::from(plan)
-                        .project(expressions)?
-                        .build()?)
+                    self.project_named(plan, &items, false)
                 }
                 Source::Datatable { columns, values } => {
                     let mut prepared = Vec::new();
@@ -1464,33 +1461,9 @@ impl<'s> Planner<'s> {
                         .build()?
                 }
 
-                Operator::Project(items) => {
-                    let mut expressions = self.named_expressions(items, plan.schema())?;
-                    if let Some(order) = ordering::ordinal(plan.schema()) {
-                        expressions.push(order);
-                    }
-                    LogicalPlanBuilder::from(plan)
-                        .project(expressions)?
-                        .build()?
-                }
+                Operator::Project(items) => self.project_named(plan, items, false)?,
                 Operator::Extend(items) | Operator::Serialize(items) => {
-                    let added = self.named_expressions(items, plan.schema())?;
-                    let names = added
-                        .iter()
-                        .map(Expr::name_for_alias)
-                        .collect::<datafusion::error::Result<HashSet<_>>>()?;
-                    let mut expressions = plan
-                        .schema()
-                        .fields()
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, f)| !names.contains(f.name()))
-                        .map(|(i, _)| field_expr(&plan, i))
-                        .collect::<Vec<_>>();
-                    expressions.extend(added);
-                    LogicalPlanBuilder::from(plan)
-                        .project(expressions)?
-                        .build()?
+                    self.project_named(plan, items, true)?
                 }
                 Operator::ProjectAway(patterns) | Operator::ProjectKeep(patterns) => {
                     let keep = matches!(operator.kind, Operator::ProjectKeep(_));
@@ -1583,17 +1556,15 @@ impl<'s> Planner<'s> {
                     let count = self.row_limit(count)?;
                     let mut input = ordering::visible(plan)?;
                     if let Some(value) = distinct {
-                        let projected = self.named_expressions(
+                        input = self.project_named(
+                            input,
                             &[NamedExpr {
                                 name: None,
                                 expr: value.clone(),
                             }],
-                            input.schema(),
+                            false,
                         )?;
-                        input = LogicalPlanBuilder::from(input)
-                            .project(projected)?
-                            .distinct()?
-                            .build()?;
+                        input = LogicalPlanBuilder::from(input).distinct()?.build()?;
                     }
                     let visible = (0..input.schema().fields().len())
                         .map(|i| field_expr(&input, i))
@@ -1683,9 +1654,8 @@ impl<'s> Planner<'s> {
                         .cloned()
                         .map(|expr| NamedExpr { name: None, expr })
                         .collect::<Vec<_>>();
-                    let expressions = self.named_expressions(&named, plan.schema())?;
-                    LogicalPlanBuilder::from(plan)
-                        .project(expressions)?
+                    let projected = self.project_named(plan, &named, false)?;
+                    LogicalPlanBuilder::from(ordering::visible(projected)?)
                         .distinct()?
                         .build()?
                 }
@@ -2369,10 +2339,40 @@ impl<'s> Planner<'s> {
             .map_err(|_| Error::syntax("row count must be nonnegative and fit usize", value.span))
     }
 
-    fn named_expressions(&self, items: &[NamedExpr], schema: &DFSchema) -> Result<Vec<Expr>> {
+    fn project_named(
+        &mut self,
+        mut input: LogicalPlan,
+        items: &[NamedExpr],
+        extend: bool,
+    ) -> Result<LogicalPlan> {
+        let schema = Arc::clone(input.schema());
+        let temporary = loop {
+            let name = self.temporary_name(&input);
+            let prefix = format!("{name}_tuple_");
+            if !schema
+                .fields()
+                .iter()
+                .any(|field| field.name().starts_with(&prefix))
+            {
+                break name;
+            }
+        };
         let mut used = HashSet::new();
         let mut result = Vec::with_capacity(items.len());
+        let mut computations = Vec::new();
         for (index, item) in items.iter().enumerate() {
+            if let Some(columns) = crate::series_multi::projections(
+                item,
+                &self.expressions(),
+                &schema,
+                &mut used,
+                extend,
+                &temporary,
+                &mut computations,
+            )? {
+                result.extend(columns);
+                continue;
+            }
             if matches!(item.expr.kind, ExprKind::Wildcard) && item.name.is_none() {
                 for (i, field) in schema.fields().iter().enumerate() {
                     if ordering::hidden(field) {
@@ -2389,13 +2389,50 @@ impl<'s> Planner<'s> {
             } else {
                 let name = output_name(item, index, &mut used)?;
                 result.push(ordering::user_alias(
-                    self.expressions().scalar(&item.expr, schema)?,
+                    self.expressions().scalar(&item.expr, &schema)?,
                     name,
-                    schema,
+                    &schema,
                 )?);
             }
         }
-        Ok(result)
+        if extend {
+            let names = result
+                .iter()
+                .map(Expr::name_for_alias)
+                .collect::<datafusion::error::Result<HashSet<_>>>()?;
+            let mut columns = schema
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| !names.contains(field.name()))
+                .map(|(index, _)| field_expr(&input, index))
+                .collect::<Vec<_>>();
+            columns.extend(result);
+            result = columns;
+        } else if let Some(order) = ordering::ordinal(&schema) {
+            result.push(order);
+        }
+        if !computations.is_empty() {
+            let mut inner = (0..schema.fields().len())
+                .map(|index| field_expr(&input, index))
+                .collect::<Vec<_>>();
+            let columns = computations
+                .iter()
+                .map(|(name, _)| Column::from_name(name))
+                .collect();
+            inner.extend(
+                computations
+                    .into_iter()
+                    .map(|(name, value)| value.alias(name)),
+            );
+            // A native struct unnest keeps a multi-output computation shared
+            // even when projection simplification would inline field access.
+            input = LogicalPlanBuilder::from(input)
+                .project(inner)?
+                .unnest_columns_with_options(columns, datafusion::common::UnnestOptions::new())?
+                .build()?;
+        }
+        Ok(LogicalPlanBuilder::from(input).project(result)?.build()?)
     }
 
     fn summarize(
@@ -2605,6 +2642,7 @@ pub(crate) fn output_name(
 
 pub(crate) fn default_name(expr: &ast::Expr, index: usize) -> String {
     match &expr.kind {
+        ExprKind::ColumnNames { expr, .. } => default_name(expr, index),
         ExprKind::Identifier(parts) => parts.last().expect("identifiers are nonempty").clone(),
         ExprKind::Call { name, args } => {
             if args.len() >= 2 {

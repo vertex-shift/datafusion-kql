@@ -784,6 +784,49 @@ const FIXTURES: &[Fixture] = &[
     },
 ];
 
+// Source/documentation and mathematical-oracle cases, not captured engine results.
+const SOURCE_FIXTURES: &[Fixture] = &[
+    Fixture {
+        name: "source-series-fft-impulse",
+        query: "print (r,i)=series_fft(dynamic([1,0,0,0])) | project Points=tostring(array_length(r)),Real=tostring(array_sum(r)==4.0),Imag=tostring(array_sum(i)==0.0)",
+        columns: &["Points", "Real", "Imag"],
+        rows: &[&["4", "True", "True"]],
+    },
+    Fixture {
+        name: "source-series-complex-ifft-normalization",
+        query: "print (r,i)=series_fft(dynamic([1,2,3]),dynamic([3,2,1])) | extend (back,imag)=series_ifft(r,i) | project Real=tostring(abs(toreal(back[1])-2.0)<0.00000001),Imag=tostring(abs(toreal(imag[2])-1.0)<0.00000001),Points=tostring(array_length(back))",
+        columns: &["Real", "Imag", "Points"],
+        rows: &[&["True", "True", "3"]],
+    },
+    Fixture {
+        name: "source-series-stats-tuple-order",
+        query: "print x=dynamic([1,3,5]) | extend (lo,li,hi,hiIndex,mean,sd,var)=series_stats(x) | project Minimum=tostring(lo==1.0),MinimumIndex=tostring(li),Maximum=tostring(hi==5.0),MaximumIndex=tostring(hiIndex),Mean=tostring(mean==3.0),Stdev=tostring(sd==2.0),Variance=tostring(var==4.0)",
+        columns: &[
+            "Minimum",
+            "MinimumIndex",
+            "Maximum",
+            "MaximumIndex",
+            "Mean",
+            "Stdev",
+            "Variance",
+        ],
+        rows: &[&["True", "0", "True", "2", "True", "True", "True"]],
+    },
+    Fixture {
+        name: "source-series-fit-line-tuple-order",
+        query: "print x=dynamic([1,3,5]) | extend (R,S,V,RV,B,F)=series_fit_line(x) | project RSquare=tostring(R==1.0),Slope=tostring(S==2.0),Variance=tostring(V==4.0),Residual=tostring(RV==0.0),Intercept=tostring(B==1.0),Last=tostring(toreal(F[2])==5.0)",
+        columns: &[
+            "RSquare",
+            "Slope",
+            "Variance",
+            "Residual",
+            "Intercept",
+            "Last",
+        ],
+        rows: &[&["True", "True", "True", "True", "True", "True"]],
+    },
+];
+
 fn endpoint(uri: &str) -> TestResult<(String, bool)> {
     let uri = uri.trim_end_matches('/');
     let (scheme, authority) = uri
@@ -1082,6 +1125,22 @@ async fn captured_reference_fixtures_match_locally() -> TestResult<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn source_fixtures_match_published_contracts_locally() -> TestResult<()> {
+    let ctx = SessionContext::new();
+    let mut names = std::collections::HashSet::new();
+    for fixture in SOURCE_FIXTURES {
+        assert!(names.insert(fixture.name), "duplicate source fixture");
+        assert!(
+            !FIXTURES
+                .iter()
+                .any(|captured| captured.name == fixture.name)
+        );
+        check_expected(&ctx, fixture).await?;
+    }
+    Ok(())
+}
+
 #[test]
 fn reference_endpoint_validation_rejects_credential_leaks_and_nonlocal_plaintext() {
     assert!(endpoint("https://cluster.region.kusto.windows.net").is_ok());
@@ -1230,7 +1289,7 @@ fn reference_transport_local_http() -> TestResult<()> {
 async fn live_kusto_conformance() -> TestResult<()> {
     let client = Kusto::from_env()?;
     let ctx = SessionContext::new();
-    for fixture in FIXTURES {
+    for fixture in FIXTURES.iter().chain(SOURCE_FIXTURES) {
         let (columns, expected) = local(&ctx, fixture).await?;
         let actual = client
             .query(fixture.query, &columns)
