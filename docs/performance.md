@@ -41,7 +41,9 @@ capacity estimates.
 | `workloads/scan_stateful` | Conditional state-machine scan over 10,000 rows, followed by a maximum |
 | `workloads/scan_stateful_100k` | The same state machine over 100,000 rows; assert state type and a valid reset peak |
 | `workloads/partition_template` | Generic per-key extend/aggregate templates over 1,000,000 rows and four keys with a 64 MiB pool |
-| `workloads/partition_template_spill` | The same generic templates under a 16 MiB fair pool, asserting actual group-input spill metrics and exact totals |
+| `workloads/partition_template_spill` | Four generic templates over 4,800,000 rows under a 16 MiB fair pool; every group exceeds the entire pool, asserting actual spill metrics and exact totals |
+| `workloads/series_fft` | Transform 1,024 native 128-point sine arrays and reduce spectral energy; assert Parseval energy and a single transform node |
+| `workloads/series_fft_roundtrip` | Forward/inverse-transform those arrays and verify every restored signal within an L1 error threshold |
 | `workloads/mv_apply_top` | Parse 1,000 payloads and run native per-row top-two/aggregation subqueries |
 | `workloads/bag_unpack` | Parse/unpack 100,000 JSON payloads with a declared schema and aggregate array lengths by service |
 | `workloads/json_fields` | Equivalent service/latency extraction through ordinary property access over the same payloads |
@@ -141,6 +143,12 @@ between runs. Tiny-group template initialization remains a cost; this fixture
 does not establish performance for hundreds of thousands of distinct keys.
 The full benchmark preflight checks still run, including exact numeric
 SQL/KQL native-plan equivalence.
+
+The current 0.13 spill preflight uses 4,800,000 rows, four 1,200,000-row groups,
+and a 256 MiB temporary-disk quota. Each two-long group alone exceeds the entire
+16 MiB pool, so proving group-input spilling no longer depends on how parallel
+consumers happen to be scheduled. The table above records the earlier
+one-million-row 0.12 measurement, not this enlarged deterministic fixture.
 
 ## Measured 0.11 materialized snapshots
 

@@ -50,6 +50,7 @@ mod regex_extract;
 mod scan;
 mod search;
 mod series_functions;
+mod series_multi;
 mod tabular;
 mod tdigest;
 mod tdigest_functions;

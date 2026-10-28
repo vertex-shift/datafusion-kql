@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.12 implements the typed tabular and dynamic subset below. Keywords, function
+0.13 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -808,10 +808,74 @@ original positions, with explicit nonfinite-value handling. FIR normalization,
 centering, and IIR denominator rules follow KQL conventions.
 
 Generic FIR/IIR filtering has a per-row budget of 67,108,864 multiply-add
-operations and errors beyond it. Seasonal decomposition, FFT/period detection,
-forecasting, and multiple-output tuple variants remain future work. Numeric
+operations and errors beyond it. Seasonal decomposition, outlier/period
+detection, forecasting, polynomial/two-line fitting, and other multi-output
+variants remain future work. Numeric
 JSON serialization of nonfinite values retains the broader dynamic
 representation limitations described below.
+
+### Multi-output statistics, regression and spectral transforms
+
+`series_stats(series[, ignore_nonfinite])` and `series_fit_line(series)` now
+provide native typed columns in addition to the existing dynamic-bag variants.
+Output order for statistics is `min, min_idx, max, max_idx, avg, stdev, variance`;
+indices are longs and the other fields are reals. Line fitting returns
+`rsquare, slope, variance, rvariance, interception, line_fit`, with real-valued
+metrics and a dynamic real array for the fitted series. They share the existing
+sample-variance, original-index and missing-value kernels.
+`ignore_nonfinite` must be a nonnull constant bool, default false; lexical
+bindings and typed query parameters may supply it.
+
+`series_fft(real[, imaginary])` and `series_ifft(real[, imaginary])` return two
+dynamic real arrays, in **real, imaginary** order. Numeric dynamic arrays and
+native Arrow list-family inputs use binary64 calculations; they do not
+preserve decimal128 or integer-exact arithmetic. The imaginary input defaults
+to zeros and, when supplied, must have the same length. Arbitrary lengths,
+including prime/non-power-of-two lengths, are supported through RustFFT.
+Forward transforms use the conventional negative exponent without scaling;
+the inverse uses the positive exponent and divides by the signal length.
+Empty arrays produce two empty arrays. Null/non-array signals and arrays
+containing nonnumeric or nonfinite points produce null outputs; shape
+mismatches, exceeded budgets and nonfinite calculated outputs fail explicitly.
+This strict shape/overflow profile is not certified Kusto error-behavior parity.
+
+Multi-output functions are accepted as top-level projection calls, not as
+scalar arguments to another function. `print`, `project`, `extend` and
+`serialize` support output lists such as
+`(RealPart,ImaginaryPart)=series_fft(signal)` and quoted identifiers. Excess
+names and duplicate explicit outputs error. Without explicit names, output
+names use the function, simple input column and field, for example
+`series_fft_signal_real`; a single alias becomes a result prefix.
+For a partial output-name list, `extend`/`serialize` return only the named
+prefix, while `project`/`print` retain the remaining generated columns.
+Siblings still refer to the original input schema, not newly created outputs.
+Tuple syntax does not add arbitrary tuple scalar values or destructuring to
+other operators.
+
+The planner builds one expression-local struct-valued batch function per call
+and flattens it through native struct `Unnest`. This keeps all fields shared
+even when projection simplification would otherwise repeat field evaluation;
+volatile input arguments are evaluated once per source row. No session
+functions or optimizer settings are overwritten. DataFrame clones,
+group-local templates, materialized snapshots, request parameters and
+lexical function expansion retain ordinary native plan behavior.
+
+The FFT numeric input-plus-scratch budget is 128 MiB per transform, with a
+1,048,576-point limit. A single most-recent-length FFT plan is reused within
+each batch invocation, not globally cached. Native Arrow conversion, dynamic
+serialization, output text and nested-node budgets also apply; this is **not**
+a bound on total process memory or the RustFFT planner's internal allocations.
+Large values can exceed the existing 16 MiB text limit before reaching the
+point-count limit. Configure host memory and application-level query timeouts.
+
+Tuple field types/order are grounded in Microsoft's
+[public Kusto signatures](https://github.com/microsoft/Kusto-Query-Language/blob/328e05d10d6c73654e416675fc75af7ed0e05ffd/src/Kusto.Language/Functions.cs).
+Four separately labeled source/oracle fixtures and independent complex-DFT,
+round-trip and API-boundary regressions cover this milestone. They are **not**
+new live Kusto captures: the current query-tool route was unavailable and the
+existing Azure CLI reference credential had expired. The 68 captured reference
+fixtures remain separate; no emulator terms or new Azure resources are needed
+for these local tests.
 
 ## Aggregations
 
@@ -1086,6 +1150,9 @@ alias quoting and showed that a published `indexof` length example disagrees
 with engine behavior: eligible match starts, not full substrings, are bounded.
 Overlapping occurrences, clamped negative starts, empty strings, runtime invalid
 bounds and Unicode offsets now have actual captured results.
+Four additional source/documentation and mathematical-oracle fixtures cover
+FFT/IFFT and multi-column statistics/line fitting. They run locally and in the
+opt-in reference suite but are not counted among the 68 captured results.
 
 To compare the same fixtures against an explicitly configured reference:
 

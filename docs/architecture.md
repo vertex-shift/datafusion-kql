@@ -91,6 +91,11 @@ errors rather than silently execute with different semantics.
   scalar expressions, and `partition` uses vectorized window/aggregate fast
   paths or reusable native subquery templates. Continue with advanced signal
   processing and wider conformance fixtures.
+  Complex arbitrary-length FFT/IFFT and typed multi-output statistics/line
+  fitting are implemented. Output-name lists lower through one struct-valued
+  batch computation and native struct Unnest, preserving shared evaluation.
+  Numerical DFT/round-trip checks are distinct from live Kusto certification;
+  decomposition, outliers, period detection and forecasting remain later work.
 - UTC calendar arithmetic, constructors, formatting, Unix conversions, and lazy
   numeric/datetime/timespan ranges are implemented. Full Kusto datetime/timespan
   range and richer dynamic scalar types remain compatibility milestones.

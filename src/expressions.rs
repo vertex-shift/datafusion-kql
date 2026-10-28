@@ -216,6 +216,12 @@ impl Expressions<'_> {
                     expr.span,
                 ));
             }
+            ExprKind::ColumnNames { .. } => {
+                return Err(Error::unsupported(
+                    "output-name lists require a top-level multi-output function in project, extend, serialize or print",
+                    expr.span,
+                ));
+            }
             ExprKind::Identifier(parts) => {
                 let name = &parts[0];
                 let mut value = if let Some(index) = schema.index_of_column_by_name(None, name) {
@@ -885,6 +891,12 @@ impl Expressions<'_> {
     }
 
     fn call(&self, name: &str, args: &[ast::Expr], span: Span, schema: &DFSchema) -> Result<Expr> {
+        if crate::series_multi::Multi::lookup(name).is_some() {
+            return Err(Error::unsupported(
+                "multi-output series functions must be top-level projection expressions, not scalar arguments",
+                span,
+            ));
+        }
         if matches!(name, "real" | "double") && args.len() == 1 {
             let constant = match &args[0].kind {
                 ExprKind::Identifier(parts) if parts.len() == 1 => match parts[0].as_str() {

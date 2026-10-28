@@ -565,11 +565,22 @@ async fn concurrent_native_groups_respect_a_fair_spill_pool() {
         .with_batch_size(1024);
     config.options_mut().execution.sort_spill_reservation_bytes = 32 << 10;
     let ctx = SessionContext::new_with_config_rt(config, Arc::new(runtime));
-    register_groups(&ctx, 600_000);
+    const ROWS: usize = 3_600_000;
+    const {
+        assert!(
+            ROWS / 3 * 2 * size_of::<i64>() > 16 << 20,
+            "each group must exceed the whole pool, regardless of parallel scheduling"
+        );
+    }
+    register_groups(&ctx, ROWS);
     let plan = ctx.kql("T | partition hint.strategy=native by g (extend v=2*x | summarize N=count(),Total=sum(v)) | summarize N=sum(N),Total=sum(Total),Groups=count()")
         .await.unwrap().create_physical_plan().await.unwrap();
     let result = collect(Arc::clone(&plan), ctx.task_ctx()).await.unwrap();
-    for (index, expected) in [(0, "600000"), (1, "359999400000"), (2, "3")] {
+    for (index, expected) in [
+        (0, ROWS.to_string()),
+        (1, (ROWS as i64 * (ROWS as i64 - 1)).to_string()),
+        (2, "3".to_owned()),
+    ] {
         assert_eq!(
             array_value_to_string(result[0].column(index), 0).unwrap(),
             expected
