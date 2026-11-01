@@ -152,6 +152,7 @@ td { text-align: left; }
 }
 .brand-divider { color: var(--muted); }
 .site-header nav, .site-footer nav { display: flex; gap: 1.75rem; align-items: center; }
+.site-footer nav { flex-wrap: wrap; }
 .site-header nav a { display: inline-flex; align-items: center; gap: 0.45rem; min-height: 44px; text-decoration: none; font-size: 1rem; }
 .site-header nav a:hover { text-decoration: underline; }
 .theme-control {

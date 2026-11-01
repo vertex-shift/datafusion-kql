@@ -6,7 +6,7 @@ https://vertex-shift.github.io/datafusion-kql/ using GitHub Pages.
 ## Source and deployment
 
 `site/` is a self-contained static artifact: HTML, CSS, small JavaScript,
-licensed local fonts, a favicon, robots.txt and a sitemap. It has no application
+licensed local fonts, a favicon, social previews, robots.txt and a sitemap. It has no application
 framework, analytics, external runtime assets or browser-hosted query engine.
 The example explorer presents synthetic results and links to the authoritative
 compatibility documentation.
@@ -25,6 +25,7 @@ python3 .github/scripts/check_site.py
 python3 -m unittest discover -s .github/scripts -p 'test_site.py'
 node --check site/assets/site.js
 node --check site/assets/theme.js
+node --check .github/scripts/render_social_preview.cjs
 node --test .github/scripts/test_site_theme.cjs
 python3 .github/scripts/check_site.py --serve --port 4173
 ```
@@ -40,6 +41,83 @@ The Barlow and Barlow Condensed font files originate from Google Fonts.
 Their licenses are retained in `site/assets/fonts/Barlow-OFL.txt` and
 `BarlowCondensed-OFL.txt`. The favicon is an original minimal pipe/arrow mark,
 not an Apache or Microsoft logo.
+
+## SEO and crawling
+
+The page has a descriptive, consistent search/Open Graph/X title and description,
+a single HTTPS canonical URL, large-image preview permission, and a crawlable
+sitemap link. Cargo's homepage and the repository's homepage point to the same
+project URL. Core examples, architecture, compatibility boundaries and setup are
+server-rendered HTML, not content that requires JavaScript to be indexed.
+
+Inline `application/ld+json` is non-executable metadata. Its WebSite, WebPage
+and **SoftwareSourceCode** graph identifies the Rust library, repository,
+license, source version and preview image. It deliberately does not claim app
+ratings, offers, a search box, a registry download or a software-app rich result.
+The source version must match Cargo.toml. Update metadata together with product
+copy rather than introducing invisible claims just for search.
+
+**GitHub Pages project-path limitation:** standard robots.txt discovery is at
+https://vertex-shift.github.io/robots.txt, not this project's
+`/datafusion-kql/robots.txt`. The host-root route returned 404 during this review;
+absence of robots rules permits crawling. The project robots file is a reference,
+not an enforced host-wide policy. A future origin-root policy must keep this
+project and its CSS, scripts and preview image crawlable.
+
+The canonical sitemap is
+https://vertex-shift.github.io/datafusion-kql/sitemap.xml. A verified site owner
+can submit it through Google Search Console or Bing Webmaster Tools. This change
+does not create ownership-verification tokens, submit authenticated indexing
+requests or guarantee indexing, rankings, rich results or social-cache refreshes.
+The sitemap lists the real homepage, not section fragments, fabricated pages,
+or meaningless priority/change-frequency values.
+
+### Social image provenance and regeneration
+
+`site/assets/social-preview.png` is an original 1200x630 engineering-datasheet
+cover rendered from the committed `social-preview.svg`. It uses the existing
+project mark, mineral/petrol palette and licensed local Barlow faces, not stock
+art, a new visual identity or fabricated performance statistics. Chromium
+156.0.8078.4 produced the reviewed PNG at 1x. PNG text chunks retain the source
+provenance and a fingerprint of the SVG and its three font inputs.
+
+With development-only Playwright/Chromium available to Node, start the local
+preview above, then regenerate with:
+
+```bash
+node .github/scripts/render_social_preview.cjs
+python3 .github/scripts/check_site.py
+```
+
+The renderer checks the server's SVG/font bytes and loaded font faces before
+capturing; it reuses the validator's source fingerprint. Browser tooling is not a
+crate or site runtime dependency. CI checks the PNG signature, exact dimensions,
+300 KiB budget, input fingerprint, absolute image URLs and matching alt metadata.
+The preview is only referenced by metadata, so it is not fetched on normal page
+load. Keep it out of preloads and visible hero-image markup.
+
+Official references: [Google sitemap guidance](https://developers.google.com/search/docs/crawling-indexing/sitemaps/build-sitemap),
+[robots.txt location](https://developers.google.com/crawling/docs/robots-txt/create-robots-txt),
+[Schema.org SoftwareSourceCode](https://schema.org/SoftwareSourceCode) and
+[Google software-app eligibility](https://developers.google.com/search/docs/appearance/structured-data/software-app).
+
+### SEO review
+
+The preview was inspected at its actual 1200x630 output size. Before/after local
+Chromium observations kept page-load requests at 7, with runtime asset bytes
+74,422 before and 74,460 after; the PNG is not fetched by normal page rendering.
+HTML grew from 16,601 to 20,274 bytes for metadata and structured data. Sample
+desktop/mobile LCP changed from 64/24 ms to 88/28 ms; CLS remained approximately
+0.00024/0.01429. These are single, unthrottled local lab samples, not field Core
+Web Vitals, an INP measurement, a statistically meaningful speed comparison or a
+ranking guarantee.
+
+No-JavaScript crawling checks retained the core copy, source-first setup and
+compatibility contract. Bounded light/dark batches at the five documented widths
+found no axe violations, overflow, asset failures or JavaScript errors. The
+expanded footer's sitemap link wraps on narrow viewports. Existing type-scale
+hook findings were retained as unchanged, contextually intentional sizes; this
+SEO change adds no typography values or theme behavior.
 
 ## Color themes
 

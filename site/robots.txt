@@ -1,3 +1,5 @@
+# Project reference only: crawlers use the host-root /robots.txt, not this subpath.
+# See docs/website.md for GitHub Pages crawl-policy and sitemap-submission scope.
 User-agent: *
 Allow: /
 
