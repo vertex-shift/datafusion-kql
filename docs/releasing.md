@@ -21,6 +21,14 @@ use datafusion_kql::SessionContextKqlExt;
 
 ## Pipeline and protections
 
+The repository's active `Main: pull requests and verified CI` ruleset requires
+pull requests for updates to `main`, with no bypass actors. It blocks deletion
+and non-fast-forward updates, requires resolved review conversations, and
+requires the branch to be up to date with successful GitHub Actions checks:
+`rust (1.94)`, `rust (stable)`, and `Verify publishable crate`.
+Approving reviews are not mandatory for the single-maintainer workflow.
+Do not push release preparation directly to `main` or merge with an admin bypass.
+
 `.github/workflows/ci.yml` runs on branch pushes and pull requests and is
 reusable by the release workflow. Its Rust 1.94/stable jobs retain formatting,
 strict Clippy, tests, minimal-feature checking, and all examples. A separate

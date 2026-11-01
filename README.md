@@ -259,6 +259,12 @@ layout, providers, predicates, memory budgets, and session configuration.
 
 ## Development
 
+Changes to `main` go through pull requests. The branch requires an up-to-date
+head, successful Rust 1.94/stable and publishable-crate checks, and resolution
+of review conversations. Force pushes and deletion are blocked, including for
+administrators. An approving review is not currently required so the
+single-maintainer workflow remains usable; CI is still mandatory.
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
