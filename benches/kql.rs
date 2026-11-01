@@ -64,6 +64,9 @@ const SNAPSHOT_QUERY: &str = "let T=materialize(SnapshotEvents); union (T | wher
 const GROUP_TEMPLATE_QUERY: &str = "SnapshotEvents | extend g=Id%4 | partition hint.strategy=native by g (extend v=2*Id | summarize N=count(),Total=sum(v)) | summarize N=sum(N),Total=sum(Total),Groups=count()";
 const FFT_QUERY: &str = "SpectralEvents | project (r,i)=series_fft(Signal) | summarize Energy=sum(toreal(array_sum(series_add(series_multiply(r,r),series_multiply(i,i)))))";
 const FFT_ROUNDTRIP_QUERY: &str = "SpectralEvents | extend (r,i)=series_fft(Signal) | extend (back,z)=series_ifft(r,i) | summarize Bad=countif(toreal(array_sum(series_abs(series_subtract(back,Signal))))>0.00000001),Rows=count()";
+const OUTLIER_QUERY: &str = "AnalyticsEvents | extend Scores=series_outliers(Samples,'tukey') | summarize Good=countif(toreal(Scores[0])< -1.5 and toreal(Scores[127])>1.5),Points=sum(array_length(Scores))";
+const TWO_LINE_QUERY: &str = "AnalyticsEvents | extend (R,Split,V,RV,F,RR,RS,RB,RV0,RRV,LR,LS,LB)=series_fit_2lines(Trend) | summarize Good=countif(Split==64 and R>0.99999999 and abs(LS-2.0)<0.00000001 and abs(RS+1.0)<0.00000001),Points=sum(array_length(F))";
+const TWO_LINE_DYNAMIC_QUERY: &str = "AnalyticsEvents | extend Fit=series_fit_2lines_dynamic(Trend) | summarize Good=countif(tolong(Fit.split_idx)==64 and toreal(Fit.rsquare)>0.99999999 and abs(toreal(Fit.left_slope)-2.0)<0.00000001 and abs(toreal(Fit.right_slope)+1.0)<0.00000001),Points=sum(array_length(Fit.line_fit))";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -403,6 +406,52 @@ fn spectral_context() -> SessionContext {
     ctx
 }
 
+fn analytics_context() -> SessionContext {
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let outliers = (0..SIGNAL_LEN)
+        .map(|index| {
+            Some(match index {
+                0 => -200.0,
+                127 => 300.0,
+                _ => index as f64,
+            })
+        })
+        .collect::<Vec<_>>();
+    let trend = (0..SIGNAL_LEN)
+        .map(|index| {
+            Some(if index < SIGNAL_LEN / 2 {
+                1.0 + index as f64 * 2.0
+            } else {
+                500.0 - (index - SIGNAL_LEN / 2) as f64
+            })
+        })
+        .collect::<Vec<_>>();
+    let batch = RecordBatch::try_from_iter(vec![
+        (
+            "Samples",
+            Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
+                (0..SIGNAL_ROWS).map(|_| Some(outliers.clone())),
+            )) as _,
+        ),
+        (
+            "Trend",
+            Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
+                (0..SIGNAL_ROWS).map(|_| Some(trend.clone())),
+            )) as _,
+        ),
+    ])
+    .unwrap();
+    let partitions = (0..4)
+        .map(|index| vec![batch.slice(index * SIGNAL_ROWS / 4, SIGNAL_ROWS / 4)])
+        .collect();
+    ctx.register_table(
+        TableReference::bare("AnalyticsEvents"),
+        Arc::new(MemTable::try_new(batch.schema(), partitions).unwrap()),
+    )
+    .unwrap();
+    ctx
+}
+
 fn benchmarks(c: &mut Criterion) {
     c.bench_function("parse/kql_pipeline", |b| {
         b.iter(|| parse(black_box(QUERY)).unwrap())
@@ -478,6 +527,7 @@ fn benchmarks(c: &mut Criterion) {
         256 << 20,
     );
     let spectral = spectral_context();
+    let analytics = analytics_context();
     let mut distinct_estimate = None;
     let mut workloads = c.benchmark_group("workloads");
     for (name, query, context, rows, expected_rows) in [
@@ -518,6 +568,27 @@ fn benchmarks(c: &mut Criterion) {
             "series_fft_roundtrip",
             FFT_ROUNDTRIP_QUERY,
             &spectral,
+            SIGNAL_ROWS * SIGNAL_LEN,
+            1,
+        ),
+        (
+            "series_outliers",
+            OUTLIER_QUERY,
+            &analytics,
+            SIGNAL_ROWS * SIGNAL_LEN,
+            1,
+        ),
+        (
+            "series_fit_2lines",
+            TWO_LINE_QUERY,
+            &analytics,
+            SIGNAL_ROWS * SIGNAL_LEN,
+            1,
+        ),
+        (
+            "series_fit_2lines_dynamic",
+            TWO_LINE_DYNAMIC_QUERY,
+            &analytics,
             SIGNAL_ROWS * SIGNAL_LEN,
             1,
         ),
@@ -683,6 +754,25 @@ fn benchmarks(c: &mut Criterion) {
                         .unwrap(),
                     datafusion::common::ScalarValue::Int64(Some(expected))
                 );
+            }
+            if matches!(
+                name,
+                "series_outliers" | "series_fit_2lines" | "series_fit_2lines_dynamic"
+            ) {
+                for (index, expected) in [
+                    (0, SIGNAL_ROWS as i64),
+                    (1, (SIGNAL_ROWS * SIGNAL_LEN) as i64),
+                ] {
+                    assert_eq!(
+                        datafusion::common::ScalarValue::try_from_array(result[0].column(index), 0)
+                            .unwrap(),
+                        datafusion::common::ScalarValue::Int64(Some(expected)),
+                        "{name} must preserve every anomaly, fit, and output point",
+                    );
+                }
+                if name == "series_fit_2lines" {
+                    assert_eq!(native.matches("__kql_series_fit_2lines_columns").count(), 1);
+                }
             }
         }
         if matches!(

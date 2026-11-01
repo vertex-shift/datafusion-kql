@@ -95,7 +95,12 @@ errors rather than silently execute with different semantics.
   fitting are implemented. Output-name lists lower through one struct-valued
   batch computation and native struct Unnest, preserving shared evaluation.
   Numerical DFT/round-trip checks are distinct from live Kusto certification;
-  decomposition, outliers, period detection and forecasting remain later work.
+  decomposition, period detection and forecasting remain later work. Tukey and
+  normalized custom-Tukey outlier scores plus dynamic/native two-line trend
+  fits are implemented. Segmented regression shares normalized single-line
+  moments and uses a linear-time suffix/prefix search, rather than repeatedly
+  refitting whole arrays. Local profile/edge assumptions remain distinct from
+  captured Kusto semantics.
 - UTC calendar arithmetic, constructors, formatting, Unix conversions, and lazy
   numeric/datetime/timespan ranges are implemented. Full Kusto datetime/timespan
   range and richer dynamic scalar types remain compatibility milestones.

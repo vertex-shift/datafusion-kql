@@ -34,6 +34,8 @@ pub(crate) enum Op {
     FillLinear,
     Stats,
     FitLine,
+    FitTwoLines,
+    Outliers,
     Fir,
     Iir,
 }
@@ -72,6 +74,8 @@ impl Op {
             Self::FillLinear => "series_fill_linear",
             Self::Stats => "series_stats_dynamic",
             Self::FitLine => "series_fit_line_dynamic",
+            Self::FitTwoLines => "series_fit_2lines_dynamic",
+            Self::Outliers => "series_outliers",
             Self::Fir => "series_fir",
             Self::Iir => "series_iir",
         }
@@ -110,6 +114,8 @@ impl Op {
             "series_fill_linear" => Self::FillLinear,
             "series_stats_dynamic" => Self::Stats,
             "series_fit_line_dynamic" => Self::FitLine,
+            "series_fit_2lines_dynamic" => Self::FitTwoLines,
+            "series_outliers" => Self::Outliers,
             "series_fir" => Self::Fir,
             "series_iir" => Self::Iir,
             _ => return None,
@@ -130,6 +136,7 @@ impl Op {
             | Self::Greater
             | Self::GreaterEquals => len == 2,
             Self::FillForward | Self::FillBackward | Self::Stats => (1..=2).contains(&len),
+            Self::Outliers => (1..=5).contains(&len),
             Self::FillConst => (2..=3).contains(&len),
             Self::FillLinear => (1..=4).contains(&len),
             Self::Fir => (2..=4).contains(&len),
@@ -180,7 +187,13 @@ pub(crate) fn evaluate(op: Op, args: &[Json]) -> Result<Json> {
         return statistics(series, boolean(args, 1, false)?);
     }
     if op == Op::FitLine {
-        return fit(series);
+        return crate::series_analytics::fit_line(series);
+    }
+    if op == Op::FitTwoLines {
+        return crate::series_analytics::fit_two_lines(series);
+    }
+    if op == Op::Outliers {
+        return crate::series_analytics::outliers(series, args);
     }
     if matches!(op, Op::Fir | Op::Iir) {
         return filter(op, series, args);
@@ -513,60 +526,6 @@ fn statistics(series: &[Json], ignore: bool) -> Result<Json> {
         ("stdev".into(), real(variance.sqrt())),
         ("sum".into(), real(sum)),
         ("len".into(), series.len().into()),
-    ])))
-}
-
-fn fit(series: &[Json]) -> Result<Json> {
-    let Some(values) = series
-        .iter()
-        .map(|point| point.as_f64().filter(|v| v.is_finite()))
-        .collect::<Option<Vec<_>>>()
-    else {
-        return Ok(Json::Null);
-    };
-    if values.len() < 2 {
-        return Ok(Json::Null);
-    }
-    let n = values.len() as f64;
-    let xmean = (n - 1.0) / 2.0;
-    let ymean = values.iter().sum::<f64>() / n;
-    let mut xx = 0.0;
-    let mut xy = 0.0;
-    let mut yy = 0.0;
-    for (index, value) in values.iter().enumerate() {
-        let dx = index as f64 - xmean;
-        let dy = value - ymean;
-        xx += dx * dx;
-        xy += dx * dy;
-        yy += dy * dy;
-    }
-    let slope = xy / xx;
-    let intercept = ymean - slope * xmean;
-    let fitted = (0..values.len())
-        .map(|i| intercept + slope * i as f64)
-        .collect::<Vec<_>>();
-    let residual = values
-        .iter()
-        .zip(&fitted)
-        .map(|(value, fit)| (value - fit).powi(2))
-        .sum::<f64>();
-    Ok(Json::Object(Map::from_iter([
-        (
-            "rsquare".into(),
-            real(if yy == 0.0 {
-                1.0
-            } else {
-                (1.0 - residual / yy).clamp(0.0, 1.0)
-            }),
-        ),
-        ("slope".into(), real(slope)),
-        ("variance".into(), real(yy / (n - 1.0))),
-        ("rvariance".into(), real(residual / (n - 1.0))),
-        ("interception".into(), real(intercept)),
-        (
-            "line_fit".into(),
-            Json::Array(fitted.into_iter().map(real).collect()),
-        ),
     ])))
 }
 

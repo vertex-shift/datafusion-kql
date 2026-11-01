@@ -44,6 +44,9 @@ capacity estimates.
 | `workloads/partition_template_spill` | Four generic templates over 4,800,000 rows under a 16 MiB fair pool; every group exceeds the entire pool, asserting actual spill metrics and exact totals |
 | `workloads/series_fft` | Transform 1,024 native 128-point sine arrays and reduce spectral energy; assert Parseval energy and a single transform node |
 | `workloads/series_fft_roundtrip` | Forward/inverse-transform those arrays and verify every restored signal within an L1 error threshold |
+| `workloads/series_outliers` | Score 1,024 native 128-point arrays; assert signed anomalies and every retained score position |
+| `workloads/series_fit_2lines` | Fit two trends to 1,024 native 128-point arrays; assert split index, slopes, fit quality, point counts and one shared transform |
+| `workloads/series_fit_2lines_dynamic` | The same split search through a correlated dynamic bag and native reduction |
 | `workloads/mv_apply_top` | Parse 1,000 payloads and run native per-row top-two/aggregation subqueries |
 | `workloads/bag_unpack` | Parse/unpack 100,000 JSON payloads with a declared schema and aggregate array lengths by service |
 | `workloads/json_fields` | Equivalent service/latency extraction through ordinary property access over the same payloads |

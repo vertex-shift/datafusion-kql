@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.13 implements the typed tabular and dynamic subset below. Keywords, function
+0.14 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -808,8 +808,8 @@ original positions, with explicit nonfinite-value handling. FIR normalization,
 centering, and IIR denominator rules follow KQL conventions.
 
 Generic FIR/IIR filtering has a per-row budget of 67,108,864 multiply-add
-operations and errors beyond it. Seasonal decomposition, outlier/period
-detection, forecasting, polynomial/two-line fitting, and other multi-output
+operations and errors beyond it. Seasonal decomposition, period detection,
+forecasting, polynomial fitting, and other multi-output
 variants remain future work. Numeric
 JSON serialization of nonfinite values retains the broader dynamic
 representation limitations described below.
@@ -876,6 +876,81 @@ new live Kusto captures: the current query-tool route was unavailable and the
 existing Azure CLI reference credential had expired. The 68 captured reference
 fixtures remain separate; no emulator terms or new Azure resources are needed
 for these local tests.
+
+### Outlier scores and two-segment trend fitting
+
+`series_outliers(series[, kind[, ignore_value[, low_percentile[, high_percentile]]]])`
+returns a dynamic real-score array with the original positions and length.
+`kind` is `"ctukey"` by default or `"tukey"`. Nulls and the numeric ignore value
+receive zero scores and do not contribute to the reference quantiles. Empty,
+all-missing and constant arrays produce empty or zero arrays as appropriate.
+Other nonnumeric/nonfinite points make the whole result null.
+
+Tukey uses linearly interpolated 25th/75th percentiles; custom Tukey defaults to
+10th/90th, or accepts finite numeric percentiles with
+`2 <= low < high <= 98`. Custom percentile arguments are ignored in Tukey mode.
+Inside the quantile band the score is zero. Outside it the signed distance to
+the nearest band boundary is divided by the band width. Custom Tukey also
+applies the percentile-dependent normalization described by the
+[Kusto maintainer](https://github.com/microsoft/Kusto-Query-Language/issues/136):
+using standard-normal quantiles, it keeps the reference Tukey 1.5 cutoff
+invariant across percentile borders. The implementation computes normal
+quantiles with `libm::erfc` rather than substituting a hardcoded score factor.
+Kind, ignore value and percentile arguments can vary by row or come from query
+parameters. The frontend's additional six-argument `test_points` overload is
+not provided in this milestone.
+
+**Outlier compatibility boundary:** the normalization equation is verified
+against published maintainer guidance, but the service's tabulated/approximated
+normal quantiles can yield different exact scores. These new fixtures have not
+been run against a live engine. Invalid configuration, nonfinite calculated
+scores and a zero-width quantile band on nonconstant data fail explicitly.
+The last case does not silently declare all observations non-anomalous; choose
+wider percentiles where possible. This is a strict local profile, not complete
+Kusto edge/error-behavior parity. Numeric processing uses binary64, not
+decimal128 or integer-exact rank arithmetic. Sorting is `O(n log n)`, with
+bounded numeric storage under the shared 1,048,576-point array limit.
+
+`series_fit_2lines_dynamic(series)` returns a correlated dynamic bag;
+`series_fit_2lines(series)` returns 15 typed columns in the public-signature
+order:
+`rsquare, split_idx, variance, rvariance, line_fit, right_rsquare, right_slope,
+right_interception, right_variance, right_rvariance, left_rsquare, left_slope,
+left_interception, left_variance, left_rvariance`.
+`split_idx` is long, `line_fit` is a dynamic real array, and all remaining fields
+are real. Native output-name lists/prefixes follow the same rules as other
+multi-output series calls, with one shared struct-valued computation.
+The dynamic bag exposes those flat fields and nested `left`/`right` metric
+aliases for the documentation's nested spelling; the extra aliases are not a
+promise of an identical service bag-key set.
+
+The local segmentation profile requires at least four finite numeric points,
+with at least two points on each side. The left segment is `[0, split_idx)`;
+the right is `[split_idx, length)`, with each line's intercept relative to its
+own segment's zero index. The chosen split minimizes total squared residual
+error, equivalently maximizing overall R-squared. Exactly tied residuals retain
+the earliest split. Missing/nonnumeric points and insufficient input return
+typed/dynamic nulls. Full-array and segment variances use sample denominators.
+Minimum segment lengths, coordinate origins, tie behavior and nested aliases
+remain an explicit local profile awaiting live-engine edge verification.
+
+Suffix moment summaries plus a prefix pass find the best split in `O(n)` work,
+not one full refit per possible breakpoint. Coordinate normalization and online
+centered moments preserve narrow high-magnitude ranges and avoid unnecessary
+sum overflow. The existing single-line dynamic and typed functions now use the
+same normalized regression kernel. Finite inputs whose requested regression
+metrics cannot be represented as finite reals error instead of emitting
+success-shaped string/nullable fallbacks. Interior numerical values can differ
+in their last bits from earlier unnormalized implementations.
+
+Both functions honor the 1,048,576-point limit, including native Arrow inputs.
+Segmented fitting retains about 40 bytes of numeric input/suffix storage per
+point, plus dynamic input/output, native planner and serialization buffers.
+Text, nesting and dynamic-node budgets also apply. These bounded buffers are
+not a total process-memory claim or a separate host memory allocator.
+Independent exhaustive-regression, normalization, signed-score, original-index,
+typed-schema, shared volatile-input and exact API-boundary tests cover this
+slice; the captured-engine baseline remains 68 fixtures.
 
 ## Aggregations
 
@@ -1150,8 +1225,9 @@ alias quoting and showed that a published `indexof` length example disagrees
 with engine behavior: eligible match starts, not full substrings, are bounded.
 Overlapping occurrences, clamped negative starts, empty strings, runtime invalid
 bounds and Unicode offsets now have actual captured results.
-Four additional source/documentation and mathematical-oracle fixtures cover
-FFT/IFFT and multi-column statistics/line fitting. They run locally and in the
+Eight additional source/documentation and mathematical-oracle fixtures cover
+FFT/IFFT, multi-column statistics/line fitting, outlier scores and segmented
+trends. They run locally and in the
 opt-in reference suite but are not counted among the 68 captured results.
 
 To compare the same fixtures against an explicitly configured reference:

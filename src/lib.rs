@@ -49,6 +49,7 @@ mod ranges;
 mod regex_extract;
 mod scan;
 mod search;
+mod series_analytics;
 mod series_functions;
 mod series_multi;
 mod tabular;
