@@ -21,6 +21,7 @@ use crate::series_functions::{self, Op};
 pub(crate) enum Multi {
     Stats,
     FitLine,
+    FitTwoLines,
     Fft,
     Ifft,
 }
@@ -30,6 +31,7 @@ impl Multi {
         Some(match name {
             "series_stats" => Self::Stats,
             "series_fit_line" => Self::FitLine,
+            "series_fit_2lines" => Self::FitTwoLines,
             "series_fft" => Self::Fft,
             "series_ifft" => Self::Ifft,
             _ => return None,
@@ -49,6 +51,23 @@ impl Multi {
                 "interception",
                 "line_fit",
             ],
+            Self::FitTwoLines => &[
+                "rsquare",
+                "split_idx",
+                "variance",
+                "rvariance",
+                "line_fit",
+                "right_rsquare",
+                "right_slope",
+                "right_interception",
+                "right_variance",
+                "right_rvariance",
+                "left_rsquare",
+                "left_slope",
+                "left_interception",
+                "left_variance",
+                "left_rvariance",
+            ],
             Self::Fft | Self::Ifft => &["real", "imag"],
         }
     }
@@ -58,7 +77,7 @@ impl Multi {
             .iter()
             .map(|name| {
                 let ty = match *name {
-                    "min_idx" | "max_idx" => DataType::Int64,
+                    "min_idx" | "max_idx" | "split_idx" => DataType::Int64,
                     "line_fit" | "real" | "imag" => dynamic::data_type(),
                     _ => DataType::Float64,
                 };
@@ -75,7 +94,7 @@ pub(crate) fn plan(
     schema: &DFSchema,
     span: Span,
 ) -> crate::Result<Expr> {
-    let valid = if op == Multi::FitLine {
+    let valid = if matches!(op, Multi::FitLine | Multi::FitTwoLines) {
         args.len() == 1
     } else {
         (1..=2).contains(&args.len())
@@ -319,6 +338,7 @@ impl ScalarUDFImpl for Function {
         match self.op {
             Multi::Stats => "__kql_series_stats_columns",
             Multi::FitLine => "__kql_series_fit_line_columns",
+            Multi::FitTwoLines => "__kql_series_fit_2lines_columns",
             Multi::Fft => "__kql_series_fft_columns",
             Multi::Ifft => "__kql_series_ifft_columns",
         }
@@ -426,10 +446,11 @@ impl ScalarUDFImpl for Function {
                     values.push(flag.into());
                 }
                 let result = series_functions::evaluate(
-                    if self.op == Multi::Stats {
-                        Op::Stats
-                    } else {
-                        Op::FitLine
+                    match self.op {
+                        Multi::Stats => Op::Stats,
+                        Multi::FitLine => Op::FitLine,
+                        Multi::FitTwoLines => Op::FitTwoLines,
+                        _ => unreachable!("Fourier transforms use the numeric path"),
                     },
                     &values,
                 )?;
@@ -442,8 +463,12 @@ impl ScalarUDFImpl for Function {
                     fields
                         .iter()
                         .map(|field| {
-                            let value =
-                                result.get(field.name()).unwrap_or(&serde_json::Value::Null);
+                            let value = result.get(field.name()).ok_or_else(|| {
+                                DataFusionError::Internal(format!(
+                                    "series result is missing field '{}'",
+                                    field.name()
+                                ))
+                            })?;
                             match field.data_type() {
                                 DataType::Float64 => Ok(ScalarValue::Float64(value.as_f64())),
                                 DataType::Int64 => Ok(ScalarValue::Int64(value.as_i64())),

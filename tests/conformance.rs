@@ -825,6 +825,30 @@ const SOURCE_FIXTURES: &[Fixture] = &[
         ],
         rows: &[&["True", "True", "True", "True", "True", "True"]],
     },
+    Fixture {
+        name: "source-series-two-line-step",
+        query: "print f=series_fit_2lines_dynamic(dynamic([1,3,5,7,20,19,18,17])) | project Split=tostring(tolong(f.split_idx)),Good=tostring(toreal(f.rsquare)>0.99999999),Left=tostring(abs(toreal(f.left_slope)-2.0)<0.00000001),Right=tostring(abs(toreal(f.right_slope)+1.0)<0.00000001),Points=tostring(array_length(f.line_fit))",
+        columns: &["Split", "Good", "Left", "Right", "Points"],
+        rows: &[&["4", "True", "True", "True", "8"]],
+    },
+    Fixture {
+        name: "source-series-two-line-tuple-order",
+        query: "print x=dynamic([1,3,5,7,20,19,18,17]) | extend (R,S,V,RV,F,RR,RS,RB,RV0,RRV,LR,LS,LB)=series_fit_2lines(x) | project Split=tostring(S),Good=tostring(R>0.99999999),Slope=tostring(abs(RS+1.0)<0.00000001 and abs(LS-2.0)<0.00000001),Points=tostring(array_length(F))",
+        columns: &["Split", "Good", "Slope", "Points"],
+        rows: &[&["4", "True", "True", "8"]],
+    },
+    Fixture {
+        name: "source-series-tukey-linear-quartiles",
+        query: "print s=series_outliers(dynamic([-20,1,2,3,4,5,6,40]),'tukey') | project Low=tostring(abs(toreal(s[0])+21.75/3.5)<0.00000001),High=tostring(abs(toreal(s[7])-34.75/3.5)<0.00000001),Points=tostring(array_length(s))",
+        columns: &["Low", "High", "Points"],
+        rows: &[&["True", "True", "8"]],
+    },
+    Fixture {
+        name: "source-series-outlier-missing-positions",
+        query: "print s=series_outliers(dynamic([null,-999,1,2,3,4,5,100]),'tukey',-999) | project Missing=tostring(toreal(s[0])==0.0),Ignored=tostring(toreal(s[1])==0.0),Anomaly=tostring(toreal(s[7])>1.5),Points=tostring(array_length(s))",
+        columns: &["Missing", "Ignored", "Anomaly", "Points"],
+        rows: &[&["True", "True", "True", "8"]],
+    },
 ];
 
 fn endpoint(uri: &str) -> TestResult<(String, bool)> {

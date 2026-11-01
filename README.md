@@ -5,7 +5,7 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
-**Status:** version 0.13 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.14 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -26,6 +26,7 @@ cargo run --example arrow_interop
 cargo run --example percentile_sketches
 cargo run --example materialized_snapshots
 cargo run --example spectral_series
+cargo run --example series_trends
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -40,6 +41,8 @@ selector, hexadecimal threshold, regex normalization, and typed buffer expansion
 bounded memory pool and native temporary spill storage.
 `spectral_series` demonstrates complex FFT/IFFT and typed multi-column statistics
 and regression results with KQL output-name lists.
+`series_trends` adds signed Tukey outlier scores and a correlated two-segment
+trend fit, including native multi-column results.
 
 ## Extend an existing DataFusion session
 
@@ -151,6 +154,9 @@ arbitrary-length complex spectral transforms, with typed multi-output
 `series_stats` and `series_fit_line` projections. KQL column lists such as
 `extend (real_part,imag_part)=series_fft(signal)` evaluate the transform once
 through native struct Unnest, not once per returned field.
+`series_outliers` supports Tukey/custom-Tukey scoring, while dynamic and typed
+`series_fit_2lines` results find a trend break with a linear-time split search.
+Regression kernels normalize coordinates to avoid unnecessary overflow.
 Calendar arithmetic, period boundaries, Unix conversions, constructors, and
 compiled KQL date/time formatting are supported. Both tabular and scalar ranges
 handle numeric, datetime, and timespan values.
@@ -253,12 +259,18 @@ layout, providers, predicates, memory budgets, and session configuration.
 
 ## Development
 
+Changes to `main` go through pull requests. The branch requires an up-to-date
+head, successful Rust 1.94/stable and publishable-crate checks, and resolution
+of review conversations. Force pushes and deletion are blocked, including for
+administrators. An approving review is not currently required so the
+single-maintainer workflow remains usable; CI is still mandatory.
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo check --lib --no-default-features
-cargo test --no-default-features --test materialize --test grouped --test scan --test series_multi
+cargo test --no-default-features --test materialize --test grouped --test scan --test series_multi --test series_analytics
 ```
 
 Tests cover parser diagnostics/limits, KQL-specific semantics, SQL result parity,
@@ -281,9 +293,12 @@ additional `indexof` edge fixtures that corrected window, overlap, empty-match
 and negative-start semantics. These finite captures do not certify
 identical large-population estimates or interoperable service blobs. CI also exercises curl
 transport against a self-owned loopback fixture, **not a Kusto engine**.
-Four spectral/statistical tuple fixtures are separately source/oracle-based,
+Eight spectral/statistical/trend fixtures are separately source/oracle-based,
 not new engine captures. FFT checks also compare independent complex DFTs,
 round trips, exact API array limits and shared volatile-input evaluation.
+Trend checks compare against exhaustive independent regressions; outlier
+normalization is grounded in the maintainer's published equation, not a claim
+of identical Kusto scores for every percentile profile.
 See the compatibility contract for capture provenance, live-test setup, and
 remaining conformance boundaries.
 

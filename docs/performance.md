@@ -44,6 +44,9 @@ capacity estimates.
 | `workloads/partition_template_spill` | Four generic templates over 4,800,000 rows under a 16 MiB fair pool; every group exceeds the entire pool, asserting actual spill metrics and exact totals |
 | `workloads/series_fft` | Transform 1,024 native 128-point sine arrays and reduce spectral energy; assert Parseval energy and a single transform node |
 | `workloads/series_fft_roundtrip` | Forward/inverse-transform those arrays and verify every restored signal within an L1 error threshold |
+| `workloads/series_outliers` | Score 1,024 native 128-point arrays; assert signed anomalies and every retained score position |
+| `workloads/series_fit_2lines` | Fit two trends to 1,024 native 128-point arrays; assert split index, slopes, fit quality, point counts and one shared transform |
+| `workloads/series_fit_2lines_dynamic` | The same split search through a correlated dynamic bag and native reduction |
 | `workloads/mv_apply_top` | Parse 1,000 payloads and run native per-row top-two/aggregation subqueries |
 | `workloads/bag_unpack` | Parse/unpack 100,000 JSON payloads with a declared schema and aggregate array lengths by service |
 | `workloads/json_fields` | Equivalent service/latency extraction through ordinary property access over the same payloads |
@@ -91,6 +94,55 @@ Each execution iteration uses DataFusion's `reset_plan_states` to create fresh
 operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
+
+## Measured 0.14 outlier scoring and segmented trends
+
+Measured on 2026-11-01 on the Apple M4/arm64 host, Rust 1.95.0,
+DataFusion 55.2.0, the optimized bench profile and four target partitions:
+
+```bash
+cargo bench --locked --bench kql -j 2 -- \
+  'workloads/(series_outliers|series_fit_2lines)' \
+  --warm-up-time 1 --measurement-time 4 --sample-size 20
+```
+
+| Workload | Criterion estimate | 95% confidence interval |
+| --- | --- | --- |
+| Standard Tukey scores, 1,024 128-point arrays | 16.24 ms | 16.12-16.36 ms |
+| Native multi-column two-line fits, same array count/length | 27.66 ms | 26.76-28.59 ms |
+| Dynamic-bag two-line fits, same trends | 39.48 ms | 37.71-41.63 ms |
+
+Each workload processes 131,072 original input points. The outlier fixture
+includes a known dip and spike per signal; preflight checks their signed scores
+against the 1.5 threshold and the exact output-point count. This measures the
+standard 25th/75th-percentile profile, not every custom-normalization option.
+The trend fixture contains two known lines with a break at index 64, slopes
+2 and -1, and a discontinuity between them. Both fit paths must recover the
+break, slopes and near-perfect fit while preserving all fitted points. The
+native path must contain one shared multi-output computation, not repeated
+regression calls for each field.
+
+The timed region includes native Arrow-to-dynamic adaptation, scoring/fitting,
+result construction, property/column access, native aggregate reduction and
+operator-state reset. Source construction, physical planning and compilation
+are outside it. Dynamic-bag and native tuple paths produce different
+intermediate representations and plans, so their timings are not an isolated
+solver comparison or a claim of an execution advantage over DataFusion.
+
+The split search uses suffix summaries and a prefix pass for `O(n)` work and
+bounded per-point numeric buffers. Outlier scoring uses a bounded sort and
+linearly interpolated quantiles. Independent exhaustive split regressions and
+exact maximum-size API tests establish correctness separately from these
+short repeated-signal measurements. The benchmark fixture does not establish
+throughput for one million-point signal, arbitrary missing-value patterns,
+all custom percentiles or live Kusto service behavior.
+
+No other local compilation ran during measurement. Criterion extended the
+sampling interval when required and reported timing outliers on the shared
+host. All existing benchmark preflight assertions also executed, including
+native SQL/KQL plan equivalence, Fourier energy/round trips and actual
+oversized-group spill/replay. These are local memory-resident workload samples,
+not universal throughput, memory or statistical-accuracy guarantees.
 
 ## Measured 0.12 grouped and stateful scaling
 
