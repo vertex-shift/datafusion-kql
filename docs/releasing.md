@@ -53,8 +53,10 @@ The environment permits only `main` and `v*` tags and requires review by
 `adityavaish`; administrator bypass is disabled. Self-approval is permitted so
 a single maintainer can operate releases. Environment protection is GitHub
 configuration, not YAML: preserve it when moving/forking this repository.
-All actions in these two workflows are pinned by commit SHA. Publishing uses
-`contents: read`; `id-token: write` is limited to the publishing job.
+All third-party actions in the CI, release, Pages and opt-in reference workflows
+are pinned by commit SHA. The current checkout/artifact/Pages releases use Node
+24, so retain a current GitHub-hosted runner when refreshing these pins.
+Publishing uses `contents: read`; `id-token: write` is limited to the publishing job.
 The release guard is repeated before obtaining registry credentials.
 
 Only one release workflow runs at a time. Mismatched tags, unmerged commits,
