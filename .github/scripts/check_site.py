@@ -26,6 +26,10 @@ class Document(HTMLParser):
         self.canonical = None
         self.description = False
         self.language = None
+        self.color_scheme = None
+        self.theme_bootstrap = None
+        self.theme_options = []
+        self.in_theme_select = False
         self.errors = []
 
     def handle_starttag(self, tag, attrs):
@@ -40,6 +44,14 @@ class Document(HTMLParser):
             self.headings.append(int(tag[1]))
         if tag == "meta" and attrs.get("name") == "description":
             self.description = bool(attrs.get("content"))
+        if tag == "meta" and attrs.get("name") == "color-scheme":
+            self.color_scheme = attrs.get("content")
+        if tag == "script" and attrs.get("src") == "./assets/theme.js":
+            self.theme_bootstrap = attrs
+        if tag == "select" and attrs.get("id") == "theme-select":
+            self.in_theme_select = True
+        if tag == "option" and self.in_theme_select:
+            self.theme_options.append((attrs.get("value"), "selected" in attrs))
         if tag == "link" and attrs.get("rel") == "canonical":
             self.canonical = attrs.get("href")
         for attribute in ("href", "src"):
@@ -63,6 +75,10 @@ class Document(HTMLParser):
         if attrs.get("data-copy"):
             self.references.append("#" + attrs["data-copy"])
 
+    def handle_endtag(self, tag):
+        if tag == "select":
+            self.in_theme_select = False
+
 
 def validate(root=ROOT):
     root = Path(root)
@@ -82,6 +98,17 @@ def validate(root=ROOT):
         errors.append("the homepage must include a description")
     if document.canonical != CANONICAL:
         errors.append("canonical URL must match the GitHub Pages project URL")
+    if document.color_scheme != "light dark":
+        errors.append("the page must support both system color schemes")
+    if document.theme_options != [("system", True), ("light", False), ("dark", False)]:
+        errors.append("the theme selector must default to System with Light and Dark overrides")
+    if document.local_resources.count("./assets/theme.js") != 1 or document.theme_bootstrap is None:
+        errors.append("the page must load one theme bootstrap")
+    elif any(attribute in document.theme_bootstrap for attribute in ("async", "defer")):
+        errors.append("the theme bootstrap must run before the first styled paint")
+    elif "./assets/styles.css" in document.local_resources:
+        if document.local_resources.index("./assets/theme.js") > document.local_resources.index("./assets/styles.css"):
+            errors.append("the theme bootstrap must precede the stylesheet")
     for reference in document.references:
         parsed = urlsplit(reference)
         if parsed.scheme:

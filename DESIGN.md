@@ -6,12 +6,14 @@ colors:
   white: "#ffffff"
   ink: "#183b40"
   muted: "#50696c"
+  accent: "#17494d"
   petrol: "#17494d"
   petrol-deep: "#11383c"
   on-petrol: "#edf6f3"
   petrol-muted: "#bed5d1"
   lime: "#d4ef9e"
   lime-hover: "#e0f6b8"
+  on-lime: "#183b40"
   line: "#ccd9d6"
   dark-line: "#497175"
   soft-field: "#e5eeeb"
@@ -49,7 +51,7 @@ spacing:
 components:
   button-primary:
     backgroundColor: "{colors.lime}"
-    textColor: "{colors.ink}"
+    textColor: "{colors.on-lime}"
     rounded: "{rounded.control}"
     padding: "0.8rem 1.4rem"
   button-secondary:
@@ -80,7 +82,14 @@ The visual world is a development decision, not an additional product claim.
 Cool mineral paper and deep petrol dominate. Pale lime identifies primary
 actions, not numerical success or compatibility certification. Muted text is
 paired with its actual background: petrol-muted is for dark petrol regions,
-while muted is for light regions.
+while muted adapts to the surrounding page surface.
+
+System appearance is the default. Light keeps the mineral paper palette;
+dark uses petrol-tinted paper #10262a, raised surface #183237, foreground
+#e1ece9, muted #abc1be, accent #abdcd5, rules #3a565b, soft field #1b383d
+and focus #b9e6dc. CSS `light-dark()` pairs each adaptive token. The fixed
+petrol code surfaces retain their light foreground, and lime actions always
+use #183b40 text rather than the adaptive page foreground.
 
 ## Typography
 
@@ -115,6 +124,12 @@ link together. Copy controls provide explicit success/failure feedback and
 select code for manual recovery when clipboard access fails. The query
 specimen uses one restrained brightness transition; reduced motion disables
 that transition and smooth scrolling without hiding content.
+
+The header's native theme selector has a 44px target and explicit System,
+Light and Dark options. On mobile it shares the first row with the wordmark;
+navigation occupies the second row. Theme overrides are applied before the
+stylesheet, remembered locally and synchronized between tabs. System appearance
+works without JavaScript, while storage failures show a readable status.
 
 ## Do's and Don'ts
 

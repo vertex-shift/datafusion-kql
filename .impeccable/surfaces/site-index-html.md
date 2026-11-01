@@ -2,7 +2,7 @@
 version: 1
 slug: "site-index-html"
 primary_target: "site/index.html"
-related_targets: ["site/assets/styles.css","site/assets/site.js"]
+related_targets: ["site/assets/styles.css","site/assets/site.js","site/assets/theme.js"]
 ---
 
 # Project site
@@ -47,5 +47,8 @@ provenance.
 
 Constraints: no live browser query engine, fabricated social proof, universal
 benchmarks, Kusto certification or published-registry installation claim.
-No raster illustrations are needed. Review desktop and mobile in one batch,
+System-default light/dark appearance preserves the same typography, hierarchy,
+petrol specimens and lime actions. The header offers explicit, locally remembered
+overrides; CSS still follows the operating system without JavaScript.
+No raster illustrations are needed. Review desktop and mobile in both themes in one batch,
 fix material findings together and confirm once. Never serve this contract.

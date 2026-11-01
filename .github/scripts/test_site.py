@@ -56,6 +56,30 @@ class SiteTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "font license"):
             validate(self.root)
 
+    def test_theme_defaults_to_system(self):
+        self.change('value="system" selected', 'value="system"')
+        self.change('value="light"', 'value="light" selected')
+        with self.assertRaisesRegex(ValueError, "default to System"):
+            validate(self.root)
+
+    def test_both_system_color_schemes_are_required(self):
+        self.change('name="color-scheme" content="light dark"', 'name="color-scheme" content="light"')
+        with self.assertRaisesRegex(ValueError, "both system color schemes"):
+            validate(self.root)
+
+    def test_theme_bootstrap_cannot_be_deferred(self):
+        self.change('src="./assets/theme.js"', 'src="./assets/theme.js" defer')
+        with self.assertRaisesRegex(ValueError, "first styled paint"):
+            validate(self.root)
+
+    def test_theme_bootstrap_must_precede_styles(self):
+        self.change(
+            '<script src="./assets/theme.js"></script>\n    <link rel="stylesheet" href="./assets/styles.css">',
+            '<link rel="stylesheet" href="./assets/styles.css">\n    <script src="./assets/theme.js"></script>',
+        )
+        with self.assertRaisesRegex(ValueError, "precede the stylesheet"):
+            validate(self.root)
+
 
 if __name__ == "__main__":
     unittest.main()
