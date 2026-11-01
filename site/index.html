@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Native Kusto Query Language for Apache DataFusion. Compile KQL to ordinary DataFusion plans, use your existing Arrow data, and keep control of your runtime.">
+    <meta name="theme-color" content="#17494d">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="datafusion-kql | Native KQL. Same DataFusion.">
+    <meta property="og:description" content="A Rust language frontend, not a DataFusion fork or SQL translator. Explore examples, compatibility, and source-first setup.">
+    <meta property="og:url" content="https://vertex-shift.github.io/datafusion-kql/">
+    <meta name="twitter:card" content="summary">
+    <title>datafusion-kql | Native KQL for Apache DataFusion</title>
+    <link rel="canonical" href="https://vertex-shift.github.io/datafusion-kql/">
+    <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml">
+    <link rel="preload" href="./assets/fonts/barlow-condensed-semibold.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="./assets/styles.css">
+    <script src="./assets/site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header wrap">
+      <a class="brand" href="./" aria-label="datafusion-kql home">
+        <svg viewBox="0 0 32 32" width="32" height="32" aria-hidden="true">
+          <path d="M8 6v20m9-16 7 6-7 6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="square" stroke-linejoin="miter"></path>
+        </svg>
+        <span>datafusion<span class="brand-divider">-</span>kql</span>
+      </a>
+      <nav aria-label="Main navigation">
+        <a href="#examples">Examples</a>
+        <a href="#compatibility">Compatibility</a>
+        <a href="https://github.com/vertex-shift/datafusion-kql" class="nav-source">
+          GitHub
+          <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+            <path d="M5 15 15 5M5 5h10v10" fill="none" stroke="currentColor" stroke-width="1.5"></path>
+          </svg>
+        </a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="intro wrap" aria-labelledby="intro-title">
+        <h1 id="intro-title">Native KQL.<br><span>Same DataFusion.</span></h1>
+        <div class="intro-rail">
+          <p>Write the pipeline you want. Keep the engine you trust.
+            A Rust frontend that brings Kusto Query Language to your existing
+            DataFusion application.</p>
+          <a class="button button-primary" href="#get-started">
+            Start with the source
+            <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+              <path d="M3 10h13m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5"></path>
+            </svg>
+          </a>
+        </div>
+        <dl class="spec-rail">
+          <div><dt>Frontend</dt><dd>v<span data-project-version>0.14</span></dd></div>
+          <div><dt>Host engine</dt><dd>DataFusion 55.2.x</dd></div>
+          <div><dt>Toolchain</dt><dd>Rust 1.94+</dd></div>
+          <div><dt>License</dt><dd><a href="https://github.com/vertex-shift/datafusion-kql/blob/main/LICENSE">Apache-2.0</a></dd></div>
+        </dl>
+      </section>
+
+      <section class="examples wrap" id="examples" aria-labelledby="examples-title">
+        <div class="section-heading example-heading">
+          <h2 id="examples-title">A familiar pipeline.<br> A native execution path.</h2>
+          <p>Typed KQL goes straight to DataFusion plans and Arrow kernels.
+            No generated SQL. No separate query engine.</p>
+        </div>
+        <div class="example-sheet">
+          <div class="example-toolbar">
+            <div class="example-picker" aria-label="Query examples">
+              <button type="button" id="example-telemetry" data-example="telemetry" aria-pressed="true" disabled>Telemetry</button>
+              <button type="button" id="example-dynamic" data-example="dynamic" aria-pressed="false" disabled>Dynamic data</button>
+              <button type="button" id="example-series" data-example="series" aria-pressed="false" disabled>Series &amp; trends</button>
+            </div>
+          </div>
+          <div class="example-view" id="example-view">
+            <div class="query-cell">
+              <div class="query-heading">
+                <h3>KQL query</h3>
+                <button class="copy-button" type="button" data-copy="example-query" hidden>Copy KQL</button>
+              </div>
+              <pre tabindex="0" aria-label="KQL example"><code id="example-query">datatable(Service:string, Duration:long)
+  ['api',120,'api',260,'worker',90]
+| where Duration &gt; 100
+| summarize Requests=count(),
+    P95=percentile(Duration,95) by Service</code></pre>
+            </div>
+            <div class="result-cell">
+              <h3>Example result</h3>
+              <div class="result-scroll">
+                <table id="example-result">
+                  <caption class="sr-only">Synthetic telemetry query result</caption>
+                  <thead><tr><th scope="col">Service</th><th scope="col">Requests</th><th scope="col">P95</th></tr></thead>
+                  <tbody><tr><td>api</td><td>2</td><td>260</td></tr></tbody>
+                </table>
+              </div>
+              <p id="example-note">Small groups retain exact nearest ranks; large percentile
+                states use bounded t-digest sketches.</p>
+              <a id="example-reference" href="https://github.com/vertex-shift/datafusion-kql/blob/main/docs/compatibility.md#bounded-percentiles-and-distribution-sketches">Read the percentile contract</a>
+            </div>
+          </div>
+          <div class="example-foot">
+            <p>Synthetic examples, not queries executed in your browser.</p>
+            <span class="engine-note">Executed by your DataFusion runtime</span>
+          </div>
+        </div>
+        <noscript><p class="no-script">The telemetry example is shown above.
+          <a href="https://github.com/vertex-shift/datafusion-kql/tree/main/examples">Browse all runnable examples on GitHub.</a></p></noscript>
+        <ol class="execution-path" aria-label="Query execution architecture">
+          <li><strong>KQL</strong><span>Text &amp; typed AST</span></li>
+          <li><strong>LogicalPlan / Expr</strong><span>Ordinary native plans</span></li>
+          <li><strong>DataFusion</strong><span>Optimizer &amp; execution</span></li>
+          <li><strong>Arrow</strong><span>Your data, your providers</span></li>
+        </ol>
+      </section>
+
+      <section class="ownership wrap" aria-labelledby="ownership-title">
+        <div class="section-heading">
+          <h2 id="ownership-title">An extension,<br> not a replacement.</h2>
+          <p>The host application stays in charge. KQL adds a language frontend
+            and expression-local kernels, not another infrastructure layer.</p>
+        </div>
+        <dl class="ownership-list">
+          <div><dt>Your tables</dt><dd>Query existing CSV, JSON, Parquet, memory tables,
+            catalogs, and custom <code>TableProvider</code>s.</dd></div>
+          <div><dt>Your runtime</dt><dd>Keep object stores, target partitions,
+            memory pools, spill directories, and application timeouts.</dd></div>
+          <div><dt>Your optimizer</dt><dd>Native filters, joins, projections,
+            aggregates, and top-k remain visible to DataFusion.</dd></div>
+          <div><dt>Your functions</dt><dd>Host registrations stay intact.
+            KQL-specific batch functions do not overwrite the session registry.</dd></div>
+        </dl>
+      </section>
+
+      <section class="start-section" id="get-started" aria-labelledby="start-title">
+        <div class="wrap">
+          <div class="section-heading">
+            <h2 id="start-title">Try it in a<br> real Rust session.</h2>
+            <p>Start from the repository. You need Rust 1.94+ and a C compiler
+              for the bundled decimal runtime. No Azure account is required.</p>
+          </div>
+          <div class="start-grid">
+            <div class="setup-cell">
+              <div class="code-heading"><h3>Run the quickstart</h3><button type="button" class="copy-button" data-copy="setup-command" hidden>Copy commands</button></div>
+              <pre tabindex="0" aria-label="Clone and run commands"><code id="setup-command">git clone https://github.com/vertex-shift/datafusion-kql.git
+cd datafusion-kql
+cargo run --locked --example quickstart</code></pre>
+              <p class="setup-note">Source-first setup. The package name is
+                <code>datafusion-kql-native</code>; the Rust import is
+                <code>datafusion_kql</code>. The similarly named published
+                <code>datafusion-kql</code> crate is a separate project.</p>
+              <a href="https://github.com/vertex-shift/datafusion-kql/blob/main/README.md#extend-an-existing-datafusion-session">Add it to an existing application</a>
+            </div>
+            <div class="rust-cell">
+              <h3>A lazy DataFrame, as usual</h3>
+              <pre tabindex="0" aria-label="Rust embedding example"><code>use datafusion::prelude::*;
+use datafusion_kql::SessionContextKqlExt;
+
+let ctx = SessionContext::new();
+let frame = ctx.kql(
+    "range x from 1 to 5 step 1
+     | summarize Total=sum(x)"
+).await?;
+
+// Planning stays lazy.
+frame.show().await?;</code></pre>
+            </div>
+          </div>
+          <a class="button button-secondary" href="https://github.com/vertex-shift/datafusion-kql/tree/main/examples">
+            Explore 13 runnable examples
+            <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+              <path d="M3 10h13m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5"></path>
+            </svg>
+          </a>
+        </div>
+      </section>
+
+      <section class="compatibility wrap" id="compatibility" aria-labelledby="compatibility-title">
+        <div class="section-heading">
+          <h2 id="compatibility-title">Useful today.<br> Honest about the edges.</h2>
+          <p>A broad, growing compatibility subset. Full KQL and Kusto-service
+            parity are goals, not claims.</p>
+        </div>
+        <div class="coverage-table-wrap">
+          <table class="coverage-table">
+            <caption>Current native KQL coverage</caption>
+            <thead><tr><th scope="col">Surface</th><th scope="col">What is implemented</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Typed pipelines</th><td>Filters, projection, joins, lookup,
+                unions, aggregation, tabular bindings, functions, and query parameters.</td></tr>
+              <tr><th scope="row">Dynamic data</th><td>Typed nested values, bags and arrays,
+                native Arrow collections, zipped expansion, parsing, and telemetry helpers.</td></tr>
+              <tr><th scope="row">State &amp; scale</th><td>Serialized windows, scan,
+                partition, mv-apply, bounded HLL/t-digest, and native spill-aware buffers.</td></tr>
+              <tr><th scope="row">Time series</th><td>Make-series, interpolation, statistics,
+                filters, FFT/IFFT, outlier scores, and one-/two-segment fitting.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="boundary-panel">
+          <h3>Read the contract before relying on parity.</h3>
+          <p>Wide datetime/timespan ranges, additional service and query surfaces,
+            seasonal decomposition, period detection, and forecasting remain
+            roadmap work. Sketch blobs use local formats, not Kusto-service formats.
+            Some functions have explicit extension profiles and stricter error handling.</p>
+          <div class="boundary-links">
+            <a href="https://github.com/vertex-shift/datafusion-kql/blob/main/docs/compatibility.md">Compatibility contract</a>
+            <a href="https://github.com/vertex-shift/datafusion-kql/blob/main/docs/architecture.md#later-compatibility-milestones">Open roadmap</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="evidence wrap" aria-labelledby="evidence-title">
+        <div class="section-heading">
+          <h2 id="evidence-title">Measured,<br> not promised.</h2>
+          <p>Low frontend overhead, followed by native DataFusion execution.
+            Performance depends on the query, data, providers, and runtime.</p>
+        </div>
+        <div class="evidence-grid">
+          <div>
+            <h3>Local workload samples</h3>
+            <table class="benchmark-table">
+              <caption class="sr-only">Selected local benchmark estimates</caption>
+              <thead><tr><th scope="col">Workload</th><th scope="col">Estimate</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">5 bounded percentiles / 1M rows</th><td>12.11 ms</td></tr>
+                <tr><th scope="row">5 exact percentiles / same rows</th><td>44.12 ms</td></tr>
+                <tr><th scope="row">Typed Arrow expansion / 100K lists</th><td>1.10 ms</td></tr>
+                <tr><th scope="row">Native two-line fits / 1,024 signals</th><td>27.66 ms</td></tr>
+              </tbody>
+            </table>
+            <p class="methodology">Apple M4, Rust 1.95.0, DataFusion 55.2.0.
+              Different workloads and accuracy contracts; not universal speed
+              guarantees or a comparison with the Kusto service.</p>
+            <a href="https://github.com/vertex-shift/datafusion-kql/blob/main/docs/performance.md">Read intervals, fixtures, and methodology</a>
+          </div>
+          <div class="conformance-note">
+            <h3>Evidence with provenance</h3>
+            <p><strong>68 captured Kusto fixtures</strong> cover a finite
+              historical reference baseline. <strong>8 source/oracle fixtures</strong>
+              are recorded separately, not presented as new engine captures.</p>
+            <p>Tests also check native plans, numerical oracles, exact budgets,
+              memory accounting, spill/replay, lazy execution, and registry isolation.</p>
+            <a href="https://github.com/vertex-shift/datafusion-kql/blob/main/tests/conformance.rs">Inspect the conformance suite</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="closing wrap" aria-labelledby="closing-title">
+        <h2 id="closing-title">Bring the query.<br>Keep your engine.</h2>
+        <div class="closing-actions">
+          <a class="button button-primary" href="https://github.com/vertex-shift/datafusion-kql">View the source</a>
+          <a href="https://github.com/vertex-shift/datafusion-kql/issues">Discuss a parity gap</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer wrap">
+      <p>datafusion-kql <span class="footer-dot" aria-hidden="true"></span> A vertex-shift open-source project</p>
+      <nav aria-label="Project resources">
+        <a href="https://github.com/vertex-shift/datafusion-kql/blob/main/docs/architecture.md">Architecture</a>
+        <a href="https://github.com/vertex-shift/datafusion-kql/blob/main/docs/releasing.md">Releases</a>
+        <a href="https://github.com/vertex-shift/datafusion-kql/blob/main/LICENSE">License</a>
+      </nav>
+      <p class="affiliation-note">An independent frontend for Apache DataFusion.
+        Not an Apache Software Foundation or Microsoft product.</p>
+    </footer>
+    <p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+  </body>
+</html>

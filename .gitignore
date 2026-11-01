@@ -1,2 +1,4 @@
 /target/
 /.github/scripts/__pycache__/
+/.impeccable/hook.cache.json
+/.impeccable/review/
