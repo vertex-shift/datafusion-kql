@@ -18,6 +18,22 @@
       "width": "3px",
       "offset": "5px",
       "darkRegion": "var(--lime)"
+    },
+    "appearance": {
+      "default": "system",
+      "choices": ["system", "light", "dark"],
+      "storageKey": "datafusion-kql-theme",
+      "darkColors": {
+        "paper": "#10262a",
+        "white": "#183237",
+        "ink": "#e1ece9",
+        "muted": "#abc1be",
+        "accent": "#abdcd5",
+        "line": "#3a565b",
+        "soft-field": "#1b383d",
+        "focus": "#b9e6dc"
+      },
+      "fixedActionForeground": "var(--on-lime)"
     }
   },
   "components": [
@@ -27,7 +43,7 @@
       "refersTo": "button-primary",
       "description": "Source-first adoption actions, not unsupported registry installation.",
       "html": "<a class=\"ds-primary\" href=\"#get-started\">Start with the source</a>",
-      "css": ".ds-primary { display:inline-flex; align-items:center; min-height:3.25rem; padding:0.8rem 1.4rem; background:var(--lime); color:var(--ink); border:1px solid transparent; border-radius:var(--radius); font-weight:600; text-decoration:none; } .ds-primary:hover { background:var(--lime-hover); border-color:var(--ink); } .ds-primary:focus-visible { outline:3px solid var(--focus); outline-offset:5px; }"
+      "css": ".ds-primary { display:inline-flex; align-items:center; min-height:3.25rem; padding:0.8rem 1.4rem; background:var(--lime); color:var(--on-lime); border:1px solid transparent; border-radius:var(--radius); font-weight:600; text-decoration:none; } .ds-primary:hover { background:var(--lime-hover); border-color:var(--on-lime); } .ds-primary:focus-visible { outline:3px solid var(--focus); outline-offset:5px; }"
     },
     {
       "name": "Selected example tab",

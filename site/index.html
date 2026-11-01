@@ -4,7 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Native Kusto Query Language for Apache DataFusion. Compile KQL to ordinary DataFusion plans, use your existing Arrow data, and keep control of your runtime.">
-    <meta name="theme-color" content="#17494d">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#f3f7f6" data-color-scheme="light" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#10262a" data-color-scheme="dark" media="(prefers-color-scheme: dark)">
     <meta property="og:type" content="website">
     <meta property="og:title" content="datafusion-kql | Native KQL. Same DataFusion.">
     <meta property="og:description" content="A Rust language frontend, not a DataFusion fork or SQL translator. Explore examples, compatibility, and source-first setup.">
@@ -14,6 +16,7 @@
     <link rel="canonical" href="https://vertex-shift.github.io/datafusion-kql/">
     <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml">
     <link rel="preload" href="./assets/fonts/barlow-condensed-semibold.woff2" as="font" type="font/woff2" crossorigin>
+    <script src="./assets/theme.js"></script>
     <link rel="stylesheet" href="./assets/styles.css">
     <script src="./assets/site.js" defer></script>
   </head>
@@ -36,7 +39,20 @@
           </svg>
         </a>
       </nav>
+      <label class="theme-control" hidden>
+        <span class="sr-only">Color theme</span>
+        <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+          <circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.5"></circle>
+          <path d="M10 3a7 7 0 0 0 0 14Z" fill="currentColor"></path>
+        </svg>
+        <select id="theme-select" name="theme">
+          <option value="system" selected>System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </label>
     </header>
+    <p class="theme-status wrap" id="theme-status" role="status" hidden></p>
 
     <main id="main">
       <section class="intro wrap" aria-labelledby="intro-title">

@@ -23,6 +23,8 @@ jobs:
       - run: python3 .github/scripts/check_site.py
       - run: python3 -m unittest discover -s .github/scripts -p 'test_site.py'
       - run: node --check site/assets/site.js
+      - run: node --check site/assets/theme.js
+      - run: node --test .github/scripts/test_site_theme.cjs
 
   deploy:
     name: Deploy project site
