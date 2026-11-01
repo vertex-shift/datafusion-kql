@@ -25,7 +25,8 @@ The repository's active `Main: pull requests and verified CI` ruleset requires
 pull requests for updates to `main`, with no bypass actors. It blocks deletion
 and non-fast-forward updates, requires resolved review conversations, and
 requires the branch to be up to date with successful GitHub Actions checks:
-`rust (1.94)`, `rust (stable)`, and `Verify publishable crate`.
+`rust (1.94)`, `rust (stable)`, `Verify publishable crate`, and
+`Validate project site`.
 Approving reviews are not mandatory for the single-maintainer workflow.
 Do not push release preparation directly to `main` or merge with an admin bypass.
 

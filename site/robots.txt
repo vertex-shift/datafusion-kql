@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://vertex-shift.github.io/datafusion-kql/sitemap.xml

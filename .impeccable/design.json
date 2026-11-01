@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-01T15:23:35Z",
+  "title": "Design system: datafusion-kql",
+  "extensions": {
+    "motion": [
+      {
+        "name": "state-easing",
+        "value": "cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Restrained state feedback on example selection and buttons."
+      }
+    ],
+    "breakpoints": [
+      { "name": "compact", "value": "1000px" },
+      { "name": "mobile", "value": "700px" }
+    ],
+    "focus": {
+      "width": "3px",
+      "offset": "5px",
+      "darkRegion": "var(--lime)"
+    }
+  },
+  "components": [
+    {
+      "name": "Primary source action",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Source-first adoption actions, not unsupported registry installation.",
+      "html": "<a class=\"ds-primary\" href=\"#get-started\">Start with the source</a>",
+      "css": ".ds-primary { display:inline-flex; align-items:center; min-height:3.25rem; padding:0.8rem 1.4rem; background:var(--lime); color:var(--ink); border:1px solid transparent; border-radius:var(--radius); font-weight:600; text-decoration:none; } .ds-primary:hover { background:var(--lime-hover); border-color:var(--ink); } .ds-primary:focus-visible { outline:3px solid var(--focus); outline-offset:5px; }"
+    },
+    {
+      "name": "Selected example tab",
+      "kind": "chip",
+      "refersTo": "example-tab-selected",
+      "description": "Explicit active-example state with keyboard selection.",
+      "html": "<button class=\"ds-tab\" type=\"button\" aria-pressed=\"true\">Telemetry</button>",
+      "css": ".ds-tab { min-height:44px; padding:0.6rem 1rem; color:var(--on-petrol); background:var(--petrol); border:0; border-radius:var(--radius); font-weight:600; } .ds-tab:hover { background:var(--petrol-deep); } .ds-tab:focus-visible { outline:3px solid var(--focus); outline-offset:5px; }"
+    },
+    {
+      "name": "Copy control",
+      "kind": "button",
+      "description": "Enhanced clipboard action with manual selection recovery.",
+      "html": "<button class=\"ds-copy\" type=\"button\">Copy KQL</button>",
+      "css": ".ds-copy { min-height:44px; padding:0.5rem 0.85rem; background:transparent; border:1px solid var(--line); color:var(--ink); border-radius:var(--radius); } .ds-copy:hover { background:var(--soft-field); } .ds-copy:focus-visible { outline:3px solid var(--focus); outline-offset:5px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The engineering datasheet",
+    "overview": "Readable specifications, code specimens and evidence tables explain a native language frontend without inventing product claims.",
+    "keyCharacteristics": ["Source-first", "Explicit state", "Cool tonal regions", "Readable native code"],
+    "dos": ["Use semantic HTML and project-prefix-safe links.", "Keep fixture and benchmark provenance explicit."],
+    "donts": ["Do not imply browser query execution.", "Do not ship development metadata as public assets."]
+  }
+}

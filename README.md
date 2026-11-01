@@ -5,6 +5,10 @@ pipe-oriented queries against existing DataFusion tables and receive ordinary,
 lazy `DataFrame`s backed by DataFusion's optimizer and vectorized Arrow engine.
 No DataFusion fork, SQL translation, or separate execution engine.
 
+[Project website](https://vertex-shift.github.io/datafusion-kql/) |
+[Compatibility contract](docs/compatibility.md) |
+[Website development and review](docs/website.md)
+
 **Status:** version 0.14 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
@@ -260,7 +264,7 @@ layout, providers, predicates, memory budgets, and session configuration.
 ## Development
 
 Changes to `main` go through pull requests. The branch requires an up-to-date
-head, successful Rust 1.94/stable and publishable-crate checks, and resolution
+head, successful Rust 1.94/stable, publishable-crate and project-site checks, and resolution
 of review conversations. Force pushes and deletion are blocked, including for
 administrators. An approving review is not currently required so the
 single-maintainer workflow remains usable; CI is still mandatory.
