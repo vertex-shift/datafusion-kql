@@ -3,22 +3,85 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="Native Kusto Query Language for Apache DataFusion. Compile KQL to ordinary DataFusion plans, use your existing Arrow data, and keep control of your runtime.">
+    <meta name="description" content="Native Kusto Query Language (KQL) for Apache DataFusion. An open-source Rust extension with Arrow-native plans, runnable examples and compatibility docs.">
+    <meta name="robots" content="index, follow, max-image-preview:large">
     <meta name="color-scheme" content="light dark">
     <meta name="theme-color" content="#f3f7f6" data-color-scheme="light" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#10262a" data-color-scheme="dark" media="(prefers-color-scheme: dark)">
     <meta property="og:type" content="website">
-    <meta property="og:title" content="datafusion-kql | Native KQL. Same DataFusion.">
-    <meta property="og:description" content="A Rust language frontend, not a DataFusion fork or SQL translator. Explore examples, compatibility, and source-first setup.">
+    <meta property="og:site_name" content="datafusion-kql">
+    <meta property="og:locale" content="en_US">
+    <meta property="og:title" content="Native KQL for Apache DataFusion | datafusion-kql">
+    <meta property="og:description" content="Native Kusto Query Language (KQL) for Apache DataFusion. An open-source Rust extension with Arrow-native plans, runnable examples and compatibility docs.">
     <meta property="og:url" content="https://vertex-shift.github.io/datafusion-kql/">
-    <meta name="twitter:card" content="summary">
-    <title>datafusion-kql | Native KQL for Apache DataFusion</title>
+    <meta property="og:image" content="https://vertex-shift.github.io/datafusion-kql/assets/social-preview.png">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="datafusion-kql: native KQL text compiled to DataFusion plans and Arrow execution.">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Native KQL for Apache DataFusion | datafusion-kql">
+    <meta name="twitter:description" content="Native Kusto Query Language (KQL) for Apache DataFusion. An open-source Rust extension with Arrow-native plans, runnable examples and compatibility docs.">
+    <meta name="twitter:image" content="https://vertex-shift.github.io/datafusion-kql/assets/social-preview.png">
+    <meta name="twitter:image:alt" content="datafusion-kql: native KQL text compiled to DataFusion plans and Arrow execution.">
+    <title>Native KQL for Apache DataFusion | datafusion-kql</title>
     <link rel="canonical" href="https://vertex-shift.github.io/datafusion-kql/">
+    <link rel="sitemap" type="application/xml" href="./sitemap.xml">
     <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml">
     <link rel="preload" href="./assets/fonts/barlow-condensed-semibold.woff2" as="font" type="font/woff2" crossorigin>
     <script src="./assets/theme.js"></script>
     <link rel="stylesheet" href="./assets/styles.css">
     <script src="./assets/site.js" defer></script>
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "WebSite",
+          "@id": "https://vertex-shift.github.io/datafusion-kql/#website",
+          "url": "https://vertex-shift.github.io/datafusion-kql/",
+          "name": "datafusion-kql",
+          "inLanguage": "en",
+          "publisher": {
+            "@type": "Organization",
+            "name": "vertex-shift",
+            "url": "https://github.com/vertex-shift"
+          }
+        },
+        {
+          "@type": "WebPage",
+          "@id": "https://vertex-shift.github.io/datafusion-kql/#webpage",
+          "url": "https://vertex-shift.github.io/datafusion-kql/",
+          "name": "Native KQL for Apache DataFusion | datafusion-kql",
+          "description": "Native Kusto Query Language (KQL) for Apache DataFusion. An open-source Rust extension with Arrow-native plans, runnable examples and compatibility docs.",
+          "inLanguage": "en",
+          "isPartOf": { "@id": "https://vertex-shift.github.io/datafusion-kql/#website" },
+          "mainEntity": { "@id": "https://vertex-shift.github.io/datafusion-kql/#software" },
+          "primaryImageOfPage": {
+            "@type": "ImageObject",
+            "url": "https://vertex-shift.github.io/datafusion-kql/assets/social-preview.png",
+            "width": 1200,
+            "height": 630
+          }
+        },
+        {
+          "@type": "SoftwareSourceCode",
+          "@id": "https://vertex-shift.github.io/datafusion-kql/#software",
+          "name": "datafusion-kql-native",
+          "alternateName": "datafusion-kql",
+          "description": "Native Kusto Query Language (KQL) for Apache DataFusion. An open-source Rust extension with Arrow-native plans, runnable examples and compatibility docs.",
+          "url": "https://vertex-shift.github.io/datafusion-kql/",
+          "codeRepository": "https://github.com/vertex-shift/datafusion-kql",
+          "programmingLanguage": "Rust",
+          "runtimePlatform": "Apache DataFusion",
+          "version": "0.14.0",
+          "license": "https://github.com/vertex-shift/datafusion-kql/blob/main/LICENSE",
+          "image": "https://vertex-shift.github.io/datafusion-kql/assets/social-preview.png",
+          "mainEntityOfPage": { "@id": "https://vertex-shift.github.io/datafusion-kql/#webpage" }
+        }
+      ]
+    }
+    </script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
@@ -278,6 +341,7 @@ frame.show().await?;</code></pre>
         <a href="https://github.com/vertex-shift/datafusion-kql/blob/main/docs/architecture.md">Architecture</a>
         <a href="https://github.com/vertex-shift/datafusion-kql/blob/main/docs/releasing.md">Releases</a>
         <a href="https://github.com/vertex-shift/datafusion-kql/blob/main/LICENSE">License</a>
+        <a href="./sitemap.xml">Sitemap</a>
       </nav>
       <p class="affiliation-note">An independent frontend for Apache DataFusion.
         Not an Apache Software Foundation or Microsoft product.</p>

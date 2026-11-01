@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <title>datafusion-kql: Native KQL. Same DataFusion.</title>
+  <desc>An open-source Rust extension compiles KQL into native DataFusion plans and Arrow execution.</desc>
+  <style>
+    @font-face {
+      font-family: Barlow;
+      src: url("./fonts/barlow-regular.woff2") format("woff2");
+      font-weight: 400;
+    }
+    @font-face {
+      font-family: Barlow;
+      src: url("./fonts/barlow-semibold.woff2") format("woff2");
+      font-weight: 600;
+    }
+    @font-face {
+      font-family: "Barlow Condensed";
+      src: url("./fonts/barlow-condensed-semibold.woff2") format("woff2");
+      font-weight: 600;
+    }
+    text { font-family: Barlow, sans-serif; }
+    .headline { font-family: "Barlow Condensed", Barlow, sans-serif; font-weight: 600; font-size: 96px; letter-spacing: -1.5px; }
+  </style>
+  <rect width="1200" height="630" fill="#f3f7f6"/>
+  <g transform="translate(60 43)" stroke="#183b40" stroke-width="3" fill="none">
+    <path d="M8 6v20m9-16 7 6-7 6"/>
+  </g>
+  <text x="108" y="70" fill="#183b40" font-size="28" font-weight="600">datafusion-kql</text>
+  <path d="M60 104h1080" fill="none" stroke="#ccd9d6"/>
+  <text class="headline" x="60" y="217" fill="#183b40">Native KQL.</text>
+  <text class="headline" x="60" y="319" fill="#17494d">Same DataFusion.</text>
+  <text x="60" y="377" fill="#50696c" font-size="28">An open-source Rust extension for Apache DataFusion.</text>
+  <rect x="60" y="423" width="1080" height="116" rx="6" fill="#17494d"/>
+  <text x="88" y="468" fill="#edf6f3" font-size="25" font-weight="600">KQL</text>
+  <text x="88" y="505" fill="#bed5d1" font-size="22">Text &amp; typed AST</text>
+  <text x="444" y="468" fill="#edf6f3" font-size="25" font-weight="600">Native plans</text>
+  <text x="444" y="505" fill="#bed5d1" font-size="22">LogicalPlan / Expr</text>
+  <text x="804" y="468" fill="#edf6f3" font-size="25" font-weight="600">DataFusion + Arrow</text>
+  <text x="804" y="505" fill="#bed5d1" font-size="22">Your data. Your runtime.</text>
+  <path d="M373 479h32m-8-8 8 8-8 8m340-8h32m-8-8 8 8-8 8" fill="none" stroke="#bed5d1" stroke-width="1.5"/>
+  <text x="60" y="591" fill="#50696c" font-size="22">vertex-shift.github.io/datafusion-kql</text>
+  <text x="1140" y="591" text-anchor="end" fill="#183b40" font-size="22" font-weight="600">Apache-2.0</text>
+</svg>

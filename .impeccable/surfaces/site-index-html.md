@@ -2,7 +2,7 @@
 version: 1
 slug: "site-index-html"
 primary_target: "site/index.html"
-related_targets: ["site/assets/styles.css","site/assets/site.js","site/assets/theme.js"]
+related_targets: ["site/assets/styles.css","site/assets/site.js","site/assets/theme.js","site/assets/social-preview.svg","site/assets/social-preview.png"]
 ---
 
 # Project site
@@ -50,5 +50,9 @@ benchmarks, Kusto certification or published-registry installation claim.
 System-default light/dark appearance preserves the same typography, hierarchy,
 petrol specimens and lime actions. The header offers explicit, locally remembered
 overrides; CSS still follows the operating system without JavaScript.
+SEO metadata and the sharing cover extend this same surface and visual world:
+preserve the copy, native-plan mechanism and compatibility boundaries. Use the
+source-library schema, not fabricated app ratings or search features. The PNG
+cover carries its committed SVG/font provenance and is not a page-load asset.
 No raster illustrations are needed. Review desktop and mobile in both themes in one batch,
 fix material findings together and confirm once. Never serve this contract.

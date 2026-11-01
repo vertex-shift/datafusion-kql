@@ -2,10 +2,13 @@
 
 import argparse
 from functools import partial
+import hashlib
 from html.parser import HTMLParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import json
 from pathlib import Path
 import re
+import struct
 import tomllib
 from urllib.parse import unquote, urlsplit
 import xml.etree.ElementTree as ET
@@ -14,6 +17,12 @@ ROOT = Path(__file__).resolve().parents[2]
 SITE = ROOT / "site"
 BASE = "/datafusion-kql/"
 CANONICAL = "https://vertex-shift.github.io/datafusion-kql/"
+SOCIAL_IMAGE = CANONICAL + "assets/social-preview.png"
+SOCIAL_FONTS = (
+    "barlow-regular.woff2",
+    "barlow-semibold.woff2",
+    "barlow-condensed-semibold.woff2",
+)
 
 
 class Document(HTMLParser):
@@ -25,6 +34,12 @@ class Document(HTMLParser):
         self.headings = []
         self.canonical = None
         self.description = False
+        self.metadata = {}
+        self.title = []
+        self.title_count = 0
+        self.in_title = False
+        self.jsonld = []
+        self.jsonld_parts = None
         self.language = None
         self.color_scheme = None
         self.theme_bootstrap = None
@@ -44,6 +59,19 @@ class Document(HTMLParser):
             self.headings.append(int(tag[1]))
         if tag == "meta" and attrs.get("name") == "description":
             self.description = bool(attrs.get("content"))
+        if tag == "meta" and (key := attrs.get("property") or attrs.get("name")):
+            if key != "theme-color":
+                if key in self.metadata:
+                    self.errors.append(f"duplicate metadata: {key}")
+                self.metadata[key] = attrs.get("content") or ""
+        if tag == "title":
+            self.title_count += 1
+            self.in_title = True
+        is_jsonld = tag == "script" and attrs.get("type") == "application/ld+json"
+        if is_jsonld:
+            self.jsonld_parts = []
+            if attrs.get("src"):
+                self.errors.append("JSON-LD must be embedded non-executable data")
         if tag == "meta" and attrs.get("name") == "color-scheme":
             self.color_scheme = attrs.get("content")
         if tag == "script" and attrs.get("src") == "./assets/theme.js":
@@ -59,10 +87,10 @@ class Document(HTMLParser):
                 self.references.append(attrs[attribute])
         if tag in ("script", "link") and (
             tag == "script" or attrs.get("rel") in ("stylesheet", "preload", "icon")
-        ):
+        ) and not is_jsonld:
             self.local_resources.append(attrs.get("src") or attrs.get("href"))
-        if tag == "script" and not attrs.get("src"):
-            self.errors.append("inline scripts are not part of the static-site contract")
+        if tag == "script" and not attrs.get("src") and not is_jsonld:
+            self.errors.append("inline executable scripts are not part of the static-site contract")
         if tag == "a" and attrs.get("target") == "_blank":
             if "noopener" not in attrs.get("rel", "").split():
                 self.errors.append("new-tab links must declare noopener")
@@ -78,6 +106,145 @@ class Document(HTMLParser):
     def handle_endtag(self, tag):
         if tag == "select":
             self.in_theme_select = False
+        if tag == "title":
+            self.in_title = False
+        if tag == "script" and self.jsonld_parts is not None:
+            try:
+                self.jsonld.append(json.loads("".join(self.jsonld_parts)))
+            except json.JSONDecodeError as error:
+                self.errors.append(f"invalid JSON-LD: {error.msg}")
+            self.jsonld_parts = None
+
+    def handle_data(self, data):
+        if self.in_title:
+            self.title.append(data)
+        if self.jsonld_parts is not None:
+            self.jsonld_parts.append(data)
+
+
+def social_fingerprint(site):
+    digest = hashlib.sha256()
+    inputs = [site / "assets/social-preview.svg"]
+    inputs.extend(site / "assets/fonts" / name for name in SOCIAL_FONTS)
+    for path in inputs:
+        data = path.read_bytes()
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+    return digest.hexdigest()
+
+
+def validate_seo(document, site, package, errors):
+    title = "".join(document.title).strip()
+    description = document.metadata.get("description", "")
+    if document.title_count != 1 or not all(word in title for word in ("KQL", "Apache DataFusion", "datafusion-kql")):
+        errors.append("the single search title must identify native KQL, Apache DataFusion and the project")
+    for key, expected in {
+        "og:type": "website",
+        "og:site_name": "datafusion-kql",
+        "og:locale": "en_US",
+        "og:title": title,
+        "twitter:title": title,
+        "og:description": description,
+        "twitter:description": description,
+        "og:url": CANONICAL,
+        "og:image": SOCIAL_IMAGE,
+        "twitter:image": SOCIAL_IMAGE,
+        "og:image:type": "image/png",
+        "og:image:width": "1200",
+        "og:image:height": "630",
+        "twitter:card": "summary_large_image",
+    }.items():
+        if not expected or document.metadata.get(key) != expected:
+            errors.append(f"missing or inconsistent SEO metadata: {key}")
+    if not document.metadata.get("og:image:alt") or (
+        document.metadata.get("og:image:alt") != document.metadata.get("twitter:image:alt")
+    ):
+        errors.append("social preview alt descriptions must be present and consistent")
+    robots = {value.strip().lower() for value in document.metadata.get("robots", "").split(",")}
+    if not {"index", "follow", "max-image-preview:large"}.issubset(robots) or (
+        robots & {"noindex", "nofollow", "none", "noimageindex"}
+    ):
+        errors.append("the page must permit indexing, links and large image previews")
+    if "./sitemap.xml" not in document.references:
+        errors.append("the sitemap must be discoverable from the homepage")
+    if package.get("homepage") != CANONICAL:
+        errors.append("the package homepage must point to the canonical project site")
+
+    image_path = site / "assets/social-preview.png"
+    if not image_path.is_file():
+        errors.append("the social preview must be a self-hosted PNG")
+    else:
+        image = image_path.read_bytes()
+        if len(image) > 300 * 1024:
+            errors.append("the social preview exceeds the 300 KiB image budget")
+        if len(image) < 24 or image[:8] != b"\x89PNG\r\n\x1a\n" or image[12:16] != b"IHDR":
+            errors.append("the social preview must be a valid PNG")
+        elif struct.unpack(">II", image[16:24]) != (1200, 630):
+            errors.append("the social preview must be exactly 1200x630")
+        try:
+            fingerprint = social_fingerprint(site)
+        except FileNotFoundError:
+            errors.append("the social preview source or local fonts are missing")
+        else:
+            if b"SourceFingerprint\0" + fingerprint.encode("ascii") not in image:
+                errors.append("the social preview must be regenerated from its current SVG and fonts")
+
+    if len(document.jsonld) != 1 or not isinstance(document.jsonld[0], dict):
+        errors.append("the page must have one JSON-LD graph")
+        return
+    data = document.jsonld[0]
+    graph = data.get("@graph")
+    if data.get("@context") != "https://schema.org" or not isinstance(graph, list):
+        errors.append("JSON-LD must use the Schema.org graph context")
+        return
+    if len(graph) != 3 or any(not isinstance(node, dict) for node in graph):
+        errors.append("JSON-LD must describe WebSite, WebPage and SoftwareSourceCode")
+        return
+    nodes = {node.get("@type"): node for node in graph if isinstance(node.get("@type"), str)}
+    if nodes.keys() != {"WebSite", "WebPage", "SoftwareSourceCode"}:
+        errors.append("JSON-LD must describe the library, not an unsupported software-app rich result")
+        return
+    website, page, software = (nodes[name] for name in ("WebSite", "WebPage", "SoftwareSourceCode"))
+    for node, fragment in ((website, "website"), (page, "webpage"), (software, "software")):
+        if node.get("@id") != CANONICAL + "#" + fragment or node.get("url") != CANONICAL:
+            errors.append("JSON-LD identities and URLs must use the canonical project URL")
+    if website.get("name") != "datafusion-kql" or website.get("inLanguage") != document.language:
+        errors.append("WebSite metadata must match the project and page language")
+    if website.get("publisher") != {
+        "@type": "Organization", "name": "vertex-shift", "url": "https://github.com/vertex-shift"
+    }:
+        errors.append("the structured-data publisher must match the visible independent project")
+    if page.get("name") != title or page.get("description") != description or page.get("inLanguage") != document.language:
+        errors.append("WebPage metadata must match the visible search metadata")
+    if page.get("isPartOf") != {"@id": website.get("@id")} or (
+        page.get("mainEntity") != {"@id": software.get("@id")}
+    ) or software.get("mainEntityOfPage") != {"@id": page.get("@id")}:
+        errors.append("JSON-LD graph relationships must refer to the declared project nodes")
+    if page.get("primaryImageOfPage") != {
+        "@type": "ImageObject", "url": SOCIAL_IMAGE, "width": 1200, "height": 630
+    } or software.get("image") != SOCIAL_IMAGE:
+        errors.append("JSON-LD image metadata must match the social preview")
+    for key, expected in {
+        "name": package["name"],
+        "description": description,
+        "codeRepository": package["repository"],
+        "programmingLanguage": "Rust",
+        "runtimePlatform": "Apache DataFusion",
+        "version": package["version"],
+        "license": package["repository"] + "/blob/main/LICENSE",
+    }.items():
+        if software.get(key) != expected:
+            errors.append(f"SoftwareSourceCode metadata must match the source package: {key}")
+
+    pending = [data]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if value.keys() & {"aggregateRating", "review", "offers", "potentialAction", "downloadUrl", "installUrl"}:
+                errors.append("structured data cannot invent ratings, offers, search or publication features")
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
 
 
 def validate(root=ROOT):
@@ -137,7 +304,9 @@ def validate(root=ROOT):
             errors.append(f"missing local CSS asset: {reference}")
     if "prefers-reduced-motion" not in css:
         errors.append("the stylesheet must honor reduced motion")
-    version = tomllib.loads((root / "Cargo.toml").read_text())["package"]["version"]
+    package = tomllib.loads((root / "Cargo.toml").read_text())["package"]
+    validate_seo(document, site, package, errors)
+    version = package["version"]
     series = ".".join(version.split(".")[:2])
     if f"data-project-version>{series}</span>" not in html:
         errors.append("displayed frontend version must match Cargo.toml")

@@ -24,6 +24,7 @@ jobs:
       - run: python3 -m unittest discover -s .github/scripts -p 'test_site.py'
       - run: node --check site/assets/site.js
       - run: node --check site/assets/theme.js
+      - run: node --check .github/scripts/render_social_preview.cjs
       - run: node --test .github/scripts/test_site_theme.cjs
 
   deploy:
