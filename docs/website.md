@@ -17,6 +17,9 @@ pinned GitHub Pages actions, the main-only `github-pages` environment, and
 job-scoped `pages: write`/`id-token: write` permissions. Only `site/` is uploaded;
 repository source, development design files and review screenshots are not
 part of the Pages artifact. Changes go through protected-main pull requests.
+The current Pages/checkout actions use Node 24 on GitHub-hosted runners.
+`upload-pages-artifact` explicitly excludes hidden files; its source `.nojekyll`
+marker is not a public runtime asset and no Jekyll build is involved.
 
 ## Local preview and validation
 

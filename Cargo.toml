@@ -52,13 +52,13 @@ regex = "1"
 rustfft = "6.4"
 serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "sync"] }
+tokio = { version = "1.54.1", features = ["rt", "sync"] }
 
 [dev-dependencies]
-criterion = { version = "0.7", features = ["async_tokio"] }
+criterion = { version = "0.8.2", features = ["async_tokio"] }
 datafusion = { version = "55.2.0", default-features = false, features = ["sql"] }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time"] }
 
 [[bench]]
 name = "kql"

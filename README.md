@@ -311,6 +311,23 @@ Building the decimal128 runtime requires a C compiler for the bundled
 than a fixed-scale Arrow decimal; use KQL `tostring` for display and see the
 compatibility contract before migrating persisted 0.6 schemas.
 
+### Dependency maintenance
+
+`Cargo.lock` records the tested dependency graph. Refresh compatible transitive
+packages with `cargo update`; review major-version changes in `Cargo.toml`
+separately, then run the Rust 1.94/stable checks, minimal-feature regressions,
+examples, benchmarks' compile checks and package verification. Keep DataFusion
+and its aggregate/Arrow dependencies on a coherent upstream-supported release.
+An upstream constraint can legitimately retain an older transitive major.
+
+CI actions use immutable commit pins for their current stable releases, including
+the opt-in reference workflow. The current checkout, artifact and Pages actions
+use Node 24 and require an up-to-date GitHub Actions runner; the workflows use
+GitHub-hosted runners. Refresh the action version comments together with the pins.
+Keep captured benchmark versions and reference-engine provenance unchanged:
+dependency maintenance is not a new benchmark or Kusto conformance capture.
+The reference emulator's image remains an explicit, license-gated oracle pin.
+
 ## Crate releases
 
 CI validates Rust 1.94/stable and builds a verified `.crate` archive with
