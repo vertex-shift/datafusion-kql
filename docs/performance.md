@@ -47,6 +47,7 @@ capacity estimates.
 | `workloads/series_outliers` | Score 1,024 native 128-point arrays; assert signed anomalies and every retained score position |
 | `workloads/series_fit_2lines` | Fit two trends to 1,024 native 128-point arrays; assert split index, slopes, fit quality, point counts and one shared transform |
 | `workloads/series_fit_2lines_dynamic` | The same split search through a correlated dynamic bag and native reduction |
+| `workloads/series_fit_poly` | Fit 1,024 native 128-point quadratic arrays with explicit x coordinates; assert all coefficients, fit quality, last points, exact output count and one shared transform |
 | `workloads/mv_apply_top` | Parse 1,000 payloads and run native per-row top-two/aggregation subqueries |
 | `workloads/bag_unpack` | Parse/unpack 100,000 JSON payloads with a declared schema and aggregate array lengths by service |
 | `workloads/json_fields` | Equivalent service/latency extraction through ordinary property access over the same payloads |
@@ -94,6 +95,42 @@ Each execution iteration uses DataFusion's `reset_plan_states` to create fresh
 operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
+
+## Measured 0.15 polynomial regression
+
+Measured on 2026-11-05 on the Apple M4/arm64 host, Rust 1.95.0,
+DataFusion 55.2.0, nalgebra 0.35.0, the optimized bench profile and four target
+partitions:
+
+```bash
+cargo bench --locked --bench kql -j 2 -- \
+  'workloads/series_fit_poly' \
+  --warm-up-time 0.5 --measurement-time 1 --sample-size 10
+```
+
+| Workload | Criterion estimate | 95% confidence interval |
+| --- | --- | --- |
+| Quadratic fits, 1,024 native 128-point arrays | 43.164 ms | 42.931-43.418 ms |
+
+This is 131,072 dependent-variable input points, about 3.04 million points/second.
+Each signal follows `0.5*x^2 - 2*x + 3` with x from 1 to 128. Preflight checks
+all three descending-power coefficients, R-squared, the final fitted value,
+every output point and a single shared native multi-output function. The
+existing outlier/two-line preflight checks now execute independently of the
+FFT-round-trip branch, so those numerical checks are not accidentally skipped.
+
+The timed region includes Arrow-to-dynamic adaptation of x/y, streaming QR,
+reduced SVD, coefficient conversion, fitted-array construction, native aggregate
+reduction and operator-state reset. Source construction, physical planning and
+compilation are excluded. Both axes and observations are normalized internally;
+the fixture is full rank and does not measure a second original-basis solve.
+
+No other local compilation ran during measurement. Criterion reported one
+high-mild outlier among ten samples and extended collection to about 1.24 seconds.
+This short repeated-signal sample is not a degree-scaling study, a comparison
+with Kusto, a peak-throughput guarantee or a host-memory bound. Independent
+full-system pseudoinverse/residual tests, actual captured Kusto cases and the
+exact maximum-point API boundary establish correctness separately.
 
 ## Measured 0.14 outlier scoring and segmented trends
 

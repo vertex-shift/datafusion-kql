@@ -22,6 +22,7 @@ pub(crate) enum Multi {
     Stats,
     FitLine,
     FitTwoLines,
+    FitPoly,
     Fft,
     Ifft,
 }
@@ -32,6 +33,7 @@ impl Multi {
             "series_stats" => Self::Stats,
             "series_fit_line" => Self::FitLine,
             "series_fit_2lines" => Self::FitTwoLines,
+            "series_fit_poly" => Self::FitPoly,
             "series_fft" => Self::Fft,
             "series_ifft" => Self::Ifft,
             _ => return None,
@@ -68,6 +70,13 @@ impl Multi {
                 "left_variance",
                 "left_rvariance",
             ],
+            Self::FitPoly => &[
+                "rsquare",
+                "coefficients",
+                "variance",
+                "rvariance",
+                "poly_fit",
+            ],
             Self::Fft | Self::Ifft => &["real", "imag"],
         }
     }
@@ -78,7 +87,9 @@ impl Multi {
             .map(|name| {
                 let ty = match *name {
                     "min_idx" | "max_idx" | "split_idx" => DataType::Int64,
-                    "line_fit" | "real" | "imag" => dynamic::data_type(),
+                    "line_fit" | "real" | "imag" | "coefficients" | "poly_fit" => {
+                        dynamic::data_type()
+                    }
                     _ => DataType::Float64,
                 };
                 Arc::new(Field::new(*name, ty, true))
@@ -94,10 +105,10 @@ pub(crate) fn plan(
     schema: &DFSchema,
     span: Span,
 ) -> crate::Result<Expr> {
-    let valid = if matches!(op, Multi::FitLine | Multi::FitTwoLines) {
-        args.len() == 1
-    } else {
-        (1..=2).contains(&args.len())
+    let valid = match op {
+        Multi::FitLine | Multi::FitTwoLines => args.len() == 1,
+        Multi::FitPoly => (1..=3).contains(&args.len()),
+        _ => (1..=2).contains(&args.len()),
     };
     if !valid {
         return Err(crate::Error::syntax(
@@ -108,7 +119,18 @@ pub(crate) fn plan(
     let mut values = Vec::with_capacity(args.len());
     for (index, argument) in args.iter().enumerate() {
         let value = expressions.scalar(argument, schema)?;
-        if op == Multi::Stats && index == 1 {
+        if op == Multi::FitPoly && index == 2 {
+            if !value.get_type(schema)?.is_integer() {
+                return Err(crate::Error::syntax(
+                    "series_fit_poly degree must be a constant integer",
+                    argument.span,
+                ));
+            }
+            let value = expressions
+                .constant(value, argument.span)?
+                .cast_to(&DataType::Int64)?;
+            values.push(datafusion::prelude::lit(value));
+        } else if op == Multi::Stats && index == 1 {
             if value.get_type(schema)? != DataType::Boolean {
                 return Err(crate::Error::syntax(
                     "series_stats ignore_nonfinite must be a constant bool",
@@ -139,7 +161,9 @@ pub(crate) fn plan(
     }
     let types = (0..values.len())
         .map(|index| {
-            if op == Multi::Stats && index == 1 {
+            if op == Multi::FitPoly && index == 2 {
+                DataType::Int64
+            } else if op == Multi::Stats && index == 1 {
                 DataType::Boolean
             } else {
                 dynamic::data_type()
@@ -339,6 +363,7 @@ impl ScalarUDFImpl for Function {
             Multi::Stats => "__kql_series_stats_columns",
             Multi::FitLine => "__kql_series_fit_line_columns",
             Multi::FitTwoLines => "__kql_series_fit_2lines_columns",
+            Multi::FitPoly => "__kql_series_fit_poly_columns",
             Multi::Fft => "__kql_series_fft_columns",
             Multi::Ifft => "__kql_series_ifft_columns",
         }
@@ -437,23 +462,42 @@ impl ScalarUDFImpl for Function {
                 )?);
             } else {
                 let series = dynamic::node_at(&arrays[0], at(0, row))?.json()?;
-                let mut values = vec![series];
-                if arrays.len() == 2 {
-                    let flag = ScalarValue::try_from_array(&arrays[1], at(1, row))?;
-                    let ScalarValue::Boolean(Some(flag)) = flag else {
-                        return Err(error("series_stats ignore_nonfinite cannot be null"));
+                let result = if self.op == Multi::FitPoly {
+                    let coordinates = if arrays.len() >= 2 {
+                        Some(dynamic::node_at(&arrays[1], at(1, row))?.json()?)
+                    } else {
+                        None
                     };
-                    values.push(flag.into());
-                }
-                let result = series_functions::evaluate(
-                    match self.op {
-                        Multi::Stats => Op::Stats,
-                        Multi::FitLine => Op::FitLine,
-                        Multi::FitTwoLines => Op::FitTwoLines,
-                        _ => unreachable!("Fourier transforms use the numeric path"),
-                    },
-                    &values,
-                )?;
+                    let degree = if arrays.len() == 3 {
+                        let ScalarValue::Int64(degree) =
+                            ScalarValue::try_from_array(&arrays[2], at(2, row))?
+                        else {
+                            return Err(error("series_fit_poly degree must be a constant long"));
+                        };
+                        degree.unwrap_or(0)
+                    } else {
+                        1
+                    };
+                    crate::series_polynomial::fit(&series, coordinates.as_ref(), degree)?
+                } else {
+                    let mut values = vec![series];
+                    if arrays.len() == 2 {
+                        let flag = ScalarValue::try_from_array(&arrays[1], at(1, row))?;
+                        let ScalarValue::Boolean(Some(flag)) = flag else {
+                            return Err(error("series_stats ignore_nonfinite cannot be null"));
+                        };
+                        values.push(flag.into());
+                    }
+                    series_functions::evaluate(
+                        match self.op {
+                            Multi::Stats => Op::Stats,
+                            Multi::FitLine => Op::FitLine,
+                            Multi::FitTwoLines => Op::FitTwoLines,
+                            _ => unreachable!("Fourier transforms use the numeric path"),
+                        },
+                        &values,
+                    )?
+                };
                 let Some(result) = result.as_object() else {
                     output.push(nulls(&fields)?);
                     continue;

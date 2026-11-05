@@ -12,7 +12,7 @@ dependency/import spelling with:
 ```toml
 [dependencies]
 datafusion = "55.2"
-datafusion-kql = { package = "datafusion-kql-native", version = "0.14" }
+datafusion-kql = { package = "datafusion-kql-native", version = "0.15" }
 ```
 
 ```rust
@@ -92,8 +92,8 @@ not provide registry publishing permission.
 
    ```bash
    git fetch origin
-   git tag v0.14.0 origin/main
-   git push origin v0.14.0
+   git tag v0.15.0 origin/main
+   git push origin v0.15.0
    ```
 
    Pushing this first tag also schedules the normal OIDC release. **Cancel
@@ -101,12 +101,12 @@ not provide registry publishing permission.
    than approving it: trusted publishing is not configured yet, and release
    concurrency would otherwise queue the manual run behind it.
 
-4. Run **Publish crate** manually from `main`, with `tag=v0.14.0`,
+4. Run **Publish crate** manually from `main`, with `tag=v0.15.0`,
    `dry_run=false`, and `bootstrap=true`:
 
    ```bash
    gh workflow run release.yml --repo vertex-shift/datafusion-kql --ref main \
-     -f tag=v0.14.0 -F dry_run=false -F bootstrap=true
+     -f tag=v0.15.0 -F dry_run=false -F bootstrap=true
    ```
 
 5. Inspect CI and approve the `crates-io` deployment. The bootstrap path
@@ -143,8 +143,8 @@ commit, for example:
 
 ```bash
 git fetch origin
-git tag v0.14.1 origin/main
-git push origin v0.14.1
+git tag v0.15.1 origin/main
+git push origin v0.15.1
 ```
 
 The tag workflow runs all checks and waits for environment approval, then uses
@@ -167,7 +167,7 @@ merged version tag without authenticating or requiring deployment approval:
 
 ```bash
 gh workflow run release.yml --repo vertex-shift/datafusion-kql --ref main \
-  -f tag=v0.14.0 -F dry_run=true
+  -f tag=v0.15.0 -F dry_run=true
 ```
 
 The archive intentionally includes source, tests, examples, benches, public

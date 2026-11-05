@@ -14,13 +14,13 @@ fn real(value: f64) -> Result<Json> {
 }
 
 #[derive(Clone, Copy)]
-struct Normalization {
+pub(crate) struct Normalization {
     origin: f64,
     scale: f64,
 }
 
 impl Normalization {
-    fn new(values: &[f64]) -> Self {
+    pub(crate) fn new(values: &[f64]) -> Self {
         let origin = values[0];
         let delta = values
             .iter()
@@ -37,7 +37,7 @@ impl Normalization {
         }
     }
 
-    fn normalize(self, value: f64) -> f64 {
+    pub(crate) fn normalize(self, value: f64) -> f64 {
         let delta = value - self.origin;
         if delta.is_finite() {
             delta / self.scale
@@ -46,12 +46,16 @@ impl Normalization {
         }
     }
 
-    fn restore(self, value: f64) -> f64 {
+    pub(crate) fn restore(self, value: f64) -> f64 {
         value.mul_add(self.scale, self.origin)
     }
 
-    fn variance(self, sum_squares: f64, count: usize) -> f64 {
+    pub(crate) fn variance(self, sum_squares: f64, count: usize) -> f64 {
         sum_squares / (count - 1) as f64 * self.scale * self.scale
+    }
+
+    pub(crate) fn scale(self) -> f64 {
+        self.scale
     }
 }
 

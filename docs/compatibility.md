@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.14 implements the typed tabular and dynamic subset below. Keywords, function
+0.15 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -809,7 +809,7 @@ centering, and IIR denominator rules follow KQL conventions.
 
 Generic FIR/IIR filtering has a per-row budget of 67,108,864 multiply-add
 operations and errors beyond it. Seasonal decomposition, period detection,
-forecasting, polynomial fitting, and other multi-output
+forecasting, and other multi-output
 variants remain future work. Numeric
 JSON serialization of nonfinite values retains the broader dynamic
 representation limitations described below.
@@ -872,7 +872,7 @@ Tuple field types/order are grounded in Microsoft's
 [public Kusto signatures](https://github.com/microsoft/Kusto-Query-Language/blob/328e05d10d6c73654e416675fc75af7ed0e05ffd/src/Kusto.Language/Functions.cs).
 Four separately labeled source/oracle fixtures and independent complex-DFT,
 round-trip and API-boundary regressions cover this milestone. They are **not**
-new live Kusto captures: the current query-tool route was unavailable and the
+new live Kusto captures at that milestone: the then-current query-tool route was unavailable and the
 existing Azure CLI reference credential had expired. The 68 captured reference
 fixtures remain separate; no emulator terms or new Azure resources are needed
 for these local tests.
@@ -950,7 +950,67 @@ Text, nesting and dynamic-node budgets also apply. These bounded buffers are
 not a total process-memory claim or a separate host memory allocator.
 Independent exhaustive-regression, normalization, signed-score, original-index,
 typed-schema, shared volatile-input and exact API-boundary tests cover this
-slice; the captured-engine baseline remains 68 fixtures.
+slice; that milestone did not add captured-engine fixtures.
+
+### Polynomial regression
+
+`series_fit_poly(y[, x[, degree]])` returns five typed columns, in
+`rsquare, coefficients, variance, rvariance, poly_fit` order. Metrics are real;
+coefficients and fitted values are dynamic real arrays. Coefficients are ordered
+from the highest power to the constant. Omitted x uses **one-based** coordinates
+`[1, 2, ..., length(y)]`; supplying an explicit null x does not select that
+default. Irregular finite numeric coordinates, native Arrow list-family inputs
+and implicit/explicit output-name lists use the same expression-local batch
+boundary as other multi-output series calls.
+
+The degree must be a constant integer, including a lexical constant or typed
+query parameter. Omission selects degree 1, an explicit null selects degree 0,
+and negative degrees select 1. These coercions, constant-series R-squared of
+zero, descending coefficient order and sample-variance denominators were checked
+against the public help cluster. A single observation has zero variance and
+residual variance. Empty/non-array inputs, missing/nonnumeric/nonfinite points,
+explicit null coordinates and mismatched x/y lengths yield all-null outputs.
+Insufficient or duplicate coordinates do not automatically discard the fit:
+the solver provides a minimum-norm least-squares solution in the original
+monomial coefficient basis. There is no separate bag-valued
+`series_fit_poly_dynamic` service alias.
+
+The full-rank path normalizes both coordinates and observations, accumulates
+Givens QR rows in a Chebyshev basis, then solves a small reduced system with
+nalgebra's pure-Rust SVD. It retains `O(n + p^2)` numeric storage rather than an
+`n * p` Vandermonde matrix, for n points and p coefficients. Deficient systems
+are reduced again in the original power basis to preserve the minimum-norm
+coefficient meaning. The numerical rank cutoff is the largest singular value
+times `max(n,p) * f64::EPSILON`. The SVD has a finite `64 * p^2` iteration limit;
+nonconvergence is an explicit execution error.
+
+The preflight fitting-work estimate `(2*n + 64*p) * p^2` is limited to
+67,108,864 units, with a 128 MiB numeric working-buffer estimate and the shared
+1,048,576-point limit. Work/size overflow is rejected before solver allocation.
+These estimates exclude dynamic conversion/serialization and are not a total
+process-memory limit or a host-pool reservation; normal text/node budgets still
+apply. Fits do not spill. Configure the embedding runtime and query timeouts.
+
+**Numerical boundary:** processing uses binary64, not decimal128 or integer-exact
+arithmetic. Normalization and stable basis reduction can improve high-degree or
+large-origin fits but do not reproduce the service's conditioning thresholds or
+every last coefficient bit. Converting a well-conditioned normalized curve back
+to original-coordinate power coefficients can itself lose precision. Prefer
+normalized x for high-degree fitting and use `poly_fit` for the fitted points.
+Unrepresentable coefficients/metrics and overflowing original powers in a
+rank-deficient solve error explicitly; they are not replaced with plausible
+zeros or silently downgraded polynomials. Row-varying degree is unsupported;
+the reference service returned a partial execution error for that form.
+
+Eight exact string-projection fixtures were captured through Azure MCP from
+`help.kusto.windows.net/Samples` on 2026-11-05, including a fifth-degree curve,
+uneven noisy coordinates, underdetermined/duplicate fits and null/degree edges.
+Numeric predicates use explicit binary64 tolerances, not exact equality of
+independently computed floating-point coefficients. Independent residual
+orthogonality, known-polynomial and original-basis minimum-norm oracles, shared
+volatile-input checks and exact native Arrow boundary tests supplement those
+captures. The total captured baseline is now 76 fixtures; the eight older
+source/oracle fixtures remain labeled separately.
 
 ## Aggregations
 
@@ -1197,10 +1257,11 @@ or complete certification of all HLL overloads and empty-state representation.
 
 ## Opt-in Kusto reference checks
 
-The conformance suite in `tests/conformance.rs` runs 68 synthetic inline-data
+The conformance suite in `tests/conformance.rs` runs 76 synthetic inline-data
 fixtures locally by default, comparing exact column names and row multisets
 against results captured from the public Kusto help cluster (`Samples`) through
-Azure MCP on 2026-10-25 (49 fixtures) and 2026-10-26 (19 additional fixtures).
+Azure MCP on 2026-10-25 (49 fixtures), 2026-10-26 (19 additional fixtures), and
+2026-11-05 (eight polynomial fixtures).
 It covers counts/nulls, expansion, per-row/per-key
 queries, scans, hierarchical tops, schema-declared plugins, scalar subqueries,
 ranges, GUIDs, parsing, decimal128 arithmetic/conversion/special values, rich nested tags,
@@ -1228,7 +1289,7 @@ bounds and Unicode offsets now have actual captured results.
 Eight additional source/documentation and mathematical-oracle fixtures cover
 FFT/IFFT, multi-column statistics/line fitting, outlier scores and segmented
 trends. They run locally and in the
-opt-in reference suite but are not counted among the 68 captured results.
+opt-in reference suite but are not counted among the 76 captured results.
 
 To compare the same fixtures against an explicitly configured reference:
 

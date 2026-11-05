@@ -40,7 +40,7 @@ methodology and contribution workflows are available in the public repository.
 
 ## Capabilities and Constraints
 
-- Version 0.14 targets DataFusion 55.2.x and Rust 1.94+.
+- Version 0.15 targets DataFusion 55.2.x and Rust 1.94+.
 - Typed pipelines, dynamic values, grouped/stateful operators, windows, series
   analytics, bounded sketches and native spill-aware snapshots are implemented.
 - Full KQL and Kusto-service parity are not complete.
@@ -63,8 +63,8 @@ There is no established logo or visual identity to preserve.
 ## Evidence on Hand
 
 README.md, docs/compatibility.md, docs/architecture.md and docs/performance.md
-provide product truth. Thirteen Rust examples and the tests provide synthetic
-query demonstrations. There are 68 captured Kusto fixtures and eight separately
+provide product truth. Fourteen Rust examples and the tests provide synthetic
+query demonstrations. There are 76 captured Kusto fixtures and eight separately
 labeled source/oracle fixtures. Benchmarks are local, hardware-specific samples.
 No customer testimonials, usage statistics or universal performance guarantees
 are available.

@@ -67,6 +67,7 @@ const FFT_ROUNDTRIP_QUERY: &str = "SpectralEvents | extend (r,i)=series_fft(Sign
 const OUTLIER_QUERY: &str = "AnalyticsEvents | extend Scores=series_outliers(Samples,'tukey') | summarize Good=countif(toreal(Scores[0])< -1.5 and toreal(Scores[127])>1.5),Points=sum(array_length(Scores))";
 const TWO_LINE_QUERY: &str = "AnalyticsEvents | extend (R,Split,V,RV,F,RR,RS,RB,RV0,RRV,LR,LS,LB)=series_fit_2lines(Trend) | summarize Good=countif(Split==64 and R>0.99999999 and abs(LS-2.0)<0.00000001 and abs(RS+1.0)<0.00000001),Points=sum(array_length(F))";
 const TWO_LINE_DYNAMIC_QUERY: &str = "AnalyticsEvents | extend Fit=series_fit_2lines_dynamic(Trend) | summarize Good=countif(tolong(Fit.split_idx)==64 and toreal(Fit.rsquare)>0.99999999 and abs(toreal(Fit.left_slope)-2.0)<0.00000001 and abs(toreal(Fit.right_slope)+1.0)<0.00000001),Points=sum(array_length(Fit.line_fit))";
+const POLYNOMIAL_QUERY: &str = "AnalyticsEvents | extend (R,C,V,RV,F)=series_fit_poly(Polynomial,Axis,2) | summarize Good=countif(R>0.99999999 and abs(toreal(C[0])-0.5)<0.00000001 and abs(toreal(C[1])+2.0)<0.00000001 and abs(toreal(C[2])-3.0)<0.00000001 and abs(toreal(F[127])-7939.0)<0.00000001),Points=sum(array_length(F))";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -426,6 +427,12 @@ fn analytics_context() -> SessionContext {
             })
         })
         .collect::<Vec<_>>();
+    let axis = (1..=SIGNAL_LEN)
+        .map(|index| Some(index as f64))
+        .collect::<Vec<_>>();
+    let polynomial = (1..=SIGNAL_LEN)
+        .map(|index| Some((0.5 * index as f64 - 2.0) * index as f64 + 3.0))
+        .collect::<Vec<_>>();
     let batch = RecordBatch::try_from_iter(vec![
         (
             "Samples",
@@ -437,6 +444,18 @@ fn analytics_context() -> SessionContext {
             "Trend",
             Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
                 (0..SIGNAL_ROWS).map(|_| Some(trend.clone())),
+            )) as _,
+        ),
+        (
+            "Axis",
+            Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
+                (0..SIGNAL_ROWS).map(|_| Some(axis.clone())),
+            )) as _,
+        ),
+        (
+            "Polynomial",
+            Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
+                (0..SIGNAL_ROWS).map(|_| Some(polynomial.clone())),
             )) as _,
         ),
     ])
@@ -588,6 +607,13 @@ fn benchmarks(c: &mut Criterion) {
         (
             "series_fit_2lines_dynamic",
             TWO_LINE_DYNAMIC_QUERY,
+            &analytics,
+            SIGNAL_ROWS * SIGNAL_LEN,
+            1,
+        ),
+        (
+            "series_fit_poly",
+            POLYNOMIAL_QUERY,
             &analytics,
             SIGNAL_ROWS * SIGNAL_LEN,
             1,
@@ -755,24 +781,27 @@ fn benchmarks(c: &mut Criterion) {
                     datafusion::common::ScalarValue::Int64(Some(expected))
                 );
             }
-            if matches!(
-                name,
-                "series_outliers" | "series_fit_2lines" | "series_fit_2lines_dynamic"
-            ) {
-                for (index, expected) in [
-                    (0, SIGNAL_ROWS as i64),
-                    (1, (SIGNAL_ROWS * SIGNAL_LEN) as i64),
-                ] {
-                    assert_eq!(
-                        datafusion::common::ScalarValue::try_from_array(result[0].column(index), 0)
-                            .unwrap(),
-                        datafusion::common::ScalarValue::Int64(Some(expected)),
-                        "{name} must preserve every anomaly, fit, and output point",
-                    );
-                }
-                if name == "series_fit_2lines" {
-                    assert_eq!(native.matches("__kql_series_fit_2lines_columns").count(), 1);
-                }
+        }
+        if matches!(
+            name,
+            "series_outliers"
+                | "series_fit_2lines"
+                | "series_fit_2lines_dynamic"
+                | "series_fit_poly"
+        ) {
+            for (index, expected) in [
+                (0, SIGNAL_ROWS as i64),
+                (1, (SIGNAL_ROWS * SIGNAL_LEN) as i64),
+            ] {
+                assert_eq!(
+                    datafusion::common::ScalarValue::try_from_array(result[0].column(index), 0)
+                        .unwrap(),
+                    datafusion::common::ScalarValue::Int64(Some(expected)),
+                    "{name} must preserve every anomaly, fit, and output point",
+                );
+            }
+            if matches!(name, "series_fit_2lines" | "series_fit_poly") {
+                assert_eq!(native.matches(&format!("__kql_{name}_columns")).count(), 1);
             }
         }
         if matches!(

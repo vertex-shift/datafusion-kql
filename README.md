@@ -9,7 +9,7 @@ No DataFusion fork, SQL translation, or separate execution engine.
 [Compatibility contract](docs/compatibility.md) |
 [Website development and review](docs/website.md)
 
-**Status:** version 0.14 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.15 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -31,6 +31,7 @@ cargo run --example percentile_sketches
 cargo run --example materialized_snapshots
 cargo run --example spectral_series
 cargo run --example series_trends
+cargo run --example polynomial_series
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -47,6 +48,8 @@ bounded memory pool and native temporary spill storage.
 and regression results with KQL output-name lists.
 `series_trends` adds signed Tukey outlier scores and a correlated two-segment
 trend fit, including native multi-column results.
+`polynomial_series` fits irregularly spaced samples and a fifth-degree curve,
+returning coefficients, fit quality and fitted values through one native call.
 
 ## Extend an existing DataFusion session
 
@@ -161,6 +164,10 @@ through native struct Unnest, not once per returned field.
 `series_outliers` supports Tukey/custom-Tukey scoring, while dynamic and typed
 `series_fit_2lines` results find a trend break with a linear-time split search.
 Regression kernels normalize coordinates to avoid unnecessary overflow.
+`series_fit_poly` adds bounded polynomial least squares with optional irregular
+coordinates, descending-power coefficients and typed correlated outputs.
+Streaming QR and a reduced SVD avoid normal equations and an input-sized
+Vandermonde matrix; rank-deficient fits use original-coordinate minimum norms.
 Calendar arithmetic, period boundaries, Unix conversions, constructors, and
 compiled KQL date/time formatting are supported. Both tabular and scalar ranges
 handle numeric, datetime, and timespan values.
@@ -274,7 +281,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo check --lib --no-default-features
-cargo test --no-default-features --test materialize --test grouped --test scan --test series_multi --test series_analytics
+cargo test --no-default-features --test materialize --test grouped --test scan --test series_multi --test series_analytics --test series_polynomial
 ```
 
 Tests cover parser diagnostics/limits, KQL-specific semantics, SQL result parity,
@@ -286,7 +293,7 @@ partial-state/filter/merge equivalence, malformed sketches, and host memory
 accounting. Large-population and memory tests remain local algorithm checks;
 the small-set live reference fixtures are recorded separately.
 
-`tests/conformance.rs` compares 68 synthetic fixtures with captured public Kusto
+`tests/conformance.rs` compares 76 synthetic fixtures with captured public Kusto
 help-cluster results by default, and provides an opt-in live suite for a
 configured emulator or ADX test database. The formerly ignored decimal
 precision and JSON conversion cases are now ordinary regressions. Seven live
@@ -303,6 +310,8 @@ round trips, exact API array limits and shared volatile-input evaluation.
 Trend checks compare against exhaustive independent regressions; outlier
 normalization is grounded in the maintainer's published equation, not a claim
 of identical Kusto scores for every percentile profile.
+Eight polynomial fixtures were captured on 2026-11-05, including irregular
+coordinates, deficient fits, degree coercions and missing-data behavior.
 See the compatibility contract for capture provenance, live-test setup, and
 remaining conformance boundaries.
 
