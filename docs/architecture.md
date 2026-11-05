@@ -101,6 +101,12 @@ errors rather than silently execute with different semantics.
   moments and uses a linear-time suffix/prefix search, rather than repeatedly
   refitting whole arrays. Local profile/edge assumptions remain distinct from
   captured Kusto semantics.
+  Polynomial fitting now uses normalized Chebyshev rows, streaming Givens QR
+  and a bounded reduced SVD, not normal equations or an input-sized design
+  matrix. Original-power-basis minimum-norm handling covers deficient fits.
+  Eight synthetic polynomial fixtures were executed against the public Kusto
+  help cluster; high-degree conditioning and budget/error profiles remain
+  explicit rather than claiming bit-identical service numerics.
 - UTC calendar arithmetic, constructors, formatting, Unix conversions, and lazy
   numeric/datetime/timespan ranges are implemented. Full Kusto datetime/timespan
   range and richer dynamic scalar types remain compatibility milestones.

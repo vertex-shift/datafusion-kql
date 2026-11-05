@@ -782,6 +782,81 @@ const FIXTURES: &[Fixture] = &[
             &["null-start", "", ""],
         ],
     },
+    // Polynomial fixtures captured through Azure MCP from the same public help
+    // cluster on 2026-11-05. Comparisons tolerate binary64 solver roundoff.
+    Fixture {
+        name: "polynomial-default-one-based-coordinates",
+        query: "print y=dynamic([1,4,9,16]) | extend (R,C,V,RV,F)=series_fit_poly(y) | project Quality=tostring(abs(R-0.9689922480620156)<1E-10),Slope=tostring(abs(toreal(C[0])-5.0)<1E-10),Intercept=tostring(abs(toreal(C[1])+5.0)<1E-10),Variance=tostring(abs(V-43.0)<1E-10),Residual=tostring(abs(RV-4.0/3.0)<1E-10),First=tostring(abs(toreal(F[0]))<1E-10),Last=tostring(abs(toreal(F[3])-15.0)<1E-10)",
+        columns: &[
+            "Quality",
+            "Slope",
+            "Intercept",
+            "Variance",
+            "Residual",
+            "First",
+            "Last",
+        ],
+        rows: &[&["True", "True", "True", "True", "True", "True", "True"]],
+    },
+    Fixture {
+        name: "polynomial-quadratic-output-order",
+        query: "print y=dynamic([1,4,9,16]),x=dynamic([1,2,3,4]) | extend (R,C,V,RV,F)=series_fit_poly(y,x,2) | project Quality=tostring(R>0.999999999),Leading=tostring(abs(toreal(C[0])-1.0)<1E-10),Lower=tostring(abs(toreal(C[1]))<1E-10 and abs(toreal(C[2]))<1E-10),Variance=tostring(abs(V-43.0)<1E-10),Residual=tostring(RV<1E-18),Last=tostring(abs(toreal(F[3])-16.0)<1E-10),Points=tostring(array_length(F))",
+        columns: &[
+            "Quality", "Leading", "Lower", "Variance", "Residual", "Last", "Points",
+        ],
+        rows: &[&["True", "True", "True", "True", "True", "True", "4"]],
+    },
+    Fixture {
+        name: "polynomial-uneven-coordinate-least-squares",
+        query: "print y=dynamic([3,7,43,73]),x=dynamic([0,1,4,5]) | extend (R,C,V,RV,F)=series_fit_poly(y,x,2) | project Quality=tostring(abs(R-0.9959487927402366)<1E-10),Coefficients=tostring(abs(toreal(C[0])-3.25)<1E-10 and abs(toreal(C[1])+2.7794117647059013)<1E-10 and abs(toreal(C[2])-4.3235294117647225)<1E-10),Variance=tostring(abs(V-1089.0)<1E-10),Residual=tostring(abs(RV-4.411764705882351)<1E-10),First=tostring(abs(toreal(F[0])-4.3235294117647225)<1E-10),Points=tostring(array_length(F))",
+        columns: &[
+            "Quality",
+            "Coefficients",
+            "Variance",
+            "Residual",
+            "First",
+            "Points",
+        ],
+        rows: &[&["True", "True", "True", "True", "True", "4"]],
+    },
+    Fixture {
+        name: "polynomial-degree-zero-negative-and-null",
+        query: "print y=dynamic([1,2,3,4]),x=dynamic([1,2,3,4]) | extend (R0,C0)=series_fit_poly(y,x,0) | extend (RN,CN)=series_fit_poly(y,x,long(null)) | extend (RM,CM)=series_fit_poly(y,x,-9) | project Zero=tostring(R0==0.0 and array_length(C0)==1 and abs(toreal(C0[0])-2.5)<1E-10),Null=tostring(RN==0.0 and array_length(CN)==1 and abs(toreal(CN[0])-2.5)<1E-10),Negative=tostring(RM>0.999999999 and array_length(CM)==2 and abs(toreal(CM[0])-1.0)<1E-10)",
+        columns: &["Zero", "Null", "Negative"],
+        rows: &[&["True", "True", "True"]],
+    },
+    Fixture {
+        name: "polynomial-missing-data-and-null-coordinate-shapes",
+        query: "union (print Case='null_x',y=dynamic([1,2,3]),x=dynamic(null) | extend (R,C,V,RV,F)=series_fit_poly(y,x)),(print Case='short_x',y=dynamic([1,2,3]),x=dynamic([1,2]) | extend (R,C,V,RV,F)=series_fit_poly(y,x)),(print Case='nonnumeric_x',y=dynamic([1,2,3]),x=dynamic([1,'2',3]) | extend (R,C,V,RV,F)=series_fit_poly(y,x)),(print Case='null_y',y=dynamic([1,null,3]) | extend (R,C,V,RV,F)=series_fit_poly(y)),(print Case='empty',y=dynamic([]) | extend (R,C,V,RV,F)=series_fit_poly(y)) | project Case,Missing=tostring(isnull(R) and isnull(C) and isnull(V) and isnull(RV) and isnull(F)) | sort by Case asc",
+        columns: &["Case", "Missing"],
+        rows: &[
+            &["empty", "True"],
+            &["nonnumeric_x", "True"],
+            &["null_x", "True"],
+            &["null_y", "True"],
+            &["short_x", "True"],
+        ],
+    },
+    Fixture {
+        name: "polynomial-underdetermined-original-basis-minimum-norm",
+        query: "print (R,C,V,RV,F)=series_fit_poly(dynamic([1,2]),dynamic([1,2]),2) | project Quality=tostring(R>0.999999999),Leading=tostring(abs(toreal(C[0])-3.0/14.0)<1E-10),Linear=tostring(abs(toreal(C[1])-5.0/14.0)<1E-10),Constant=tostring(abs(toreal(C[2])-3.0/7.0)<1E-10),Variance=tostring(abs(V-0.5)<1E-10),Residual=tostring(RV<1E-18),Last=tostring(abs(toreal(F[1])-2.0)<1E-10)",
+        columns: &[
+            "Quality", "Leading", "Linear", "Constant", "Variance", "Residual", "Last",
+        ],
+        rows: &[&["True", "True", "True", "True", "True", "True", "True"]],
+    },
+    Fixture {
+        name: "polynomial-duplicate-constant-and-single-point-inputs",
+        query: "print y=dynamic([1,2,3,4]),x=dynamic([1,1,1,1]) | extend (R,C,V,RV,F)=series_fit_poly(y,x) | extend (RC,CC,VC,RVC,FC)=series_fit_poly(dynamic([7,7,7,7])) | extend (RS,CS,VS,RVS,FS)=series_fit_poly(dynamic([7])) | project Duplicate=tostring(R==0.0 and abs(toreal(C[0])-1.25)<1E-10 and abs(toreal(C[1])-1.25)<1E-10 and abs(V-RV)<1E-10),Constant=tostring(RC==0.0 and VC==0.0 and abs(toreal(FC[3])-7.0)<1E-10),Single=tostring(RS==0.0 and VS==0.0 and RVS==0.0 and abs(toreal(CS[0])-3.5)<1E-10 and abs(toreal(CS[1])-3.5)<1E-10)",
+        columns: &["Duplicate", "Constant", "Single"],
+        rows: &[&["True", "True", "True"]],
+    },
+    Fixture {
+        name: "polynomial-fifth-degree-normalized-coordinates",
+        query: "range x from -1.0 to 1.0 step 0.125 | extend y=pow(x,5)-3.0*pow(x,3)+2.0*x+6.0 | summarize X=make_list(x),Y=make_list(y) | extend (R,C,V,RV,F)=series_fit_poly(Y,X,5) | project Quality=tostring(R>0.999999999),Coefficients=tostring(array_length(C)==6 and abs(toreal(C[0])-1.0)<1E-8 and abs(toreal(C[1]))<1E-8 and abs(toreal(C[2])+3.0)<1E-8 and abs(toreal(C[3]))<1E-8 and abs(toreal(C[4])-2.0)<1E-8 and abs(toreal(C[5])-6.0)<1E-8),Residual=tostring(RV<1E-18),Points=tostring(array_length(F))",
+        columns: &["Quality", "Coefficients", "Residual", "Points"],
+        rows: &[&["True", "True", "True", "17"]],
+    },
 ];
 
 // Source/documentation and mathematical-oracle cases, not captured engine results.

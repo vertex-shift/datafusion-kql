@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-kql-native"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.94"
 description = "A native Kusto Query Language frontend for Apache DataFusion"
@@ -48,6 +48,7 @@ datafusion = { version = "55.2.0", default-features = false, features = [
 datafusion-functions-aggregate-common = "55.2.0"
 futures = "0.3"
 libm = "0.2"
+nalgebra = { version = "0.35.0", default-features = false, features = ["std"] }
 regex = "1"
 rustfft = "6.4"
 serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
