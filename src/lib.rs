@@ -53,6 +53,7 @@ mod series_analytics;
 mod series_functions;
 mod series_multi;
 mod series_polynomial;
+mod series_similarity;
 mod tabular;
 mod tdigest;
 mod tdigest_functions;

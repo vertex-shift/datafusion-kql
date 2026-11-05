@@ -1210,6 +1210,9 @@ impl Expressions<'_> {
         if let Some(op) = crate::series_functions::Op::lookup(name) {
             return Ok(dynamic::call(Kernel::Series(op), values));
         }
+        if let Some(op) = crate::series_similarity::Op::lookup(name) {
+            return crate::series_similarity::plan(op, values, schema, span);
+        }
         let kernel = match name {
             "parse_json" | "parsejson" | "todynamic" => Some(Kernel::ParseJson),
             "gettype" => Some(Kernel::GetType),

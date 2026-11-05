@@ -857,6 +857,103 @@ const FIXTURES: &[Fixture] = &[
         columns: &["Quality", "Coefficients", "Residual", "Points"],
         rows: &[&["True", "True", "True", "17"]],
     },
+    // Series-comparison fixtures captured from help.kusto.windows.net/Samples
+    // through Azure MCP on 2026-11-05, separate from the polynomial cohort.
+    Fixture {
+        name: "series-comparison-aligned-and-opposite-vectors",
+        query: "print a=dynamic([1,2,3]),b=dynamic([2,4,6]),opposite=dynamic([-2,-4,-6]) | project Dot=tostring(series_dot_product(a,b)),Cosine=tostring(abs(series_cosine_similarity(a,b)-1.0)<1E-12),Pearson=tostring(abs(series_pearson_correlation(a,b)-1.0)<1E-12),OppositeCosine=tostring(abs(series_cosine_similarity(a,opposite)+1.0)<1E-12),OppositePearson=tostring(abs(series_pearson_correlation(a,opposite)+1.0)<1E-12)",
+        columns: &[
+            "Dot",
+            "Cosine",
+            "Pearson",
+            "OppositeCosine",
+            "OppositePearson",
+        ],
+        rows: &[&["28.0", "True", "True", "True", "True"]],
+    },
+    Fixture {
+        name: "series-comparison-unequal-length-full-cosine-norms",
+        query: "print a=dynamic([1,2,3]),b=dynamic([4,5]) | project Dot=tostring(series_dot_product(a,b)),Cosine=tostring(abs(series_cosine_similarity(a,b)-0.5843487097907776)<1E-12),PearsonNull=tostring(isnull(series_pearson_correlation(a,b))),Reverse=tostring(abs(series_cosine_similarity(b,a)-0.5843487097907776)<1E-12)",
+        columns: &["Dot", "Cosine", "PearsonNull", "Reverse"],
+        rows: &[&["14.0", "True", "True", "True"]],
+    },
+    Fixture {
+        name: "series-comparison-missing-text-boolean-and-nested-elements",
+        query: "print a=dynamic([1,null,3]),b=dynamic([4,5,6]) | project Dot=tostring(series_dot_product(a,b)),Cosine=tostring(abs(series_cosine_similarity(a,b)-0.7928249671720918)<1E-12),PearsonNull=tostring(isnull(series_pearson_correlation(a,b))),Text=tostring(series_dot_product(dynamic([1,'2',3]),b)),Nested=tostring(series_dot_product(dynamic([1,[2],3]),b)),Bool=tostring(series_dot_product(dynamic([1,true,3]),b)),BoolPearson=tostring(abs(series_pearson_correlation(dynamic([1,true,3]),b)-0.8660254037844387)<1E-12)",
+        columns: &[
+            "Dot",
+            "Cosine",
+            "PearsonNull",
+            "Text",
+            "Nested",
+            "Bool",
+            "BoolPearson",
+        ],
+        rows: &[&["22.0", "True", "True", "22.0", "22.0", "27.0", "True"]],
+    },
+    Fixture {
+        name: "series-comparison-native-scalar-broadcast-and-dynamic-scalar-null",
+        query: "print a=dynamic([1,2,3]) | project Forward=tostring(series_dot_product(a,10)),Reverse=tostring(series_dot_product(10,a)),DynamicNull=tostring(isnull(series_dot_product(a,dynamic(10)))),Missing=tostring(isnull(series_dot_product(a,real(null)))),Decimal=tostring(series_dot_product(a,decimal(1.5))),NullVector=tostring(isnull(series_dot_product(dynamic(null),a)))",
+        columns: &[
+            "Forward",
+            "Reverse",
+            "DynamicNull",
+            "Missing",
+            "Decimal",
+            "NullVector",
+        ],
+        rows: &[&["60.0", "60.0", "True", "True", "9.0", "True"]],
+    },
+    Fixture {
+        name: "series-cosine-explicit-magnitude-ieee-profile",
+        query: "print a=dynamic([1,2,3]),b=dynamic([4,5]) | project One=tostring(abs(series_cosine_similarity(a,b,1.0)-2.186432666440485)<1E-12),Both=tostring(series_cosine_similarity(a,b,1.0,1.0)),Negative=tostring(series_cosine_similarity(a,b,-1.0,1.0)),Zero=tostring(series_cosine_similarity(a,b,0.0,1.0)==real(inf)),Null=tostring(abs(series_cosine_similarity(a,b,real(null))-0.5843487097907776)<1E-12),NaN=tostring(isnan(series_cosine_similarity(a,b,real(nan)))),Infinity=tostring(series_cosine_similarity(a,b,real(inf)))",
+        columns: &["One", "Both", "Negative", "Zero", "Null", "NaN", "Infinity"],
+        rows: &[&["True", "14.0", "-14.0", "True", "True", "True", "0.0"]],
+    },
+    Fixture {
+        name: "series-comparison-zero-empty-constant-and-all-missing-values",
+        query: "print a=dynamic([0,0,0]),b=dynamic([1,2,3]),badValues=dynamic([null,'x']) | project Dot=tostring(series_dot_product(a,b)),CosineNaN=tostring(isnan(series_cosine_similarity(a,b))),PearsonNaN=tostring(isnan(series_pearson_correlation(a,b))),EmptyDot=tostring(isnull(series_dot_product(dynamic([]),b))),EmptyCosine=tostring(isnull(series_cosine_similarity(dynamic([]),b))),EmptyPearson=tostring(isnull(series_pearson_correlation(dynamic([]),dynamic([])))),Constant=tostring(isnan(series_pearson_correlation(dynamic([7,7,7]),b))),Single=tostring(isnan(series_pearson_correlation(dynamic([7]),dynamic([9])))),MissingDot=tostring(series_dot_product(badValues,b)),MissingCosine=tostring(isnan(series_cosine_similarity(badValues,b)))",
+        columns: &[
+            "Dot",
+            "CosineNaN",
+            "PearsonNaN",
+            "EmptyDot",
+            "EmptyCosine",
+            "EmptyPearson",
+            "Constant",
+            "Single",
+            "MissingDot",
+            "MissingCosine",
+        ],
+        rows: &[&[
+            "0.0", "True", "True", "True", "True", "True", "True", "True", "0.0", "True",
+        ]],
+    },
+    Fixture {
+        name: "series-comparison-nonfinite-input-and-unmatched-tail",
+        query: "print a=pack_array(real(nan),1.0,2.0),b=dynamic([3,4,5]),i=pack_array(real(inf),1.0,2.0),tail=pack_array(1.0,real(nan),2.0) | project DotNaN=tostring(isnan(series_dot_product(a,b))),CosineNaN=tostring(isnan(series_cosine_similarity(a,b))),PearsonNull=tostring(isnull(series_pearson_correlation(a,b))),DotInf=tostring(series_dot_product(i,b)==real(inf)),CosineInf=tostring(isnan(series_cosine_similarity(i,b))),PearsonInf=tostring(isnull(series_pearson_correlation(i,b))),TailDot=tostring(series_dot_product(tail,dynamic([2]))),TailCosine=tostring(isnan(series_cosine_similarity(tail,dynamic([2]))))",
+        columns: &[
+            "DotNaN",
+            "CosineNaN",
+            "PearsonNull",
+            "DotInf",
+            "CosineInf",
+            "PearsonInf",
+            "TailDot",
+            "TailCosine",
+        ],
+        rows: &[&[
+            "True", "True", "True", "True", "True", "True", "2.0", "True",
+        ]],
+    },
+    Fixture {
+        name: "series-comparison-rich-decimal-and-temporal-ticks",
+        query: "print a=pack_array(decimal(1.5),decimal(2.5),3),b=dynamic([3,4,5]),t=pack_array(1s,2s,-1s),one=dynamic([1,1,1]) | project Decimal=tostring(series_dot_product(a,b)),Cosine=tostring(abs(series_cosine_similarity(a,b)-0.9972820205796494)<1E-12),Pearson=tostring(abs(series_pearson_correlation(a,b)-0.9819805060619665)<1E-12),Timespan=tostring(series_dot_product(t,one)),Datetime=tostring(series_dot_product(pack_array(datetime(1970-01-01),datetime(1969-12-31),datetime(2025-01-01)),one)==1.881423936E18),Booleans=tostring(series_dot_product(dynamic([true,false,true]),b))",
+        columns: &[
+            "Decimal", "Cosine", "Pearson", "Timespan", "Datetime", "Booleans",
+        ],
+        rows: &[&["29.5", "True", "True", "20000000.0", "True", "8.0"]],
+    },
 ];
 
 // Source/documentation and mathematical-oracle cases, not captured engine results.

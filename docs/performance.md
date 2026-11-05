@@ -48,6 +48,10 @@ capacity estimates.
 | `workloads/series_fit_2lines` | Fit two trends to 1,024 native 128-point arrays; assert split index, slopes, fit quality, point counts and one shared transform |
 | `workloads/series_fit_2lines_dynamic` | The same split search through a correlated dynamic bag and native reduction |
 | `workloads/series_fit_poly` | Fit 1,024 native 128-point quadratic arrays with explicit x coordinates; assert all coefficients, fit quality, last points, exact output count and one shared transform |
+| `workloads/series_compare_arrow` | Compute dot, cosine and Pearson for 1,024 native 128-point vector pairs; assert all three scores and direct Arrow function paths |
+| `workloads/series_compare_dynamic` | The same three comparisons after explicitly converting the native vector pairs to dynamic |
+| `workloads/series_cosine_arrow` | Cosine-only comparison on those native pairs with computed full-vector magnitudes |
+| `workloads/series_cosine_magnitudes` | The same cosine-only comparison using precomputed native magnitude columns |
 | `workloads/mv_apply_top` | Parse 1,000 payloads and run native per-row top-two/aggregation subqueries |
 | `workloads/bag_unpack` | Parse/unpack 100,000 JSON payloads with a declared schema and aggregate array lengths by service |
 | `workloads/json_fields` | Equivalent service/latency extraction through ordinary property access over the same payloads |
@@ -95,6 +99,48 @@ Each execution iteration uses DataFusion's `reset_plan_states` to create fresh
 operator state from the cached physical plan. This reset is included in the
 timing for both languages. Stateful repartition operators must not be executed
 repeatedly by simply cloning their `Arc`.
+
+## Measured 0.16 vector comparisons
+
+Measured on 2026-11-05 on the Apple M4/arm64 host, Rust 1.95.0,
+DataFusion 55.2.0, the optimized bench profile and four target partitions:
+
+```bash
+cargo bench --locked --bench kql -j 2 -- \
+  'workloads/series_(compare|cosine)' \
+  --warm-up-time 1 --measurement-time 3 --sample-size 20
+```
+
+| Workload | Criterion estimate | 95% confidence interval |
+| --- | --- | --- |
+| Dot + cosine + Pearson, native Arrow vector pairs | 1.7270 ms | 1.7144-1.7403 ms |
+| Same three comparisons after explicit dynamic conversion | 23.344 ms | 23.240-23.529 ms |
+| Native cosine with computed magnitudes | 593.99 us | 592.59-596.18 us |
+| Native cosine with precomputed magnitude columns | 426.86 us | 421.13-438.09 us |
+
+Each workload compares 1,024 pairs of 128-point vectors: A contains 1 through
+128, and B contains twice A. Preflight verifies every result: dot 1,414,528,
+cosine and Pearson within 1E-12 of one, exact vector counts, and direct native
+function nodes where requested. Throughput counts 131,072 coordinate pairs,
+not three times that count for the three-function workload. The standalone
+cosine workloads isolate the optional-magnitude path rather than comparing one
+function against three.
+
+The timed region includes Arrow function preparation, scaled/compensated
+reductions, native real result construction, aggregate checks and operator-state
+reset. Explicit dynamic conversion/decoding is included only in the dynamic
+workload. Native Float64 inputs reuse their value buffers and avoid that
+representation change; precomputed magnitudes skip their squared-norm passes.
+Source construction, magnitude preparation and physical planning are outside
+the timed region.
+
+No other local compilation ran during measurement. Criterion extended the
+dynamic sampling interval to about 5.45 seconds and reported timing outliers in
+all four workloads. These short repeated, finite, aligned-vector samples do not
+establish performance for irregular lengths, sparse/rich values, other numeric
+types, one maximum-length pair, a SQL implementation, Vector16 storage or the
+Kusto service. Independent numerical, exact-boundary, native-layout/buffer and
+actual captured-reference cases establish correctness separately.
 
 ## Measured 0.15 polynomial regression
 

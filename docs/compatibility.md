@@ -1,7 +1,7 @@
 # KQL compatibility contract
 
 This is a native frontend for **DataFusion 55.2.x**, not a Kusto server. Version
-0.15 implements the typed tabular and dynamic subset below. Keywords, function
+0.16 implements the typed tabular and dynamic subset below. Keywords, function
 names, table names, and column names are case-sensitive. Unsupported
 syntax/functions return an error; there is no SQL fallback.
 
@@ -1009,8 +1009,82 @@ Numeric predicates use explicit binary64 tolerances, not exact equality of
 independently computed floating-point coefficients. Independent residual
 orthogonality, known-polynomial and original-basis minimum-norm oracles, shared
 volatile-input checks and exact native Arrow boundary tests supplement those
-captures. The total captured baseline is now 76 fixtures; the eight older
+captures. That milestone brought the captured baseline to 76 fixtures; the eight older
 source/oracle fixtures remain labeled separately.
+
+### Series comparisons and vector similarity
+
+`series_dot_product(a,b)`, `series_cosine_similarity(a,b[, magnitude_a[, magnitude_b]])`
+and `series_pearson_correlation(a,b)` return native nullable reals, not dynamic
+strings or bags. They can be used in ordinary scalar expressions, predicates,
+aggregations, lexical functions and typed requests, without registering or
+overwriting host functions.
+
+Dot product sums numeric pairs over the shorter array. Either operand may
+instead be a native numeric scalar broadcast over the array; a dynamic scalar
+such as `dynamic(10)` is not that overload and yields null. Cosine uses the same
+truncated product, **but its computed magnitudes include the complete arrays**,
+including unmatched numeric tails. Missing/nonnumeric positions are not compacted
+or paired with different indices. Each magnitude sums all numeric elements of
+its own vector, even when the partner's corresponding element is missing.
+
+Cosine's optional magnitudes replace those computations individually and may
+vary per row. Null means compute the magnitude. Explicit magnitudes are used as
+given, not validated as actual norms: negative values can reverse the sign,
+small values can produce magnitudes above one, and zero/NaN/infinity follow
+native real arithmetic. Supplied norms skip their squared-magnitude passes.
+There is no clamp when a norm was supplied.
+
+Pearson requires equal nonempty lengths and numeric finite values at every
+position; shape mismatches and invalid elements return null. Empty/non-array
+inputs return null for all three functions. Nonempty constant/single-point
+Pearson inputs and zero-norm cosine inputs produce a native real **NaN**, not a
+null. Nonfinite numeric inputs propagate through dot/cosine; Pearson returns
+null for those inputs. An all-nonnumeric but nonempty dot pair returns zero,
+whereas its cosine is NaN. Use `isnan`, `isnull` and native real operations to
+distinguish these results rather than assuming JSON can encode them.
+
+Captured coercions include boolean 0/1 and decimal-to-binary64 numeric values.
+Rich datetime elements use the service's 100 ns ticks since 0001-01-01;
+timespans use 100 ns ticks. The frontend converts its supported nanosecond
+representation to those numeric coordinates before the comparison. Text
+including numeric-looking strings, nested containers, nulls and GUIDs are not
+silently parsed as numbers. The general frontend temporal range limit still
+applies; these helpers do not extend datetime/timespan storage.
+
+Numeric native Arrow List, LargeList, FixedSizeList, ListView and LargeListView
+inputs, including slices and dictionary encoding, use direct Arrow kernels.
+Float64 child arrays are retained without copying; other supported primitive
+numeric/boolean/Arrow-decimal children are cast once per batch over the referenced
+value span. Rich/heterogeneous collections use the bounded dynamic bridge;
+unsigned collection elements outside the KQL long range still fail explicitly. A scalar
+dynamic array is decoded once per batch invocation, not reparsed for every row.
+
+Every nonnull native list is length-checked before numeric cast allocation,
+and both complete input arrays must satisfy the 1,048,576-element limit even
+when the dot product would read a shorter prefix. Normal dynamic text, nesting
+and node budgets also apply. The numeric reduction uses constant working
+storage rather than materializing an element-wise product array. Batch casts,
+dictionary decoding and general dynamic conversion still allocate; this is not
+a total-memory bound or an additional host memory-pool reservation.
+
+**Numerical profile:** scaled compensated sums and centered online covariance
+reduce cancellation and avoid unnecessary binary64 overflow/underflow. Computed
+cosine and Pearson results are bounded to [-1,1] when finite. These stable
+calculations can differ from service accumulation in the last bits or on extreme
+inputs where a naive service product/norm would overflow. They do not promise
+integer-exact or decimal128-exact products, bit-identical special-value payloads,
+or service encoding policies such as Vector16.
+
+Eight exact string-projection fixtures were captured from the public help
+cluster through Azure MCP on 2026-11-05, separate from the polynomial cohort.
+They establish the semantics above with explicit floating-point tolerances.
+Independent centered/geometric oracles, extreme-scale/cancellation tests,
+Float64 buffer-identity checks, native layout/dictionary tests, lazy/volatile and
+registry-isolation checks, and exact maximum-length API cases complement those
+captures. The total captured baseline is 84 fixtures, plus eight separately
+labeled source/oracle fixtures. Seasonal decomposition, period scoring/detection
+and forecasting are still roadmap work, not approximations presented as parity.
 
 ## Aggregations
 
@@ -1257,11 +1331,11 @@ or complete certification of all HLL overloads and empty-state representation.
 
 ## Opt-in Kusto reference checks
 
-The conformance suite in `tests/conformance.rs` runs 76 synthetic inline-data
+The conformance suite in `tests/conformance.rs` runs 84 synthetic inline-data
 fixtures locally by default, comparing exact column names and row multisets
 against results captured from the public Kusto help cluster (`Samples`) through
 Azure MCP on 2026-10-25 (49 fixtures), 2026-10-26 (19 additional fixtures), and
-2026-11-05 (eight polynomial fixtures).
+2026-11-05 (eight polynomial and eight series-comparison fixtures).
 It covers counts/nulls, expansion, per-row/per-key
 queries, scans, hierarchical tops, schema-declared plugins, scalar subqueries,
 ranges, GUIDs, parsing, decimal128 arithmetic/conversion/special values, rich nested tags,
@@ -1289,7 +1363,7 @@ bounds and Unicode offsets now have actual captured results.
 Eight additional source/documentation and mathematical-oracle fixtures cover
 FFT/IFFT, multi-column statistics/line fitting, outlier scores and segmented
 trends. They run locally and in the
-opt-in reference suite but are not counted among the 76 captured results.
+opt-in reference suite but are not counted among the 84 captured results.
 
 To compare the same fixtures against an explicitly configured reference:
 
