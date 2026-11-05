@@ -74,7 +74,7 @@
           "codeRepository": "https://github.com/vertex-shift/datafusion-kql",
           "programmingLanguage": "Rust",
           "runtimePlatform": "Apache DataFusion",
-          "version": "0.15.0",
+          "version": "0.16.0",
           "license": "https://github.com/vertex-shift/datafusion-kql/blob/main/LICENSE",
           "image": "https://vertex-shift.github.io/datafusion-kql/assets/social-preview.png",
           "mainEntityOfPage": { "@id": "https://vertex-shift.github.io/datafusion-kql/#webpage" }
@@ -132,7 +132,7 @@
           </a>
         </div>
         <dl class="spec-rail">
-          <div><dt>Frontend</dt><dd>v<span data-project-version>0.15</span></dd></div>
+          <div><dt>Frontend</dt><dd>v<span data-project-version>0.16</span></dd></div>
           <div><dt>Host engine</dt><dd>DataFusion 55.2.x</dd></div>
           <div><dt>Toolchain</dt><dd>Rust 1.94+</dd></div>
           <div><dt>License</dt><dd><a href="https://github.com/vertex-shift/datafusion-kql/blob/main/LICENSE">Apache-2.0</a></dd></div>
@@ -247,7 +247,7 @@ frame.show().await?;</code></pre>
             </div>
           </div>
           <a class="button button-secondary" href="https://github.com/vertex-shift/datafusion-kql/tree/main/examples">
-            Explore 14 runnable examples
+            Explore 15 runnable examples
             <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
               <path d="M3 10h13m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5"></path>
             </svg>
@@ -273,7 +273,7 @@ frame.show().await?;</code></pre>
               <tr><th scope="row">State &amp; scale</th><td>Serialized windows, scan,
                 partition, mv-apply, bounded HLL/t-digest, and native spill-aware buffers.</td></tr>
               <tr><th scope="row">Time series</th><td>Make-series, interpolation, statistics,
-                filters, FFT/IFFT, outlier scores, polynomial and one-/two-segment fitting.</td></tr>
+                filters, FFT/IFFT, vector similarity, outlier scores and polynomial/segmented fitting.</td></tr>
             </tbody>
           </table>
         </div>
@@ -316,7 +316,7 @@ frame.show().await?;</code></pre>
           </div>
           <div class="conformance-note">
             <h3>Evidence with provenance</h3>
-            <p><strong>76 captured Kusto fixtures</strong> cover a finite
+            <p><strong>84 captured Kusto fixtures</strong> cover a finite
               historical reference baseline. <strong>8 source/oracle fixtures</strong>
               are recorded separately, not presented as new engine captures.</p>
             <p>Tests also check native plans, numerical oracles, exact budgets,

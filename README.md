@@ -9,7 +9,7 @@ No DataFusion fork, SQL translation, or separate execution engine.
 [Compatibility contract](docs/compatibility.md) |
 [Website development and review](docs/website.md)
 
-**Status:** version 0.15 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
+**Status:** version 0.16 typed-tabular, dynamic/JSON, grouped/stateful, window and time-series
 support, targeting **DataFusion 55.2.x** and **Rust 1.94+**. This is not yet a
 complete implementation of KQL.
 See the [compatibility contract](docs/compatibility.md) for supported constructs
@@ -32,6 +32,7 @@ cargo run --example materialized_snapshots
 cargo run --example spectral_series
 cargo run --example series_trends
 cargo run --example polynomial_series
+cargo run --example vector_similarity
 ```
 
 The example uses an inline `datatable`, filters requests, aggregates by service,
@@ -50,6 +51,8 @@ and regression results with KQL output-name lists.
 trend fit, including native multi-column results.
 `polynomial_series` fits irregularly spaced samples and a fifth-degree curve,
 returning coefficients, fit quality and fitted values through one native call.
+`vector_similarity` compares signals with dot products, cosine similarity and
+Pearson correlation, including their different missing-value and length rules.
 
 ## Extend an existing DataFusion session
 
@@ -168,6 +171,11 @@ Regression kernels normalize coordinates to avoid unnecessary overflow.
 coordinates, descending-power coefficients and typed correlated outputs.
 Streaming QR and a reduced SVD avoid normal equations and an input-sized
 Vandermonde matrix; rank-deficient fits use original-coordinate minimum norms.
+`series_dot_product`, `series_cosine_similarity` and
+`series_pearson_correlation` return native reals. Numeric Arrow lists take a
+direct-buffer path instead of dynamic serialization, including list views,
+fixed/large lists, slices and dictionary-backed inputs. Dot products support
+numeric scalar broadcasting; cosine accepts optional precomputed magnitudes.
 Calendar arithmetic, period boundaries, Unix conversions, constructors, and
 compiled KQL date/time formatting are supported. Both tabular and scalar ranges
 handle numeric, datetime, and timespan values.
@@ -281,7 +289,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo check --lib --no-default-features
-cargo test --no-default-features --test materialize --test grouped --test scan --test series_multi --test series_analytics --test series_polynomial
+cargo test --no-default-features --test materialize --test grouped --test scan --test series_multi --test series_analytics --test series_polynomial --test series_similarity
 ```
 
 Tests cover parser diagnostics/limits, KQL-specific semantics, SQL result parity,
@@ -293,7 +301,7 @@ partial-state/filter/merge equivalence, malformed sketches, and host memory
 accounting. Large-population and memory tests remain local algorithm checks;
 the small-set live reference fixtures are recorded separately.
 
-`tests/conformance.rs` compares 76 synthetic fixtures with captured public Kusto
+`tests/conformance.rs` compares 84 synthetic fixtures with captured public Kusto
 help-cluster results by default, and provides an opt-in live suite for a
 configured emulator or ADX test database. The formerly ignored decimal
 precision and JSON conversion cases are now ordinary regressions. Seven live
@@ -312,6 +320,9 @@ normalization is grounded in the maintainer's published equation, not a claim
 of identical Kusto scores for every percentile profile.
 Eight polynomial fixtures were captured on 2026-11-05, including irregular
 coordinates, deficient fits, degree coercions and missing-data behavior.
+Eight additional comparison fixtures capture unequal-length cosine norms,
+scalar broadcasting, rich numeric coercions, supplied magnitudes and native
+NaN/infinity/null distinctions.
 See the compatibility contract for capture provenance, live-test setup, and
 remaining conformance boundaries.
 

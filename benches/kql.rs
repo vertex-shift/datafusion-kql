@@ -1,5 +1,5 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use datafusion::arrow::array::{Int64Array, ListArray, StringArray};
+use datafusion::arrow::array::{Float64Array, Int64Array, ListArray, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Float64Type, Int64Type, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::TableReference;
@@ -68,6 +68,9 @@ const OUTLIER_QUERY: &str = "AnalyticsEvents | extend Scores=series_outliers(Sam
 const TWO_LINE_QUERY: &str = "AnalyticsEvents | extend (R,Split,V,RV,F,RR,RS,RB,RV0,RRV,LR,LS,LB)=series_fit_2lines(Trend) | summarize Good=countif(Split==64 and R>0.99999999 and abs(LS-2.0)<0.00000001 and abs(RS+1.0)<0.00000001),Points=sum(array_length(F))";
 const TWO_LINE_DYNAMIC_QUERY: &str = "AnalyticsEvents | extend Fit=series_fit_2lines_dynamic(Trend) | summarize Good=countif(tolong(Fit.split_idx)==64 and toreal(Fit.rsquare)>0.99999999 and abs(toreal(Fit.left_slope)-2.0)<0.00000001 and abs(toreal(Fit.right_slope)+1.0)<0.00000001),Points=sum(array_length(Fit.line_fit))";
 const POLYNOMIAL_QUERY: &str = "AnalyticsEvents | extend (R,C,V,RV,F)=series_fit_poly(Polynomial,Axis,2) | summarize Good=countif(R>0.99999999 and abs(toreal(C[0])-0.5)<0.00000001 and abs(toreal(C[1])+2.0)<0.00000001 and abs(toreal(C[2])-3.0)<0.00000001 and abs(toreal(F[127])-7939.0)<0.00000001),Points=sum(array_length(F))";
+const VECTOR_NATIVE_QUERY: &str = "VectorEvents | project D=series_dot_product(A,B),C=series_cosine_similarity(A,B),P=series_pearson_correlation(A,B) | summarize Good=countif(abs(D-1414528.0)<1E-8 and abs(C-1.0)<1E-12 and abs(P-1.0)<1E-12),Rows=count()";
+const VECTOR_DYNAMIC_QUERY: &str = "VectorEvents | extend a=todynamic(A),b=todynamic(B) | project D=series_dot_product(a,b),C=series_cosine_similarity(a,b),P=series_pearson_correlation(a,b) | summarize Good=countif(abs(D-1414528.0)<1E-8 and abs(C-1.0)<1E-12 and abs(P-1.0)<1E-12),Rows=count()";
+const VECTOR_MAGNITUDES_QUERY: &str = "VectorEvents | project C=series_cosine_similarity(A,B,MA,MB) | summarize Good=countif(abs(C-1.0)<1E-12),Rows=count()";
 
 fn context() -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
@@ -471,6 +474,59 @@ fn analytics_context() -> SessionContext {
     ctx
 }
 
+fn similarity_context() -> SessionContext {
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let a = (1..=SIGNAL_LEN)
+        .map(|value| Some(value as f64))
+        .collect::<Vec<_>>();
+    let b = (1..=SIGNAL_LEN)
+        .map(|value| Some(value as f64 * 2.0))
+        .collect::<Vec<_>>();
+    let magnitude = a
+        .iter()
+        .map(|value| value.unwrap().powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let batch = RecordBatch::try_from_iter(vec![
+        (
+            "A",
+            Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
+                (0..SIGNAL_ROWS).map(|_| Some(a.clone())),
+            )) as _,
+        ),
+        (
+            "B",
+            Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
+                (0..SIGNAL_ROWS).map(|_| Some(b.clone())),
+            )) as _,
+        ),
+        (
+            "MA",
+            Arc::new(Float64Array::from_iter_values(std::iter::repeat_n(
+                magnitude,
+                SIGNAL_ROWS,
+            ))) as _,
+        ),
+        (
+            "MB",
+            Arc::new(Float64Array::from_iter_values(std::iter::repeat_n(
+                2.0 * magnitude,
+                SIGNAL_ROWS,
+            ))) as _,
+        ),
+    ])
+    .unwrap();
+    let partitions = (0..4)
+        .map(|index| vec![batch.slice(index * SIGNAL_ROWS / 4, SIGNAL_ROWS / 4)])
+        .collect();
+    ctx.register_table(
+        TableReference::bare("VectorEvents"),
+        Arc::new(MemTable::try_new(batch.schema(), partitions).unwrap()),
+    )
+    .unwrap();
+    ctx
+}
+
 fn benchmarks(c: &mut Criterion) {
     c.bench_function("parse/kql_pipeline", |b| {
         b.iter(|| parse(black_box(QUERY)).unwrap())
@@ -547,6 +603,7 @@ fn benchmarks(c: &mut Criterion) {
     );
     let spectral = spectral_context();
     let analytics = analytics_context();
+    let vectors = similarity_context();
     let mut distinct_estimate = None;
     let mut workloads = c.benchmark_group("workloads");
     for (name, query, context, rows, expected_rows) in [
@@ -615,6 +672,27 @@ fn benchmarks(c: &mut Criterion) {
             "series_fit_poly",
             POLYNOMIAL_QUERY,
             &analytics,
+            SIGNAL_ROWS * SIGNAL_LEN,
+            1,
+        ),
+        (
+            "series_compare_arrow",
+            VECTOR_NATIVE_QUERY,
+            &vectors,
+            SIGNAL_ROWS * SIGNAL_LEN,
+            1,
+        ),
+        (
+            "series_compare_dynamic",
+            VECTOR_DYNAMIC_QUERY,
+            &vectors,
+            SIGNAL_ROWS * SIGNAL_LEN,
+            1,
+        ),
+        (
+            "series_cosine_magnitudes",
+            VECTOR_MAGNITUDES_QUERY,
+            &vectors,
             SIGNAL_ROWS * SIGNAL_LEN,
             1,
         ),
@@ -802,6 +880,30 @@ fn benchmarks(c: &mut Criterion) {
             }
             if matches!(name, "series_fit_2lines" | "series_fit_poly") {
                 assert_eq!(native.matches(&format!("__kql_{name}_columns")).count(), 1);
+            }
+        }
+        if matches!(
+            name,
+            "series_compare_arrow" | "series_compare_dynamic" | "series_cosine_magnitudes"
+        ) {
+            for index in 0..2 {
+                assert_eq!(
+                    datafusion::common::ScalarValue::try_from_array(result[0].column(index), 0)
+                        .unwrap(),
+                    datafusion::common::ScalarValue::Int64(Some(SIGNAL_ROWS as i64)),
+                    "{name} must preserve every vector comparison"
+                );
+            }
+            if name == "series_compare_arrow" {
+                for function in ["dot_product", "cosine_similarity", "pearson_correlation"] {
+                    assert_eq!(
+                        native
+                            .matches(&format!("__kql_series_{function}_arrow"))
+                            .count(),
+                        1,
+                        "{native}"
+                    );
+                }
             }
         }
         if matches!(

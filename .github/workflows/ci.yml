@@ -42,7 +42,7 @@ jobs:
       - run: cargo test --locked --all-features
       - run: cargo test --locked --test conformance reference_transport_local_http -- --ignored
       - run: cargo check --locked --lib --no-default-features
-      - run: cargo test --locked --no-default-features --test materialize --test grouped --test scan --test series_multi --test series_analytics --test series_polynomial
+      - run: cargo test --locked --no-default-features --test materialize --test grouped --test scan --test series_multi --test series_analytics --test series_polynomial --test series_similarity
       - run: cargo run --locked --example quickstart
       - run: cargo run --locked --example telemetry_json
       - run: cargo run --locked --example time_series
@@ -57,6 +57,7 @@ jobs:
       - run: cargo run --locked --example spectral_series
       - run: cargo run --locked --example series_trends
       - run: cargo run --locked --example polynomial_series
+      - run: cargo run --locked --example vector_similarity
 
   package:
     name: Verify publishable crate

@@ -107,6 +107,12 @@ errors rather than silently execute with different semantics.
   Eight synthetic polynomial fixtures were executed against the public Kusto
   help cluster; high-degree conditioning and budget/error profiles remain
   explicit rather than claiming bit-identical service numerics.
+  Dot product, cosine similarity and Pearson correlation now use expression-local
+  real-valued batch kernels. Native numeric list-family inputs bypass dynamic
+  serialization and reuse Float64 buffers, with checked Arrow casts for other
+  numeric children. Compensated/scaled accumulation avoids unnecessary
+  intermediate overflow. Eight further actual reference fixtures establish
+  their differing shape, null, magnitude and numeric-coercion behavior.
 - UTC calendar arithmetic, constructors, formatting, Unix conversions, and lazy
   numeric/datetime/timespan ranges are implemented. Full Kusto datetime/timespan
   range and richer dynamic scalar types remain compatibility milestones.
