@@ -70,6 +70,7 @@ const TWO_LINE_DYNAMIC_QUERY: &str = "AnalyticsEvents | extend Fit=series_fit_2l
 const POLYNOMIAL_QUERY: &str = "AnalyticsEvents | extend (R,C,V,RV,F)=series_fit_poly(Polynomial,Axis,2) | summarize Good=countif(R>0.99999999 and abs(toreal(C[0])-0.5)<0.00000001 and abs(toreal(C[1])+2.0)<0.00000001 and abs(toreal(C[2])-3.0)<0.00000001 and abs(toreal(F[127])-7939.0)<0.00000001),Points=sum(array_length(F))";
 const VECTOR_NATIVE_QUERY: &str = "VectorEvents | project D=series_dot_product(A,B),C=series_cosine_similarity(A,B),P=series_pearson_correlation(A,B) | summarize Good=countif(abs(D-1414528.0)<1E-8 and abs(C-1.0)<1E-12 and abs(P-1.0)<1E-12),Rows=count()";
 const VECTOR_DYNAMIC_QUERY: &str = "VectorEvents | extend a=todynamic(A),b=todynamic(B) | project D=series_dot_product(a,b),C=series_cosine_similarity(a,b),P=series_pearson_correlation(a,b) | summarize Good=countif(abs(D-1414528.0)<1E-8 and abs(C-1.0)<1E-12 and abs(P-1.0)<1E-12),Rows=count()";
+const VECTOR_COSINE_QUERY: &str = "VectorEvents | project C=series_cosine_similarity(A,B) | summarize Good=countif(abs(C-1.0)<1E-12),Rows=count()";
 const VECTOR_MAGNITUDES_QUERY: &str = "VectorEvents | project C=series_cosine_similarity(A,B,MA,MB) | summarize Good=countif(abs(C-1.0)<1E-12),Rows=count()";
 
 fn context() -> SessionContext {
@@ -690,6 +691,13 @@ fn benchmarks(c: &mut Criterion) {
             1,
         ),
         (
+            "series_cosine_arrow",
+            VECTOR_COSINE_QUERY,
+            &vectors,
+            SIGNAL_ROWS * SIGNAL_LEN,
+            1,
+        ),
+        (
             "series_cosine_magnitudes",
             VECTOR_MAGNITUDES_QUERY,
             &vectors,
@@ -884,7 +892,10 @@ fn benchmarks(c: &mut Criterion) {
         }
         if matches!(
             name,
-            "series_compare_arrow" | "series_compare_dynamic" | "series_cosine_magnitudes"
+            "series_compare_arrow"
+                | "series_compare_dynamic"
+                | "series_cosine_arrow"
+                | "series_cosine_magnitudes"
         ) {
             for index in 0..2 {
                 assert_eq!(
