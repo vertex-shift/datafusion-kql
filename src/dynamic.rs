@@ -1534,19 +1534,14 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
             }
             Json::Object(result)
         }
-        K::BagSetKey => {
-            let Some(mut bag) = json_bag(values[0])? else {
-                return Ok(Json::Null);
-            };
-            let key = text(values[1]).ok_or_else(|| failure("bag_set_key expects a string key"))?;
-            if key.starts_with('$') {
-                return Err(failure(
-                    "bag_set_key JSONPath updates are not implemented; use a root key",
-                ));
-            }
-            bag.insert(key.to_owned(), values[2].json()?);
-            Json::Object(bag)
-        }
+        K::BagSetKey => crate::dynamic_nested::evaluate(
+            kernel,
+            &values
+                .iter()
+                .map(|value| value.node())
+                .collect::<Result<Vec<_>>>()?,
+        )?
+        .json()?,
         K::BagRemoveKeys => {
             let Some(mut bag) = json_bag(values[0])? else {
                 return Ok(Json::Null);

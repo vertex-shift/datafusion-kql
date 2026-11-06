@@ -204,6 +204,97 @@ async fn bags_pack_merge_query_and_remove_keys() {
 }
 
 #[tokio::test]
+async fn bag_set_key_updates_nested_properties_and_creates_missing_parents() {
+    check(
+        r#"datatable(input:dynamic)[
+            dynamic({'key1':123,'key2':{'prop1':123,'prop2':'xyz'}}),
+            dynamic({'key1':123})]
+        | project result=tostring(bag_set_key(input,'$.key2.prop1','abc'))"#,
+        &[
+            &[r#"{"key1":123,"key2":{"prop1":"abc","prop2":"xyz"}}"#],
+            &[r#"{"key1":123,"key2":{"prop1":"abc"}}"#],
+        ],
+    )
+    .await;
+    check(
+        r#"datatable(b:dynamic,k:string,v:long)[
+            dynamic({}),'$.a.b.c',1,
+            dynamic({'a':{'other':2}}),'$.a.b',3,
+            dynamic({}),'a.b',4,
+            dynamic({}),"$['a.b']['spaced key']",5,
+            dynamic({}),'',6]
+        | project result=tostring(bag_set_key(b,k,v))"#,
+        &[
+            &[r#"{"a":{"b":{"c":1}}}"#],
+            &[r#"{"a":{"b":3,"other":2}}"#],
+            &[r#"{"a.b":4}"#],
+            &[r#"{"a.b":{"spaced key":5}}"#],
+            &[r#"{"":6}"#],
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bag_set_key_preserves_null_values_and_returns_null_for_non_bag_inputs() {
+    check(
+        r#"datatable(b:dynamic)[dynamic({}),dynamic({'a':{'keep':true}})]
+        | project result=tostring(bag_set_key(b,'$.a.b',dynamic(null)))"#,
+        &[
+            &[r#"{"a":{"b":null}}"#],
+            &[r#"{"a":{"b":null,"keep":true}}"#],
+        ],
+    )
+    .await;
+    check(
+        "datatable(b:dynamic)[dynamic(null),dynamic([]),dynamic(1),dynamic('text')] | project result=gettype(bag_set_key(b,'$.a.b',1))",
+        &[&["null"], &["null"], &["null"], &["null"]],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bag_set_key_non_bag_parents_fail_explicitly_until_reference_behavior_is_verified() {
+    let ctx = SessionContext::new();
+    for bag in ["{'a':1}", "{'a':null}", "{'a':[1,2]}", "{'a':1h}"] {
+        let query = format!("print b=bag_set_key(dynamic({bag}),'$.a.b',1)");
+        let error = match ctx.kql(&query).await {
+            Ok(frame) => frame.collect().await.unwrap_err().to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("parent must be a property bag"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn bag_set_key_rejects_unsupported_or_malformed_paths() {
+    let ctx = SessionContext::new();
+    for path in ["$", "$.a[0]", "$.a[-1]", "$..a", "$.*", "$.a[", "$a"] {
+        let query = format!("print result=bag_set_key(dynamic({{}}),'{path}',1)");
+        let error = match ctx.kql(&query).await {
+            Ok(frame) => frame.collect().await.unwrap_err().to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("JSONPath") || error.contains("array indexing"),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bag_set_key_expands_lexical_functions_without_mutating_the_input() {
+    check(
+        "let path='$.a.b'; let update=(b:dynamic,v:long){bag_set_key(b,path,v)}; \
+         print original=dynamic({'a':{'b':1}}) \
+         | extend updated=update(original,2) \
+         | project a=tolong(original.a.b),b=tolong(updated.a.b)",
+        &[&["1", "2"]],
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn array_slicing_and_search_use_zero_based_indices() {
     check(
         "let a=dynamic([1,2,1,4]); print length=array_length(a), slice=tostring(array_slice(a,-3,-1)), index=array_index_of(a,1,1,-1,1), found=set_has_element(a,4), missing=array_index_of(a,9), reversed=tostring(array_reverse(a)), empty=tostring(array_slice(a,3,1))",

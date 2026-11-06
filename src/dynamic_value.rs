@@ -37,6 +37,32 @@ pub(crate) fn check_size(size: usize) -> Result<()> {
 }
 
 impl Node {
+    pub(crate) fn validate(&self) -> Result<()> {
+        fn visit(value: &Node, depth: usize, nodes: &mut usize) -> Result<()> {
+            *nodes += 1;
+            if depth > MAX_DEPTH || *nodes > MAX_NODES {
+                return Err(error("dynamic value exceeds nesting or node limits"));
+            }
+            match value {
+                Node::Array(items) => {
+                    check_size(items.len())?;
+                    for item in items {
+                        visit(item, depth + 1, nodes)?;
+                    }
+                }
+                Node::Bag(items) => {
+                    check_size(items.len())?;
+                    for item in items.values() {
+                        visit(item, depth + 1, nodes)?;
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        visit(self, 0, &mut 0)
+    }
+
     pub(crate) fn from_json(value: &Json) -> Result<Self> {
         fn read(value: &Json, depth: usize, nodes: &mut usize) -> Result<Node> {
             *nodes += 1;

@@ -7,6 +7,26 @@ pub(crate) enum Segment {
     Index(i64),
 }
 
+pub(crate) fn write_keys(text: &str, span: Span) -> Result<Vec<String>> {
+    if !text.starts_with('$') {
+        return Ok(vec![text.to_owned()]);
+    }
+    let segments = parse(text, span)?;
+    if segments.is_empty() {
+        return Err(Error::unsupported(
+            "bag_set_key root JSONPath updates",
+            span,
+        ));
+    }
+    segments
+        .into_iter()
+        .map(|segment| match segment {
+            Segment::Key(key) => Ok(key),
+            Segment::Index(_) => Err(Error::unsupported("bag_set_key array indexing", span)),
+        })
+        .collect()
+}
+
 pub(crate) fn parse(text: &str, span: Span) -> Result<Vec<Segment>> {
     if !text.starts_with('$') {
         return Err(Error::syntax("JSONPath must start with '$'", span));
