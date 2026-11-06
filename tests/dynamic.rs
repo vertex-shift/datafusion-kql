@@ -315,9 +315,8 @@ async fn bag_property_jsonpaths_fail_explicitly_for_invalid_paths() {
         "datatable(path:string)['$.a','$.a[0]'] | project b=bag_remove_keys(dynamic({}),pack_array(path))",
         "datatable(path:string)['$.a','$.a[0]'] | project found=bag_has_key(dynamic({}),path)",
     ] {
-        match ctx.kql(query).await {
-            Ok(frame) => assert!(frame.collect().await.is_err(), "{query}"),
-            Err(_) => {}
+        if let Ok(frame) = ctx.kql(query).await {
+            assert!(frame.collect().await.is_err(), "{query}");
         }
     }
 }
