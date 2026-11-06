@@ -187,8 +187,9 @@ pub(crate) fn evaluate(kernel: &Kernel, values: &[Node]) -> Result<Node> {
                 return Ok(Node::Null);
             };
             let key = string(&values[1])?;
-            let keys = crate::json_path::write_keys(key, crate::ast::Span::default())
-                .map_err(|cause| error(cause.to_string()))?;
+            let keys =
+                crate::json_path::property_keys(key, "bag_set_key", crate::ast::Span::default())
+                    .map_err(|cause| error(cause.to_string()))?;
             let mut current = &mut bag;
             for key in &keys[..keys.len() - 1] {
                 if !current.contains_key(key) {
@@ -213,14 +214,22 @@ pub(crate) fn evaluate(kernel: &Kernel, values: &[Node]) -> Result<Node> {
             let (Node::Bag(mut bag), Node::Array(keys)) = (values[0].clone(), &values[1]) else {
                 return Ok(Node::Null);
             };
-            for key in keys {
+            'paths: for key in keys {
                 let key = string(key)?;
-                if key.starts_with('$') {
-                    return Err(error(
-                        "bag_remove_keys JSONPath updates are not implemented; use root keys",
-                    ));
+                let path = crate::json_path::property_keys(
+                    key,
+                    "bag_remove_keys",
+                    crate::ast::Span::default(),
+                )
+                .map_err(|cause| error(cause.to_string()))?;
+                let mut current = &mut bag;
+                for key in &path[..path.len() - 1] {
+                    let Some(Node::Bag(child)) = current.get_mut(key) else {
+                        continue 'paths;
+                    };
+                    current = child;
                 }
-                bag.remove(key);
+                current.remove(&path[path.len() - 1]);
             }
             Node::Bag(bag)
         }

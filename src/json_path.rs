@@ -7,14 +7,14 @@ pub(crate) enum Segment {
     Index(i64),
 }
 
-pub(crate) fn write_keys(text: &str, span: Span) -> Result<Vec<String>> {
+pub(crate) fn property_keys(text: &str, function: &str, span: Span) -> Result<Vec<String>> {
     if !text.starts_with('$') {
         return Ok(vec![text.to_owned()]);
     }
     let segments = parse(text, span)?;
     if segments.is_empty() {
         return Err(Error::unsupported(
-            "bag_set_key root JSONPath updates",
+            format!("{function} root JSONPaths"),
             span,
         ));
     }
@@ -22,7 +22,10 @@ pub(crate) fn write_keys(text: &str, span: Span) -> Result<Vec<String>> {
         .into_iter()
         .map(|segment| match segment {
             Segment::Key(key) => Ok(key),
-            Segment::Index(_) => Err(Error::unsupported("bag_set_key array indexing", span)),
+            Segment::Index(_) => Err(Error::unsupported(
+                format!("{function} array indexing"),
+                span,
+            )),
         })
         .collect()
 }

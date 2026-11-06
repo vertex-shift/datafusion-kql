@@ -414,7 +414,17 @@ and malformed paths fail explicitly. Paths may vary by row and are limited to
 budgets. Non-bag inputs return dynamic null.
 An existing non-bag intermediate parent currently errors rather than guessing
 whether Kusto replaces or retains it; that edge remains reference-conformance work.
-`bag_remove_keys` still supports root keys only.
+`bag_remove_keys` accepts root keys and nested JSONPath property keys, including
+quoted names. Missing properties and non-bag intermediate parents are unchanged;
+removing the last child retains its empty parent bag. Multiple removals are
+applied in list order without modifying the input. Rich scalar siblings retain
+their types. Non-bag inputs or non-array key lists return dynamic null.
+`bag_has_key` supports dotted and quoted JSONPath property keys and reports
+present null-valued properties as true. Plain root names, including literal dots
+and dollar-prefixed names, retain their literal-key semantics.
+Both functions accept row-varying paths, enforce the 64-segment path limit, and
+reject malformed paths, array indexing, wildcards, and recursive descent rather
+than silently treating them as missing keys.
 Scalar `range()` supports integers,
 reals, datetimes, and timespans and validates its collection budget before
 allocating integral/temporal sequences.

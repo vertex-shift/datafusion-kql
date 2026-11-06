@@ -204,6 +204,152 @@ async fn bags_pack_merge_query_and_remove_keys() {
 }
 
 #[tokio::test]
+async fn bag_remove_keys_jsonpaths_remove_nested_and_root_properties() {
+    check(
+        r#"datatable(input:dynamic)[
+            dynamic({'key1':123,'key2':{'prop1':'abc','prop2':'xyz'},'key3':[100,200]})]
+        | project result=tostring(bag_remove_keys(input,dynamic(['$.key2.prop1','key3'])))"#,
+        &[&[r#"{"key1":123,"key2":{"prop2":"xyz"}}"#]],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bag_remove_keys_jsonpaths_preserve_parents_and_ignore_missing_properties() {
+    check(
+        r#"datatable(b:dynamic,keys:dynamic)[
+            dynamic({'a':{'b':1}}),dynamic(['$.a.b','$.missing.b']),
+            dynamic({'a':1}),dynamic(['$.a.b']),
+            dynamic({'a':null}),dynamic(['$.a.b']),
+            dynamic({'a':[1]}),dynamic(['$.a.b']),
+            dynamic({'a':{'b':1},'keep':2}),dynamic(['a','$.a.b','a']),
+            dynamic({'a':{'b':1},'keep':2}),dynamic(['$.a.b','a']),
+            dynamic({'a.b':1,'a':{'b':2}}),dynamic(['a.b']),
+            dynamic({'a.b':{'spaced key':1,'keep':2}}),dynamic(["$['a.b']['spaced key']"]),
+            dynamic({'a':1}),dynamic([])]
+        | project result=tostring(bag_remove_keys(b,keys))"#,
+        &[
+            &[r#"{"a":{}}"#],
+            &[r#"{"a":1}"#],
+            &[r#"{"a":null}"#],
+            &[r#"{"a":[1]}"#],
+            &[r#"{"keep":2}"#],
+            &[r#"{"keep":2}"#],
+            &[r#"{"a":{"b":2}}"#],
+            &[r#"{"a.b":{"keep":2}}"#],
+            &[r#"{"a":1}"#],
+        ],
+    )
+    .await;
+    check(
+        "datatable(b:dynamic,keys:dynamic)[dynamic(null),dynamic(['a']),\
+         dynamic([]),dynamic(['a']),dynamic({}),dynamic(null),dynamic({}),dynamic(1)] \
+         | project result=gettype(bag_remove_keys(b,keys))",
+        &[&["null"], &["null"], &["null"], &["null"]],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bag_has_key_jsonpaths_understand_quoted_property_names_and_nulls() {
+    check(
+        r#"let b=dynamic({'a.b':{'spaced key':null},'a':{'b':1}});
+        print quoted=bag_has_key(b,"$['a.b']['spaced key']"),
+              mixed=bag_has_key(b,"$.a['b']"),
+              literal=bag_has_key(b,'a.b'),
+              missing=bag_has_key(b,"$['a.b']['missing']")"#,
+        &[&["true", "true", "true", "false"]],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bag_has_key_jsonpaths_support_row_varying_paths_and_missing_parents() {
+    check(
+        r#"datatable(b:dynamic,path:string)[
+            dynamic({'a':{'b':null}}),'$.a.b',
+            dynamic({'a':{'b':[]}}),'$.a.b',
+            dynamic({'a':1}),'$.a.b',
+            dynamic({'a':null}),'$.a.b',
+            dynamic(null),'$.a.b',
+            dynamic([]),'$.a.b',
+            dynamic({'':null}),'',
+            dynamic({'$literal':1}),'$literal']
+        | project result=bag_has_key(b,path)"#,
+        &[
+            &["true"],
+            &["true"],
+            &["false"],
+            &["false"],
+            &["false"],
+            &["false"],
+            &["true"],
+            &["true"],
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bag_property_jsonpaths_fail_explicitly_for_invalid_paths() {
+    let ctx = SessionContext::new();
+    for path in ["$.a[0]", "$.a[-1]", "$..a", "$.*", "$.a[", "$['bad'"] {
+        let literal = serde_json::to_string(path).unwrap();
+        for query in [
+            format!("print b=bag_remove_keys(dynamic({{}}),pack_array({literal}))"),
+            format!("print found=bag_has_key(dynamic({{}}),{literal})"),
+        ] {
+            let error = match ctx.kql(&query).await {
+                Ok(frame) => frame.collect().await.unwrap_err().to_string(),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains("JSONPath") || error.contains("array indexing"),
+                "{query}: {error}"
+            );
+        }
+    }
+    for query in [
+        "print b=bag_remove_keys(dynamic({}),dynamic(['$']))",
+        "print b=bag_remove_keys(dynamic({}),dynamic([1]))",
+        "datatable(path:string)['$.a','$.a[0]'] | project b=bag_remove_keys(dynamic({}),pack_array(path))",
+        "datatable(path:string)['$.a','$.a[0]'] | project found=bag_has_key(dynamic({}),path)",
+    ] {
+        match ctx.kql(query).await {
+            Ok(frame) => assert!(frame.collect().await.is_err(), "{query}"),
+            Err(_) => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn bag_property_jsonpaths_enforce_the_exact_path_depth_boundary() {
+    let path = format!("${}", ".a".repeat(64));
+    let parent = format!("${}", ".a".repeat(63));
+    check(
+        &format!(
+            "let path='{path}'; let b=bag_set_key(dynamic({{}}),path,1); \
+             print original=bag_has_key(b,path),\
+               removed=bag_has_key(bag_remove_keys(b,pack_array(path)),path),\
+               parent=bag_has_key(bag_remove_keys(b,pack_array(path)),'{parent}')"
+        ),
+        &[&["true", "false", "true"]],
+    )
+    .await;
+    let ctx = SessionContext::new();
+    for query in [
+        format!("print b=bag_remove_keys(dynamic({{}}),dynamic(['{path}.a']))"),
+        format!("print found=bag_has_key(dynamic({{}}),'{path}.a')"),
+    ] {
+        let error = match ctx.kql(&query).await {
+            Ok(frame) => frame.collect().await.unwrap_err().to_string(),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("JSONPath nesting limit"), "{error}");
+    }
+}
+
+#[tokio::test]
 async fn bag_set_key_updates_nested_properties_and_creates_missing_parents() {
     check(
         r#"datatable(input:dynamic)[
