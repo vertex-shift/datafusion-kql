@@ -1506,15 +1506,18 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
         K::BagHasKey => {
             let value = values[0].json()?;
             let key = text(values[1]).ok_or_else(|| failure("bag_has_key expects a string key"))?;
-            let Some(key) = key.strip_prefix("$.") else {
+            if !key.starts_with("$.") && !key.starts_with("$[") {
                 return Ok(value
                     .as_object()
                     .is_some_and(|bag| bag.contains_key(key))
                     .into());
-            };
+            }
+            let keys =
+                crate::json_path::property_keys(key, "bag_has_key", crate::ast::Span::default())
+                    .map_err(|cause| failure(cause.to_string()))?;
             let mut at = &value;
             let mut found = true;
-            for key in key.split('.') {
+            for key in &keys {
                 if let Some(value) = at.as_object().and_then(|v| v.get(key)) {
                     at = value;
                 } else {
@@ -1534,7 +1537,7 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
             }
             Json::Object(result)
         }
-        K::BagSetKey => crate::dynamic_nested::evaluate(
+        K::BagSetKey | K::BagRemoveKeys => crate::dynamic_nested::evaluate(
             kernel,
             &values
                 .iter()
@@ -1542,26 +1545,6 @@ fn evaluate(kernel: &Kernel, values: &[Value<'_>]) -> Result<Json> {
                 .collect::<Result<Vec<_>>>()?,
         )?
         .json()?,
-        K::BagRemoveKeys => {
-            let Some(mut bag) = json_bag(values[0])? else {
-                return Ok(Json::Null);
-            };
-            let Some(keys) = json_array(values[1])? else {
-                return Ok(Json::Null);
-            };
-            for key in keys {
-                let key = key
-                    .as_str()
-                    .ok_or_else(|| failure("bag_remove_keys expects string keys"))?;
-                if key.starts_with('$') {
-                    return Err(failure(
-                        "bag_remove_keys JSONPath updates are not implemented; use root keys",
-                    ));
-                }
-                bag.remove(key);
-            }
-            Json::Object(bag)
-        }
         K::ArrayConcat | K::SetUnion | K::SetIntersect | K::SetDifference => {
             let mut inputs = Vec::with_capacity(values.len());
             for value in values {

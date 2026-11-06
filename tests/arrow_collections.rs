@@ -391,6 +391,48 @@ async fn native_maps_have_string_keys_and_support_bag_functions_and_expansion() 
         &[&["0","a","1"],&["0","b","2"],&["2","","<null>"]]).await;
 }
 
+#[tokio::test]
+async fn native_struct_bag_paths_preserve_rich_children_and_parent_nulls() {
+    let nested = Arc::new(StructArray::from(vec![
+        (
+            Arc::new(Field::new("remove.me", DataType::Int64, true)),
+            Arc::new(Int64Array::from(vec![Some(1), None, Some(3)])) as ArrayRef,
+        ),
+        (
+            Arc::new(Field::new(
+                "keep",
+                DataType::Duration(datafusion::arrow::datatypes::TimeUnit::Nanosecond),
+                true,
+            )),
+            Arc::new(DurationNanosecondArray::from(vec![1, 2, 3])) as ArrayRef,
+        ),
+    ])) as ArrayRef;
+    let outer = StructArray::try_new(
+        vec![Arc::new(Field::new(
+            "nested",
+            nested.data_type().clone(),
+            true,
+        ))]
+        .into(),
+        vec![nested],
+        Some(NullBuffer::from(vec![true, true, false])),
+    )
+    .unwrap();
+    check(
+        &context(Arc::new(outer)),
+        r#"T | extend removed=bag_remove_keys(v,dynamic(["$.nested['remove.me']"]))
+        | project before=bag_has_key(v,"$.nested['remove.me']"),
+                  after=bag_has_key(removed,"$.nested['remove.me']"),
+                  kind=gettype(removed.nested.keep),value=tolong(removed.nested.keep)"#,
+        &[
+            &["true", "false", "timespan", "1"],
+            &["true", "false", "timespan", "2"],
+            &["false", "false", "null", "<null>"],
+        ],
+    )
+    .await;
+}
+
 async fn failure(array: ArrayRef, needle: &str) {
     let ctx = context(array);
     let error = match ctx.kql("T | project v=todynamic(v)").await {

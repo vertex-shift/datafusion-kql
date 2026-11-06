@@ -141,6 +141,8 @@ Dynamic literals, JSON parsing, property/index access, bag/array/set functions,
 and `mv-expand` are supported with typed Arrow unions and native batch kernels.
 `bag_set_key` supports nested JSONPath property updates, creates missing parent
 bags, and preserves rich nested scalar types.
+`bag_remove_keys` and `bag_has_key` support nested JSONPath properties, including
+quoted names containing dots or spaces.
 Multiple expanded columns zip with null padding rather than forming an
 accidental Cartesian product.
 Native Arrow lists, list views, structs and string-keyed maps also work with
