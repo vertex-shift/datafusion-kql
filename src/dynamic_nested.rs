@@ -187,14 +187,27 @@ pub(crate) fn evaluate(kernel: &Kernel, values: &[Node]) -> Result<Node> {
                 return Ok(Node::Null);
             };
             let key = string(&values[1])?;
-            if key.starts_with('$') {
-                return Err(error(
-                    "bag_set_key JSONPath updates are not implemented; use a root key",
-                ));
+            let keys = crate::json_path::write_keys(key, crate::ast::Span::default())
+                .map_err(|cause| error(cause.to_string()))?;
+            let mut current = &mut bag;
+            for key in &keys[..keys.len() - 1] {
+                if !current.contains_key(key) {
+                    check_size(current.len() + 1)?;
+                }
+                let child = current
+                    .entry(key.clone())
+                    .or_insert_with(|| Node::Bag(BTreeMap::new()));
+                let Node::Bag(child) = child else {
+                    return Err(error(
+                        "bag_set_key JSONPath parent must be a property bag; non-bag parent updates are not supported",
+                    ));
+                };
+                current = child;
             }
-            bag.insert(key.into(), values[2].clone());
-            check_size(bag.len())?;
-            Node::Bag(bag)
+            current.insert(keys[keys.len() - 1].clone(), values[2].clone());
+            let result = Node::Bag(bag);
+            result.validate()?;
+            result
         }
         K::BagRemoveKeys => {
             let (Node::Bag(mut bag), Node::Array(keys)) = (values[0].clone(), &values[1]) else {
@@ -488,4 +501,49 @@ pub(crate) fn evaluate(kernel: &Kernel, values: &[Node]) -> Result<Node> {
         }
         _ => return Err(error("invalid typed dynamic kernel dispatch")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bag_set_key_checks_combined_depth_and_path_limits() {
+        let path = format!("${}", ".a".repeat(64));
+        for rich in [false, true] {
+            for depth in [64, 65] {
+                let mut value = if rich {
+                    Node::Timespan(1)
+                } else {
+                    Node::Long(1)
+                };
+                for _ in 0..depth {
+                    value = Node::Array(vec![value]);
+                }
+                let result = evaluate(
+                    &Kernel::BagSetKey,
+                    &[
+                        Node::Bag(BTreeMap::new()),
+                        Node::String(path.clone()),
+                        value,
+                    ],
+                );
+                if depth == 64 {
+                    assert!(result.is_ok(), "{result:?}");
+                } else {
+                    assert!(result.unwrap_err().to_string().contains("nesting"));
+                }
+            }
+        }
+        let error = evaluate(
+            &Kernel::BagSetKey,
+            &[
+                Node::Bag(BTreeMap::new()),
+                Node::String(format!("{path}.a")),
+                Node::Long(1),
+            ],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("JSONPath nesting limit"));
+    }
 }

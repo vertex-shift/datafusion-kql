@@ -65,6 +65,32 @@ async fn runtime_pack_array_bag_pack_and_pack_all_preserve_types() {
 }
 
 #[tokio::test]
+async fn bag_set_key_jsonpaths_preserve_existing_and_inserted_rich_types() {
+    check(
+        &format!(
+            "print b=bag_pack('keep',guid({GUID}),'nested',bag_pack('span',1h,'amount',guid({GUID}))) \
+             | extend b=bag_set_key(b,'$.nested.amount',decimal(2.5)) \
+             | extend b=bag_set_key(b,'$.created.at',datetime(2025-01-01)) \
+             | project a=gettype(b.keep),b=gettype(b.nested.span),\
+               c=gettype(b.nested.amount),d=tostring(b.nested.amount),\
+               e=gettype(b.created.at)"
+        ),
+        &[&["guid", "timespan", "decimal", "2.5", "datetime"]],
+    )
+    .await;
+    check(
+        "datatable(b:dynamic)[dynamic({}),dynamic({'a':{'keep':true}})] \
+         | extend b=bag_set_key(b,'$.a.value',1h) \
+         | project t=gettype(b.a.value),v=tostring(b.a.value),keep=tostring(b.a.keep)",
+        &[
+            &["timespan", "01:00:00", ""],
+            &["timespan", "01:00:00", "true"],
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn nested_access_does_not_confuse_user_json_with_internal_encodings() {
     check("print d=dynamic({'v':1,'root':0,'nodes':[[7,123]]}) | project a=gettype(d),b=gettype(d.nodes[0][0]),c=tolong(d.nodes[0][1])", &[&["dictionary","long","123"]]).await;
     check("print a=pack_array(bag_pack('t',datetime(2025-01-01)),dynamic({'t':'2025-01-01T00:00:00Z'})) | project a=gettype(a[0].t),b=gettype(a[1].t)", &[&["datetime","string"]]).await;

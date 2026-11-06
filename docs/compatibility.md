@@ -399,13 +399,23 @@ reference engine rejects decimal literals inside dynamic objects and rejects
 portable dynamic collections containing computed decimals.
 
 Functions: `array_length`, `pack_array`, `bag_pack`/`pack`/`pack_dictionary`,
-`bag_keys`, `bag_has_key`, `bag_merge` (leftmost wins), root-key `bag_set_key`
+`bag_keys`, `bag_has_key`, `bag_merge` (leftmost wins), `bag_set_key`
 and `bag_remove_keys`, `array_concat`, `array_slice` (inclusive end),
 `array_index_of`, `set_has_element`, `array_reverse`, `array_sum`, `set_union`,
 `set_intersect`, `set_difference`, `zip`, `repeat`, `range()`,
 `strcat_array`, and `split`. Array-producing builders and expansion reject
 collections exceeding 1,048,576 elements instead of allocating without a bound.
-JSONPath writes are not yet implemented. Scalar `range()` supports integers,
+`bag_set_key` accepts literal root keys or nested JSONPath property keys,
+including quoted keys. Missing intermediate bags are created. Existing sibling
+properties and nested scalar types are preserved. Plain keys containing dots remain literal
+root keys. Root-only JSONPaths, array indexing, wildcards, recursive descent,
+and malformed paths fail explicitly. Paths may vary by row and are limited to
+64 segments; updated values retain the dynamic nesting, node, and collection
+budgets. Non-bag inputs return dynamic null.
+An existing non-bag intermediate parent currently errors rather than guessing
+whether Kusto replaces or retains it; that edge remains reference-conformance work.
+`bag_remove_keys` still supports root keys only.
+Scalar `range()` supports integers,
 reals, datetimes, and timespans and validates its collection budget before
 allocating integral/temporal sequences.
 
